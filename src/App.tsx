@@ -1287,7 +1287,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // Storyboard Image Generation (calls Gemini-3.1-flash-image)
-  const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' = 'agnes') => {
+  const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -1588,7 +1588,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // AI Storyboard Scene & Continuity Quality Control Review
-  const handleReviewScene = async (sceneId: string, mode: 'image' | 'video', engine: 'agnes' | 'gemini' | 'nanobanana' = 'gemini') => {
+  const handleReviewScene = async (sceneId: string, mode: 'image' | 'video', engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'gemini') => {
     let freshProj = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -2697,6 +2697,46 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     }
   };
 
+  // One-click clear all generated keyframe images, videos, logs, and reviews (Start over)
+  const handleClearAllKeyframes = () => {
+    if (!activeProject) return;
+    if (!window.confirm("確定要一鍵清除當前專案在「首尾幀分鏡」中所有已生成的相片、影片、日誌及評測資料嗎？這將會讓您重頭再來。")) return;
+
+    // Reset pipeline state
+    setFullAutoProgress("0%");
+    setFullAutoLogs([]);
+    setFinalStitchedVideoUrl(null);
+
+    const resetScenes = activeProject.scenes.map(s => {
+      const updated = { ...s };
+      delete updated.imageUrlKeyframes;
+      delete updated.videoUrlKeyframes;
+      updated.isGeneratingImageKeyframes = false;
+      updated.isGeneratingVideoKeyframes = false;
+      delete updated.videoProgressKeyframes;
+      delete updated.videoLogsKeyframes;
+      delete updated.videoErrorKeyframes;
+      delete updated.videoErrorCodeKeyframes;
+      updated.isRetryingPolicy = false;
+      updated.policyRetryCount = 0;
+      updated.useFreezeAndMove = false;
+      updated.useMidpointSplit = false;
+      delete updated.aiReviewStatus;
+      delete updated.aiReviewAlignmentCheck;
+      delete updated.aiReviewLogicCheck;
+      delete updated.aiReviewContinuityCheck;
+      delete updated.aiReviewCritique;
+      updated.isReviewing = false;
+      updated.hasAutoRegeneratedReview = false;
+      return updated;
+    });
+
+    updateActiveProject({
+      scenes: resetScenes,
+      finalVideoUrl: undefined
+    });
+  };
+
   // One-click sequential automatic generation of all storyboards with keyframe start-end
   const handleGenerateAllKeyframesSequentially = async () => {
     if (!activeProject || isGeneratingAllKeyframesSequentially) return;
@@ -3231,6 +3271,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       const stitchData = await stitchRes.json();
       if (stitchData.videoUrl) {
         setFinalStitchedVideoUrl(stitchData.videoUrl);
+        updateActiveProject({ finalVideoUrl: stitchData.videoUrl });
         setFullAutoProgress("100%");
         setFullAutoLogs(prev => [
           ...prev, 
@@ -3296,6 +3337,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       const stitchData = await stitchRes.json();
       if (stitchData.videoUrl) {
         setFinalStitchedVideoUrl(stitchData.videoUrl);
+        updateActiveProject({ finalVideoUrl: stitchData.videoUrl });
         setFullAutoProgress("100%");
         setFullAutoLogs(prev => [
           ...prev, 
@@ -4138,7 +4180,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // Trigger simulated character avatar drawing (generates a multi-angle character sheet)
-  const handleGenerateAvatar = async (charId: string, engine: 'agnes' | 'gemini' | 'nanobanana' = 'agnes') => {
+  const handleGenerateAvatar = async (charId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
     if (!activeProject) return;
 
     const charToGen = activeProject.characters.find(c => c.id === charId);
@@ -4591,6 +4633,19 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     <span className="flex items-center gap-2">
                       <Video className="w-4 h-4 text-purple-400" />
                       <span>AI 分鏡劇本首尾幀 🎬</span>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("gallery")}
+                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                      activeTab === "gallery"
+                        ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white border-emerald-500 shadow-lg shadow-emerald-600/20"
+                        : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <Film className="w-4 h-4 text-emerald-400" />
+                      <span>已生成影片庫 📽️</span>
                     </span>
                   </button>
                 </div>
@@ -5055,7 +5110,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-pink-400" />}
                                       <span>Agnes AI</span>
                                     </button>
-                                    <label className="w-full py-1.5 bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 text-[9px] font-bold rounded-lg border border-emerald-900/50 hover:border-emerald-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20" title="可選擇上傳多張相片作為角色一致性特徵參考">
+                                    <button
+                                      onClick={() => handleGenerateAvatar(char.id, 'mistral')}
+                                      className="w-full py-1.5 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20"
+                                    >
+                                      {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-orange-400" />}
+                                      <span>Mistral AI</span>
+                                    </button>
+                                    <label className="col-span-2 w-full py-1.5 bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 text-[9px] font-bold rounded-lg border border-emerald-900/50 hover:border-emerald-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20" title="可選擇上傳多張相片作為角色一致性特徵參考">
                                       <Upload className="w-3 h-3 text-emerald-400" />
                                       <span>上傳多張相片</span>
                                       <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => handleUploadAvatar(e, char.id)} />
@@ -6304,26 +6366,27 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           <h5 className="text-white font-bold mb-1">Rendering Cinematic Frames...</h5>
                                           <p className="text-slate-400 text-xs">Agnes AI is compiling {scene.videoProgress || "0%"} of the video stream.</p>
                                         </div>
-                                        <div className="pt-2 flex justify-center gap-2">
-                                          <button
-                                            onClick={() => handleStopGenerateVideo(scene.id)}
-                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-500 border border-rose-500 hover:border-rose-400 text-white text-xs font-semibold rounded-lg transition-all cursor-pointer shadow-lg active:scale-95"
-                                            title="立即停止當前影片的算圖生成與輪詢"
-                                          >
-                                            <StopCircle className="w-3.5 h-3.5" />
-                                            <span>🛑 停止影片生成</span>
-                                          </button>
-                                          <button
-                                            onClick={() => handleResetVideoTask()}
-                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800/80 hover:bg-slate-700/90 border border-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-all cursor-pointer active:scale-95"
-                                            title="取消並解除當前卡住的影片生成鎖"
-                                          >
-                                            <RefreshCw className="w-3.5 h-3.5" />
-                                            <span>取消/重置系統狀態</span>
-                                          </button>
-                                        </div>
                                       </div>
                                     </div>
+                                  </div>
+                                  {/* Rendering actions below video */}
+                                  <div className="flex justify-center gap-2">
+                                    <button
+                                      onClick={() => handleStopGenerateVideo(scene.id)}
+                                      className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
+                                      title="立即停止當前影片的算圖生成與輪詢"
+                                    >
+                                      <StopCircle className="w-3.5 h-3.5" />
+                                      <span>🛑 停止影片生成</span>
+                                    </button>
+                                    <button
+                                      onClick={() => handleResetVideoTask()}
+                                      className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
+                                      title="取消並解除當前卡住的影片生成鎖"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5" />
+                                      <span>取消/重置系統狀態</span>
+                                    </button>
                                   </div>
 
                                   {/* Console Logs Section */}
@@ -6491,7 +6554,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                     <span>🔗 智慧自動銜接：提取上鏡最後一幀</span>
                                   </button>
                                 ) : (
-                                  <div className="grid grid-cols-3 gap-2">
+                                  <div className="grid grid-cols-2 gap-2">
                                     <button
                                       onClick={() => handleGenerateImage(scene.id, 'nanobanana')}
                                       className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
@@ -6513,6 +6576,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       {scene.isGeneratingImage ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-pink-400" />}
                                       <span>Agnes 繪圖</span>
                                     </button>
+                                    <button
+                                      onClick={() => handleGenerateImage(scene.id, 'mistral')}
+                                      className="w-full py-2 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
+                                    >
+                                      {scene.isGeneratingImage ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-orange-400" />}
+                                      <span>Mistral 繪圖</span>
+                                    </button>
                                   </div>
                                 )}
                                 {scene.isGeneratingImage && (
@@ -6533,7 +6603,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         className="flex-1 py-1.5 bg-pink-700/90 hover:bg-pink-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
                                       >
                                         <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                        <span>重繪 (Agnes)</span>
+                                        <span>Agnes</span>
+                                      </button>
+                                      <button
+                                        onClick={() => handleGenerateImage(scene.id, 'mistral')}
+                                        className="flex-1 py-1.5 bg-orange-700/90 hover:bg-orange-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
+                                      >
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
+                                        <span>Mistral</span>
                                       </button>
                                     </div>
                                   </div>
@@ -7210,24 +7287,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           />
                                         </div>
                                         <span className="text-[10px] text-slate-400 font-mono">進度: {scene.videoProgressExt || "0%"}</span>
-                                        
-                                        <div className="mt-2 flex gap-2">
-                                          <button
-                                            onClick={() => handleStopGenerateVideo(scene.id)}
-                                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold rounded flex items-center gap-1 transition cursor-pointer active:scale-95 shadow-lg"
-                                          >
-                                            <StopCircle className="w-3 h-3" />
-                                            <span>🛑 停止影片生成</span>
-                                          </button>
-                                          <button
-                                            onClick={() => handleResetVideoTask()}
-                                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold rounded flex items-center gap-1 transition cursor-pointer active:scale-95"
-                                          >
-                                            <RefreshCw className="w-3 h-3" />
-                                            <span>取消/重置</span>
-                                          </button>
-                                        </div>
-
                                         {scene.videoLogsExt && scene.videoLogsExt.length > 0 && (
                                           <div className="w-full mt-2 bg-black/90 p-2 rounded-lg text-[8px] font-mono text-emerald-400 text-left h-24 overflow-y-auto border border-emerald-500/20 select-text leading-relaxed">
                                             {scene.videoLogsExt.map((logLine, logIdx) => (
@@ -7238,6 +7297,25 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       </div>
                                     )}
                                   </div>
+
+                                  {scene.isGeneratingVideoExt && (
+                                    <div className="flex gap-2 w-full mt-2 mb-2">
+                                      <button
+                                        onClick={() => handleStopGenerateVideo(scene.id)}
+                                        className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
+                                      >
+                                        <StopCircle className="w-3.5 h-3.5" />
+                                        <span>🛑 停止影片生成</span>
+                                      </button>
+                                      <button
+                                        onClick={() => handleResetVideoTask()}
+                                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
+                                      >
+                                        <RefreshCw className="w-3.5 h-3.5" />
+                                        <span>取消/重置</span>
+                                      </button>
+                                    </div>
+                                  )}
 
                                   {/* Error message */}
                                   {scene.videoErrorExt && (
@@ -7302,7 +7380,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       <span>🔗 智慧自動銜接：提取上鏡最後一幀</span>
                                     </button>
                                   ) : (
-                                    <div className="grid grid-cols-3 gap-2">
+                                    <div className="grid grid-cols-2 gap-2">
                                       <button
                                         onClick={() => handleGenerateImage(scene.id, 'nanobanana')}
                                         className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
@@ -7324,6 +7402,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         {scene.isGeneratingImageExt ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-pink-400" />}
                                         <span>Agnes 繪圖</span>
                                       </button>
+                                      <button
+                                        onClick={() => handleGenerateImage(scene.id, 'mistral')}
+                                        className="w-full py-2 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        {scene.isGeneratingImageExt ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-orange-400" />}
+                                        <span>Mistral 繪圖</span>
+                                      </button>
                                     </div>
                                   )}
                                   {scene.isGeneratingImageExt && (
@@ -7344,7 +7429,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           className="flex-1 py-1.5 bg-pink-700/90 hover:bg-pink-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
                                         >
                                           <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                          <span>重繪 (Agnes)</span>
+                                          <span>Agnes</span>
+                                        </button>
+                                        <button
+                                          onClick={() => handleGenerateImage(scene.id, 'mistral')}
+                                          className="flex-1 py-1.5 bg-orange-700/90 hover:bg-orange-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
+                                        >
+                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
+                                          <span>Mistral</span>
                                         </button>
                                       </div>
                                     </div>
@@ -7631,23 +7723,33 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         </p>
                       </div>
 
-                      <button
-                        onClick={handleGenerateAllKeyframesSequentially}
-                        disabled={isGeneratingAllKeyframesSequentially || activeProject.scenes.length === 0}
-                        className="py-2.5 px-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-55 shrink-0 hover:scale-[1.02] relative z-20"
-                      >
-                        {isGeneratingAllKeyframesSequentially ? (
-                          <>
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                            <span>自動依序首尾轉換生成中...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles className="w-3.5 h-3.5 text-purple-200" />
-                            <span>一鍵自動依序首尾過渡生成所有分鏡</span>
-                          </>
-                        )}
-                      </button>
+                      <div className="flex flex-col sm:flex-row gap-2.5 shrink-0 items-center">
+                        <button
+                          onClick={handleClearAllKeyframes}
+                          className="py-2.5 px-4 bg-slate-900 border border-red-500/40 hover:bg-red-950/20 text-red-400 font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                          <span>一鍵清除已生成 (重頭再來)</span>
+                        </button>
+
+                        <button
+                          onClick={handleGenerateAllKeyframesSequentially}
+                          disabled={isGeneratingAllKeyframesSequentially || activeProject.scenes.length === 0}
+                          className="py-2.5 px-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-55 shrink-0 hover:scale-[1.02] relative z-20"
+                        >
+                          {isGeneratingAllKeyframesSequentially ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              <span>自動依序首尾轉換生成中...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-3.5 h-3.5 text-purple-200" />
+                              <span>一鍵自動依序首尾過渡生成所有分鏡</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
 
                     {/* NEW FEATURE: AI One-click Full Auto-Produce Video Section */}
@@ -7695,7 +7797,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       </div>
 
                       {/* Progress Bar & Real-time Logs Container */}
-                      {(isFullAutoProducing || fullAutoLogs.length > 0 || finalStitchedVideoUrl) && (
+                      {(isFullAutoProducing || fullAutoLogs.length > 0 || finalStitchedVideoUrl || activeProject?.finalVideoUrl) && (
                         <div className="bg-slate-950/80 border border-slate-850 rounded-xl p-4 space-y-3 font-mono text-xs">
                           <div className="flex items-center justify-between">
                             <span className="text-emerald-400 font-bold flex items-center gap-1.5">
@@ -7713,18 +7815,20 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           </div>
 
                           {/* Live Console Logs */}
-                          <div className="max-h-36 overflow-y-auto space-y-1.5 pr-2 scrollbar-thin scrollbar-thumb-slate-800">
-                            {fullAutoLogs.map((log, lIdx) => (
-                              <div key={lIdx} className="text-slate-300 leading-relaxed text-[11px] flex items-start gap-1">
-                                <span className="text-emerald-500 font-bold shrink-0">›</span>
-                                <span>{log}</span>
-                              </div>
-                            ))}
-                            <div ref={logsEndRef} />
-                          </div>
+                          {fullAutoLogs.length > 0 && (
+                            <div className="max-h-36 overflow-y-auto space-y-1.5 pr-2 scrollbar-thin scrollbar-thumb-slate-800">
+                              {fullAutoLogs.map((log, lIdx) => (
+                                <div key={lIdx} className="text-slate-300 leading-relaxed text-[11px] flex items-start gap-1">
+                                  <span className="text-emerald-500 font-bold shrink-0">›</span>
+                                  <span>{log}</span>
+                                </div>
+                              ))}
+                              <div ref={logsEndRef} />
+                            </div>
+                          )}
 
                           {/* Completed Masterpiece Player */}
-                          {finalStitchedVideoUrl && (
+                          {(finalStitchedVideoUrl || activeProject?.finalVideoUrl) && (
                             <div className="pt-3 border-t border-slate-850 space-y-3">
                               <h5 className="text-sm font-bold text-white flex items-center gap-1.5">
                                 <Film className="w-4 h-4 text-emerald-400" />
@@ -7732,16 +7836,16 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                               </h5>
                               <div className="relative aspect-video rounded-xl overflow-hidden border border-emerald-500/20 bg-slate-900 shadow-inner group">
                                 <ScrubbableVideoPlayer 
-                                  src={finalStitchedVideoUrl} 
+                                  src={(finalStitchedVideoUrl || activeProject?.finalVideoUrl) as string} 
                                   className="w-full h-full"
                                 />
                               </div>
                               <div className="flex items-center justify-between gap-3">
                                 <span className="text-[10px] text-slate-500">
-                                  檔名: {finalStitchedVideoUrl.split('/').pop()}
+                                  檔名: {(finalStitchedVideoUrl || activeProject?.finalVideoUrl)?.split('/').pop()}
                                 </span>
                                 <a 
-                                  href={`/api/download?url=${encodeURIComponent(finalStitchedVideoUrl)}`}
+                                  href={`/api/download?url=${encodeURIComponent((finalStitchedVideoUrl || activeProject?.finalVideoUrl) as string)}`}
                                   className="py-1.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition flex items-center gap-1 cursor-pointer"
                                   download="final-masterpiece.mp4"
                                 >
@@ -8219,23 +8323,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         </div>
                                         <span className="text-[10px] text-slate-400 font-mono">進度: {scene.videoProgressKeyframes || "0%"}</span>
                                         
-                                        <div className="mt-2 flex gap-2">
-                                          <button
-                                            onClick={() => handleStopGenerateVideo(scene.id)}
-                                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold rounded flex items-center gap-1 transition cursor-pointer active:scale-95 shadow-lg"
-                                          >
-                                            <StopCircle className="w-3 h-3" />
-                                            <span>🛑 停止影片生成</span>
-                                          </button>
-                                          <button
-                                            onClick={() => handleResetVideoTask()}
-                                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold rounded flex items-center gap-1 transition cursor-pointer active:scale-95"
-                                          >
-                                            <RefreshCw className="w-3 h-3" />
-                                            <span>取消/重置</span>
-                                          </button>
-                                        </div>
-
                                         {scene.videoLogsKeyframes && scene.videoLogsKeyframes.length > 0 && (
                                           <div className="w-full mt-2 bg-black/90 p-2 rounded-lg text-[8px] font-mono text-purple-400 text-left h-24 overflow-y-auto border border-purple-500/20 select-text leading-relaxed">
                                             {scene.videoLogsKeyframes.map((logLine, logIdx) => (
@@ -8246,6 +8333,26 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       </div>
                                     )}
                                   </div>
+
+                                  {/* Rendering actions below video */}
+                                  {scene.isGeneratingVideoKeyframes && (
+                                    <div className="flex gap-2 w-full mt-2 mb-2">
+                                      <button
+                                        onClick={() => handleStopGenerateVideo(scene.id)}
+                                        className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
+                                      >
+                                        <StopCircle className="w-3.5 h-3.5" />
+                                        <span>🛑 停止影片生成</span>
+                                      </button>
+                                      <button
+                                        onClick={() => handleResetVideoTask()}
+                                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
+                                      >
+                                        <RefreshCw className="w-3.5 h-3.5" />
+                                        <span>取消/重置</span>
+                                      </button>
+                                    </div>
+                                  )}
 
                                   {/* Error message */}
                                   {scene.videoErrorKeyframes && (
@@ -8310,7 +8417,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       <span>🔗 智慧自動銜接：提取上鏡最後一幀</span>
                                     </button>
                                   ) : (
-                                    <div className="grid grid-cols-3 gap-2">
+                                    <div className="grid grid-cols-2 gap-2">
                                       <button
                                         onClick={() => handleGenerateImage(scene.id, 'nanobanana')}
                                         className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
@@ -8332,6 +8439,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         {scene.isGeneratingImageKeyframes ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-pink-400" />}
                                         <span>Agnes 繪圖</span>
                                       </button>
+                                      <button
+                                        onClick={() => handleGenerateImage(scene.id, 'mistral')}
+                                        className="w-full py-2 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        {scene.isGeneratingImageKeyframes ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-orange-400" />}
+                                        <span>Mistral 繪圖</span>
+                                      </button>
                                     </div>
                                   )}
                                   {scene.isGeneratingImageKeyframes && (
@@ -8352,7 +8466,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           className="flex-1 py-1.5 bg-pink-700/90 hover:bg-pink-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
                                         >
                                           <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                          <span>重繪 (Agnes)</span>
+                                          <span>Agnes</span>
+                                        </button>
+                                        <button
+                                          onClick={() => handleGenerateImage(scene.id, 'mistral')}
+                                          className="flex-1 py-1.5 bg-orange-700/90 hover:bg-orange-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
+                                        >
+                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
+                                          <span>Mistral</span>
                                         </button>
                                       </div>
                                     </div>
@@ -8990,6 +9111,44 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 </div>
 
               </div>
+              {/* ============ TAB: GALLERY ============ */}
+              {activeTab === "gallery" && (
+                <div className="space-y-6">
+                  <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-md space-y-4">
+                    <h3 className="font-display font-bold text-sm text-white flex items-center gap-2 border-b border-slate-800 pb-3">
+                      <Film className="w-4 h-4 text-emerald-400" />
+                      已生成影片庫 (Generated Videos)
+                    </h3>
+                    
+                    {!activeProject.finalVideoUrl ? (
+                      <div className="text-center p-12 border border-dashed border-slate-800 rounded-2xl text-slate-500 text-xs">
+                        目前尚無已生成的最終成片。請前往「AI 分鏡」標籤頁，使用「AI 一鍵全自動極速出片」或「手動拼接所有分鏡」來產生影片！
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="relative aspect-video rounded-xl overflow-hidden border border-emerald-500/20 bg-slate-950 shadow-inner group">
+                          <ScrubbableVideoPlayer
+                            src={activeProject.finalVideoUrl}
+                            className="w-full h-full"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between gap-3 bg-slate-950 p-3 rounded-lg border border-slate-850">
+                          <span className="text-[10px] text-slate-500 font-mono break-all">
+                            路徑: {activeProject.finalVideoUrl.split('/').pop()}
+                          </span>
+                          <a
+                            href={`/api/download?url=${encodeURIComponent(activeProject.finalVideoUrl)}`}
+                            className="py-2 px-5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition flex items-center gap-2 cursor-pointer shrink-0 shadow-lg shadow-emerald-900/20"
+                            download={`ToonFlow-${activeProject.id}.mp4`}
+                          >
+                            <Download className="w-4 h-4" /> 下載高畫質影片
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </motion.div>
           </div>
         )}

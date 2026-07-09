@@ -90,6 +90,7 @@ export interface Project {
   cameraMotion: string;
   agnesVideoMode?: "fast" | "balanced" | "quality";
   agnesImageMode?: "fast" | "balanced" | "quality";
+  finalVideoUrl?: string;
 }
 
 export interface TaskState {

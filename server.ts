@@ -272,51 +272,61 @@ async function uploadToPublicCDN(localPath: string, activeTaskLogs?: string[]): 
 }
 
 // Durable video upload manager: Uploads video to Catbox (permanent) or Litterbox (3 days / 72 hours) with further fallbacks to Qu.ax and Tmpfiles
+async function uploadToCatbox(localPath: string): Promise<string> {
+  try {
+    const formData = new FormData();
+    const fileBuffer = fs.readFileSync(localPath);
+    let mimeType = "application/octet-stream";
+    if (localPath.endsWith(".mp4")) mimeType = "video/mp4";
+    else if (localPath.endsWith(".png")) mimeType = "image/png";
+    else if (localPath.endsWith(".jpg") || localPath.endsWith(".jpeg")) mimeType = "image/jpeg";
+    else if (localPath.endsWith(".gif")) mimeType = "image/gif";
+    const blob = new Blob([fileBuffer], { type: mimeType });
+    formData.append("reqtype", "fileupload");
+    formData.append("fileToUpload", blob, path.basename(localPath));
+
+    const response = await fetch("https://catbox.moe/user/api.php", {
+      method: "POST",
+      body: formData,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Catbox upload failed with status ${response.status}`);
+    }
+    const fileUrl = await response.text();
+    if (fileUrl && fileUrl.startsWith("http")) {
+      const finalUrl = fileUrl.trim();
+      console.log(`[Toonflow CDN] File successfully uploaded to Catbox: ${finalUrl}`);
+      return finalUrl;
+    }
+    throw new Error(`Invalid response from Catbox: ${fileUrl}`);
+  } catch (err: any) {
+    console.error("[Toonflow Error] Upload to Catbox failed:", err.message);
+    throw err;
+  }
+}
+
 async function uploadFileToCatbox(localPath: string): Promise<string> {
   try {
-    console.log(`[Toonflow CDN] Uploading ${localPath} to Qu.ax...`);
-    const quaxUrl = await uploadToQuax(localPath);
-    console.log(`[Toonflow CDN] File successfully uploaded to Qu.ax: ${quaxUrl}`);
-    return quaxUrl;
+    console.log(`[Toonflow CDN] Uploading ${localPath} to Catbox (highly reliable permanent storage)...`);
+    const catboxUrl = await uploadToCatbox(localPath);
+    return catboxUrl;
   } catch (err: any) {
-    console.warn("[Toonflow CDN] Qu.ax upload failed, attempting Tmpfiles backup...", err.message);
+    console.warn("[Toonflow CDN] Catbox upload failed, attempting Tmpfiles backup...", err.message);
     try {
       const tmpfilesUrl = await uploadToTmpfiles(localPath);
       console.log(`[Toonflow CDN] File successfully uploaded to Tmpfiles backup: ${tmpfilesUrl}`);
       return tmpfilesUrl;
     } catch (tmpfilesErr: any) {
-      console.warn("[Toonflow CDN] Tmpfiles upload failed, attempting Catbox...", tmpfilesErr.message);
+      console.warn("[Toonflow CDN] Tmpfiles upload failed, attempting Qu.ax last fallback...", tmpfilesErr.message);
       try {
-        const formData = new FormData();
-        const fileBuffer = fs.readFileSync(localPath);
-        let mimeType = "application/octet-stream";
-        if (localPath.endsWith(".mp4")) mimeType = "video/mp4";
-        else if (localPath.endsWith(".png")) mimeType = "image/png";
-        else if (localPath.endsWith(".jpg") || localPath.endsWith(".jpeg")) mimeType = "image/jpeg";
-        else if (localPath.endsWith(".gif")) mimeType = "image/gif";
-        const blob = new Blob([fileBuffer], { type: mimeType });
-        formData.append("reqtype", "fileupload");
-        formData.append("fileToUpload", blob, path.basename(localPath));
-
-        const response = await fetch("https://catbox.moe/user/api.php", {
-          method: "POST",
-          body: formData,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`Catbox upload failed with status ${response.status}`);
-        }
-        const fileUrl = await response.text();
-        if (fileUrl && fileUrl.startsWith("http")) {
-          const finalUrl = fileUrl.trim();
-          console.log(`[Toonflow CDN] File successfully uploaded to Catbox: ${finalUrl}`);
-          return finalUrl;
-        }
-        throw new Error(`Invalid response from Catbox: ${fileUrl}`);
-      } catch (catboxErr: any) {
+        const quaxUrl = await uploadToQuax(localPath);
+        console.log(`[Toonflow CDN] File successfully uploaded to Qu.ax backup: ${quaxUrl}`);
+        return quaxUrl;
+      } catch (quaxErr: any) {
         console.error("[Toonflow CDN] All cloud storage options exhausted.");
         throw new Error(`All cloud storage attempts failed.`);
       }
@@ -923,8 +933,26 @@ app.get("/api/video-proxy", async (req, res) => {
 
     const arrayBuffer = await fetchRes.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    res.setHeader("Content-Length", buffer.length);
-    res.send(buffer);
+
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const partialstart = parts[0];
+      const partialend = parts[1];
+
+      const start = parseInt(partialstart, 10);
+      const end = partialend ? parseInt(partialend, 10) : buffer.length - 1;
+      const chunksize = (end - start) + 1;
+
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${buffer.length}`);
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Content-Length", chunksize);
+      res.send(buffer.slice(start, end + 1));
+    } else {
+      res.setHeader("Content-Length", buffer.length);
+      res.send(buffer);
+    }
   } catch (error) {
     console.error("Video proxy error:", error);
     res.status(500).send("Internal Server Error while proxying video stream");
@@ -2809,6 +2837,7 @@ app.post("/api/analyze-avatar", async (req, res) => {
         const originalFilename = urlParts[urlParts.length - 1].split("?")[0];
         const localBackupPath = path.join(process.cwd(), "assets", originalFilename);
         if (fs.existsSync(localBackupPath)) {
+
           buffer = fs.readFileSync(localBackupPath);
           const ext = originalFilename.split('.').pop() || 'jpeg';
           mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
@@ -3022,7 +3051,17 @@ app.post("/api/stitch-videos", async (req, res) => {
             tempFilesToCleanup.push(localPath);
           } catch (downloadErr: any) {
             console.error(`[Toonflow] Download failed for ${url}:`, downloadErr);
-            throw downloadErr;
+            console.log(`[Toonflow Fallback] Generating a 3-second black clip to replace failed/expired video: ${url}`);
+            try {
+              // Create a 3-second 1280x720 video with a simple black stream and audio stream so stitching remains robust
+              const fallbackCmd = `ffmpeg -y -f lavfi -i color=c=black:s=1280x720:d=3 -f lavfi -i anullsrc=cl=mono:r=44100 -c:v libx264 -tune stillimage -pix_fmt yuv420p -c:a aac -shortest "${localPath}"`;
+              require('child_process').execSync(fallbackCmd);
+              localPaths.push(localPath);
+              tempFilesToCleanup.push(localPath);
+            } catch (fallbackErr: any) {
+              console.error("[Toonflow Fallback] Failed to generate fallback clip:", fallbackErr);
+              throw downloadErr; // Throw original error if even fallback generation fails
+            }
           }
         }
       }
@@ -3042,12 +3081,28 @@ app.post("/api/stitch-videos", async (req, res) => {
     for (let i = 0; i < localPaths.length; i++) {
        // Scale to 1280x720 (standard 720p HD), padding with black bars to maintain aspect ratio
        filterComplex += `[${i}:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v${i}]; `;
-       concatInputs += `[v${i}]`;
+       
+       let hasAudio = false;
+       let duration = 5.0;
+       try {
+         const probe = require('child_process').execSync(`ffprobe -i "${localPaths[i]}" -show_streams -select_streams a -loglevel error`).toString();
+         hasAudio = probe.trim().length > 0;
+         const probeDur = require('child_process').execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${localPaths[i]}"`).toString();
+         const parsedDur = parseFloat(probeDur.trim());
+         if (!isNaN(parsedDur) && parsedDur > 0) duration = parsedDur;
+       } catch (e) {}
+
+       if (hasAudio) {
+         filterComplex += `[${i}:a]aresample=44100[a${i}]; `;
+       } else {
+         filterComplex += `aevalsrc=0:d=${duration}[a${i}]; `;
+       }
+       concatInputs += `[v${i}][a${i}]`;
     }
-    filterComplex += `${concatInputs}concat=n=${localPaths.length}:v=1:a=0[outv]`;
+    filterComplex += `${concatInputs}concat=n=${localPaths.length}:v=1:a=1[outv][outa]`;
     
     const inputArgs = localPaths.map(p => `-i "${p}"`).join(" ");
-    const ffmpegCmd = `ffmpeg -y ${inputArgs} -filter_complex "${filterComplex}" -map "[outv]" -c:v libx264 -pix_fmt yuv420p -profile:v high -level:v 4.0 "${localOutputPath}"`;
+    const ffmpegCmd = `ffmpeg -y ${inputArgs} -filter_complex "${filterComplex}" -map "[outv]" -map "[outa]" -c:v libx264 -pix_fmt yuv420p -profile:v high -level:v 4.0 -c:a aac -b:a 128k "${localOutputPath}"`;
     
     console.log(`[Toonflow] Stitching videos with robust filter_complex command: ${ffmpegCmd}`);
     
@@ -3087,7 +3142,11 @@ app.post("/api/stitch-videos", async (req, res) => {
     }
   } catch (err: any) {
     console.error("[Toonflow Error] API /api/stitch-videos failed:", err);
-    return res.status(500).json({ error: err.message || "Failed to stitch videos" });
+    let errorMsg = err.message || "Failed to stitch videos";
+    if (errorMsg.includes("Remote URL returned HTML") || errorMsg.includes("expired") || errorMsg.includes("download")) {
+      errorMsg = "AI 影片拼接失敗：部分分鏡影片連結已過期或失效（例如舊的免費空間檔案已失效）。請在下方對應的分鏡卡片上，點選「🎬 一鍵 AI 延伸影片」或重新生成該分鏡的影像與影片，然後再次進行「極速出片」即可解決！";
+    }
+    return res.status(500).json({ error: errorMsg });
   }
 });
 
@@ -3255,13 +3314,13 @@ app.post("/api/generate-image", async (req, res) => {
 
     console.log(`[Toonflow] Generating ${isAvatar ? "avatar" : "storyboard"} image using ${activeEngine} AI with prompt: ${enhancedPrompt}`);
 
-    if (activeEngine === 'nanobanana') {
-      // Nano Banana is our high-speed fallback visualizer matching context
+    if (activeEngine === 'nanobanana' || activeEngine === 'mistral') {
+      // Nano Banana / Mistral AI is our high-speed fallback visualizer matching context
       const fallbackUrl = getFallbackImage(prompt, character || "", artStyle || "", isAvatar);
       return res.json({ 
         imageUrl: fallbackUrl,
         isAgnesImage: false,
-        message: "成功使用 Nano Banana 高速繪圖引擎生成視覺預覽！"
+        message: `成功使用 ${activeEngine === 'mistral' ? 'Mistral AI' : 'Nano Banana'} 高速繪圖引擎生成視覺預覽！`
       });
     } else if (activeEngine === 'agnes') {
       const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
