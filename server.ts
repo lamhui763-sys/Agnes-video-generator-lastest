@@ -3135,12 +3135,14 @@ app.post("/api/stitch-videos", async (req, res) => {
          const probeDur = require('child_process').execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${localPaths[i]}"`).toString();
          const parsedDur = parseFloat(probeDur.trim());
          if (!isNaN(parsedDur) && parsedDur > 0) duration = parsedDur;
-       } catch (e) {}
+       } catch (e) {
+         console.error(`[Toonflow] Error probing audio for ${localPaths[i]}:`, e);
+       }
 
        if (hasAudio) {
          filterComplex += `[${i}:a]aresample=44100[a${i}]; `;
        } else {
-         filterComplex += `aevalsrc=0:d=${duration}[a${i}]; `;
+         filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}[a${i}]; `;
        }
        concatInputs += `[v${i}][a${i}]`;
     }
