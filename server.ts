@@ -635,8 +635,10 @@ async function generateContentWithFallback(options: {
   model: string;
   contents: any;
   config?: any;
+  customApiKey?: string;
 }): Promise<any> {
-  const isImage = options.model.includes("image") || options.model.includes("imagen");
+  const { customApiKey, ...sdkOptions } = options;
+  const isImage = sdkOptions.model.includes("image") || sdkOptions.model.includes("imagen");
   if (isImage && isGeminiImageQuotaExhausted) {
     throw new Error("Gemini API image quota is currently exhausted. Bypassing Gemini API call to prevent delay.");
   }
@@ -644,7 +646,7 @@ async function generateContentWithFallback(options: {
     throw new Error("Gemini API text quota is currently exhausted. Bypassing Gemini API call to prevent delay.");
   }
 
-  const primaryModel = options.model;
+  const primaryModel = sdkOptions.model;
   let fallbacks: string[] = [];
   
   if (isImage) {
@@ -673,8 +675,9 @@ async function generateContentWithFallback(options: {
       attempts++;
       try {
         console.log(`[Toonflow] Trying Gemini call with model: ${model} (Attempt ${attempts}/${maxAttempts})`);
-        const res = await ai.models.generateContent({
-          ...options,
+        const client = getGeminiClient(customApiKey);
+        const res = await client.models.generateContent({
+          ...sdkOptions,
           model: model
         });
         return res;
@@ -688,17 +691,19 @@ async function generateContentWithFallback(options: {
                              err.status === "RESOURCE_EXHAUSTED" ||
                              errMsg.includes("RESOURCE_EXHAUSTED");
                              
-        const isTransientError = errMsg.includes("503") ||
-                                 errMsg.includes("UNAVAILABLE") ||
-                                 errMsg.includes("temporary") ||
-                                 errMsg.includes("high demand") ||
-                                 errMsg.includes("overloaded") ||
-                                 errMsg.includes("500") ||
-                                 errMsg.includes("INTERNAL") ||
-                                 errMsg.includes("504") ||
-                                 errMsg.includes("GATEWAY_TIMEOUT") ||
-                                 errMsg.includes("Service Unavailable") ||
-                                 err.status === "UNAVAILABLE";
+        const isTransientError = (
+          errMsg.includes("503") ||
+          errMsg.includes("UNAVAILABLE") ||
+          errMsg.includes("temporary") ||
+          errMsg.includes("high demand") ||
+          errMsg.includes("overloaded") ||
+          err.status === "INTERNAL" ||
+          errMsg.includes("INTERNAL") ||
+          errMsg.includes("504") ||
+          errMsg.includes("GATEWAY_TIMEOUT") ||
+          errMsg.includes("Service Unavailable") ||
+          err.status === "UNAVAILABLE"
+        ) && !isQuotaError;
 
         const shouldRetry = isTransientError;
         
@@ -1186,6 +1191,7 @@ Instructions for synthesis:
           const geminiRes = await generateContentWithFallback({
             model: "gemini-3.5-flash",
             contents: synthesisPrompt,
+            customApiKey: customApiKey,
           });
           synthResultText = geminiRes?.text?.trim() || "";
         } catch (err: any) {
@@ -1791,6 +1797,7 @@ async function generateText(prompt: string, engine: 'gemini' | 'agnes' | 'mistra
     const response = await generateContentWithFallback({
       model: geminiModel,
       contents: prompt,
+      customApiKey: customApiKey,
     });
     return response.text || "";
   }
@@ -2394,6 +2401,7 @@ CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
       const response = await generateContentWithFallback({
         model: "gemini-3.5-flash",
         contents: `Please parse this novel passage into scenes:\n\n${novelText}`,
+        customApiKey,
         config: {
           systemInstruction,
           responseMimeType: "application/json",

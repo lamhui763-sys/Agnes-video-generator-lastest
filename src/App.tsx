@@ -113,6 +113,7 @@ export default function App() {
   const [fullAutoProgress, setFullAutoProgress] = useState<string>("0%");
   const [fullAutoLogs, setFullAutoLogs] = useState<string[]>([]);
   const [finalStitchedVideoUrl, setFinalStitchedVideoUrl] = useState<string | null>(null);
+  const [isConfirmingClear, setIsConfirmingClear] = useState<boolean>(false);
   
   // Custom states for selectable Agents
   const [selectedNovelAgents, setSelectedNovelAgents] = useState<('gemini' | 'agnes' | 'mistral')[]>(['gemini', 'agnes', 'mistral']);
@@ -2700,7 +2701,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   // One-click clear all generated keyframe images, videos, logs, and reviews (Start over)
   const handleClearAllKeyframes = () => {
     if (!activeProject) return;
-    if (!window.confirm("確定要一鍵清除當前專案在「首尾幀分鏡」中所有已生成的相片、影片、日誌及評測資料嗎？這將會讓您重頭再來。")) return;
+    
+    if (!isConfirmingClear) {
+      setIsConfirmingClear(true);
+      // Auto-reset after 4 seconds if they don't confirm
+      setTimeout(() => {
+        setIsConfirmingClear(false);
+      }, 4000);
+      return;
+    }
+
+    // Reset confirmation state
+    setIsConfirmingClear(false);
 
     // Reset pipeline state
     setFullAutoProgress("0%");
@@ -7726,10 +7738,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       <div className="flex flex-col sm:flex-row gap-2.5 shrink-0 items-center">
                         <button
                           onClick={handleClearAllKeyframes}
-                          className="py-2.5 px-4 bg-slate-900 border border-red-500/40 hover:bg-red-950/20 text-red-400 font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20"
+                          className={`py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20 border ${
+                            isConfirmingClear
+                              ? "bg-red-600 border-red-500 text-white animate-pulse"
+                              : "bg-slate-900 border-red-500/40 hover:bg-red-950/20 text-red-400"
+                          }`}
                         >
-                          <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                          <span>一鍵清除已生成 (重頭再來)</span>
+                          <Trash2 className={`w-3.5 h-3.5 ${isConfirmingClear ? "text-white" : "text-red-400"}`} />
+                          <span>{isConfirmingClear ? "⚠️ 再次點擊以確認清除！" : "一鍵清除已生成 (重頭再來)"}</span>
                         </button>
 
                         <button
