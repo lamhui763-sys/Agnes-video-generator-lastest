@@ -1922,7 +1922,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           endImageUrl: endImageUrl,
           customApiKey: customApiKey || undefined,
           durationSeconds: targetScene.durationSeconds,
-          agnesVideoMode: activeProject.agnesVideoMode || "quality"
+          agnesVideoMode: activeProject.agnesVideoMode || "quality",
+          sceneIndex: index,
+          sceneType: activeTab === "scenes_ext" ? "ext" : (activeTab === "scenes_keyframes" ? "keyframes" : "standard")
         })
       });
 
@@ -1979,6 +1981,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       return { 
                         ...s, 
                         [videoField]: statusData.outputPath, 
+                        [`${videoField}Local`]: statusData.localPath || statusData.outputPath, 
                         [isGenField]: false, 
                         [progressField]: "100%",
                         [logsField]: [...logs, "[SYSTEM] Video generated and mapped successfully!"],
@@ -2153,7 +2156,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
            extendFromVideoUrl: prevVideoUrl,
            customApiKey: customApiKey || undefined,
            durationSeconds: targetScene.durationSeconds,
-           agnesVideoMode: freshActiveProject.agnesVideoMode || "quality"
+           agnesVideoMode: freshActiveProject.agnesVideoMode || "quality",
+           sceneIndex: index,
+           sceneType: "ext"
          })
       });
 
@@ -2210,6 +2215,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                        return { 
                          ...s, 
                          videoUrlExt: statusData.outputPath, 
+                         videoUrlExtLocal: statusData.localPath || statusData.outputPath,
                          isGeneratingVideoExt: false, 
                          videoProgressExt: "100%",
                          videoLogsExt: [...logs, "[SYSTEM] Video generated and mapped successfully!"],
@@ -2557,7 +2563,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           durationSeconds: finalDurationSeconds,
           agnesVideoMode: activeProject.agnesVideoMode || "quality",
           useFreezeAndMove: targetScene.useFreezeAndMove,
-          useMidpointSplit: targetScene.useMidpointSplit
+          useMidpointSplit: targetScene.useMidpointSplit,
+          sceneIndex: index,
+          sceneType: "keyframes"
         })
       });
 
@@ -2613,7 +2621,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                       return { 
                         ...s, 
-                        videoUrlKeyframes: statusData.outputPath, 
+                        videoUrlKeyframes: statusData.outputPath,
+                        videoUrlKeyframesLocal: statusData.localPath || statusData.outputPath, 
                         isGeneratingVideoKeyframes: false, 
                         videoProgressKeyframes: "100%",
                         videoLogsKeyframes: [...logs, "[SYSTEM] Keyframes Video generated and mapped successfully!"],
@@ -5946,7 +5955,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                   {/* Right Column: Workflow Trigger & Scenes List */}
                   <div className="xl:col-span-8 space-y-6 relative z-10">
-                    <VideoGallery />
+                    <VideoGallery activeProject={activeProject} />
                   {/* Disassemble Workflow banner */}
                     <div className="bg-gradient-to-r from-pink-900/30 via-indigo-900/20 to-slate-900/60 border border-pink-500/20 rounded-2xl p-5 shadow-xl flex items-center justify-between gap-6 relative z-20">
                       <div className="space-y-1">
@@ -8639,6 +8648,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 </div>
               )}
 
+              {/* ============ TAB: GALLERY ============ */}
+              {activeTab === "gallery" && (
+                <div className="space-y-6">
+                  <VideoGallery activeProject={activeProject} />
+                </div>
+              )}
+
             </div>
 
           </div>
@@ -9127,44 +9143,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 </div>
 
               </div>
-              {/* ============ TAB: GALLERY ============ */}
-              {activeTab === "gallery" && (
-                <div className="space-y-6">
-                  <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-md space-y-4">
-                    <h3 className="font-display font-bold text-sm text-white flex items-center gap-2 border-b border-slate-800 pb-3">
-                      <Film className="w-4 h-4 text-emerald-400" />
-                      已生成影片庫 (Generated Videos)
-                    </h3>
-                    
-                    {!activeProject.finalVideoUrl ? (
-                      <div className="text-center p-12 border border-dashed border-slate-800 rounded-2xl text-slate-500 text-xs">
-                        目前尚無已生成的最終成片。請前往「AI 分鏡」標籤頁，使用「AI 一鍵全自動極速出片」或「手動拼接所有分鏡」來產生影片！
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        <div className="relative aspect-video rounded-xl overflow-hidden border border-emerald-500/20 bg-slate-950 shadow-inner group">
-                          <ScrubbableVideoPlayer
-                            src={activeProject.finalVideoUrl}
-                            className="w-full h-full"
-                          />
-                        </div>
-                        <div className="flex items-center justify-between gap-3 bg-slate-950 p-3 rounded-lg border border-slate-850">
-                          <span className="text-[10px] text-slate-500 font-mono break-all">
-                            路徑: {activeProject.finalVideoUrl.split('/').pop()}
-                          </span>
-                          <a
-                            href={`/api/download?url=${encodeURIComponent(activeProject.finalVideoUrl)}`}
-                            className="py-2 px-5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition flex items-center gap-2 cursor-pointer shrink-0 shadow-lg shadow-emerald-900/20"
-                            download={`ToonFlow-${activeProject.id}.mp4`}
-                          >
-                            <Download className="w-4 h-4" /> 下載高畫質影片
-                          </a>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
             </motion.div>
           </div>
         )}
