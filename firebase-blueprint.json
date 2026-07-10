@@ -1,0 +1,20 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "A user's project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    }
+  },
+  "firestore": {
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "User projects"
+    }
+  }
+}

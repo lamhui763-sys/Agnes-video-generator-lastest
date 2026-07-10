@@ -1,5 +1,7 @@
 import { ScrubbableVideoPlayer } from "./components/ScrubbableVideoPlayer";
 import React, { useState, useEffect, useRef } from "react";
+import { db } from "./lib/firebase";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import { 
   Video,
   Terminal,
@@ -610,11 +612,35 @@ export default function App() {
     }
   }, []);
 
+  // Sync projects from Firestore on mount
+  useEffect(() => {
+    const fetchProjects = async (retries = 3) => {
+      try {
+        const docRef = doc(db, "projects", "all_projects");
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const firestoreProjects = docSnap.data().projects as Project[];
+          setProjects(firestoreProjects);
+          localStorage.setItem("toonflow_projects", JSON.stringify(firestoreProjects));
+        }
+      } catch (e: any) {
+        if (retries > 0 && e.message && e.message.includes("offline")) {
+          console.warn(`Firestore offline, retrying... (${retries} attempts left)`);
+          setTimeout(() => fetchProjects(retries - 1), 2000);
+        } else {
+          console.error("Failed to sync from Firestore", e);
+        }
+      }
+    };
+    fetchProjects();
+  }, []);
+
   // Save projects to localStorage whenever they change
   const saveProjects = (updatedProjects: Project[]) => {
     setProjects(updatedProjects);
     try {
       localStorage.setItem("toonflow_projects", JSON.stringify(updatedProjects));
+      setDoc(doc(db, "projects", "all_projects"), { projects: updatedProjects }).catch(console.error);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'QuotaExceededError') {
         showToast("瀏覽器儲存空間已滿，請清理不必要的專案或減小圖片大小", "error");
@@ -3341,39 +3367,49 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     ]);
 
     try {
-      setFullAutoProgress("40%");
-      setFullAutoLogs(prev => [...prev, "🎞️ 正在向剪輯核心提交已生成的分鏡影片檔案..."]);
-
-      const stitchRes = await fetch("/api/stitch-videos", {
+      const response = await fetch("/api/stitch-videos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ videoUrls: orderedVideoUrls })
       });
 
-      if (!stitchRes.ok) {
-        const errorText = await stitchRes.text().catch(() => "");
-        throw new Error(`手動拼接失敗：${errorText || "伺服器忙碌中"}`);
-      }
+      if (!response.body) throw new Error("No response body");
 
-      const stitchData = await stitchRes.json();
-      if (stitchData.videoUrl) {
-        setFinalStitchedVideoUrl(stitchData.videoUrl);
-        updateActiveProject({ finalVideoUrl: stitchData.videoUrl });
-        setFullAutoProgress("100%");
-        setFullAutoLogs(prev => [
-          ...prev, 
-          "🎉 恭喜！手動一鍵拼接已完美完成！",
-          `✨ 電影成片連結已生成：${stitchData.videoUrl}`,
-          "🌟 這是根據您手動生成/調整的分鏡，完美融合拼接出的精彩影片！"
-        ]);
-        showToast("🎉 恭喜！手動拼接影片成功！", "success");
-      } else {
-        throw new Error("拼接伺服器未返回影片連結");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n').filter(Boolean);
+        
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+            if (data.type === 'log') {
+              setFullAutoLogs(prev => [...prev, data.log]);
+              // Update progress based on log
+              if (data.log.includes("下載")) setFullAutoProgress("25%");
+              else if (data.log.includes("提交")) setFullAutoProgress("50%");
+              else if (data.log.includes("完美完成")) setFullAutoProgress("100%");
+            } else if (data.type === 'result') {
+              setFinalStitchedVideoUrl(data.videoUrl);
+              updateActiveProject({ finalVideoUrl: data.videoUrl });
+              showToast("🎉 恭喜！手動拼接影片成功！", "success");
+            } else if (data.type === 'error') {
+              throw new Error(data.error);
+            }
+          } catch (e) {
+            console.error("Failed to parse log chunk", e);
+          }
+        }
       }
     } catch (err: any) {
       setFullAutoProgress("0%");
       setFullAutoLogs(prev => [...prev, `❌ 拼接過程出錯：${err.message || err}`]);
-      alert(`拼接失敗：${err.message || err}`);
+      showToast("拼接失敗", "error");
     } finally {
       setIsFullAutoProducing(false);
     }

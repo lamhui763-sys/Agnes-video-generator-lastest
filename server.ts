@@ -843,6 +843,29 @@ app.get("/api/list-videos", async (req, res) => {
   }
 });
 
+// Delete a generated video file
+app.delete("/api/delete-video", async (req, res) => {
+  const filename = req.query.filename as string;
+  if (!filename) {
+    return res.status(400).send("No filename provided");
+  }
+
+  const safeFilename = path.basename(filename); // Ensure it's just the filename
+  const filePath = path.join(process.cwd(), "assets", safeFilename);
+
+  if (fs.existsSync(filePath)) {
+    try {
+      fs.unlinkSync(filePath);
+      res.json({ message: "File deleted successfully" });
+    } catch (error) {
+      console.error("Delete video error:", error);
+      res.status(500).send("Internal Server Error while deleting file");
+    }
+  } else {
+    res.status(404).send("File not found");
+  }
+});
+
 app.get("/api/download", async (req, res) => {
   const videoUrl = decodeURIComponent(req.query.url as string);
   if (!videoUrl) {
@@ -3034,23 +3057,30 @@ app.post("/api/stitch-videos", async (req, res) => {
     return res.status(400).json({ error: "videoUrls array is required" });
   }
 
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  const sendLog = (log: string) => {
+    res.write(JSON.stringify({ type: 'log', log }) + '\n');
+  };
+
   try {
     const localPaths: string[] = [];
     const tempFilesToCleanup: string[] = [];
 
+    sendLog("🎬 啟動 [手動一鍵拼接] 工作流...");
+    
     // Resolve or download all videos
     for (let i = 0; i < videoUrls.length; i++) {
       let url = videoUrls[i];
       if (!url) continue;
 
-      // Extract original URL if it's a proxy or download endpoint wrapper
+      // ... existing URL parsing logic ...
       if (url.includes("url=")) {
         try {
           const parsedUrl = new URL(url, "http://localhost:3000");
           const extractedUrl = parsedUrl.searchParams.get("url");
-          if (extractedUrl) {
-            url = extractedUrl;
-          }
+          if (extractedUrl) url = extractedUrl;
         } catch (e) {
           console.warn(`[Toonflow] Failed to parse URL parameters for ${url}:`, e);
         }
@@ -3061,52 +3091,31 @@ app.post("/api/stitch-videos", async (req, res) => {
         const localPath = path.join(process.cwd(), "assets", filename);
         if (fs.existsSync(localPath)) {
           localPaths.push(localPath);
-        } else {
-          console.warn(`[Toonflow] Video clip not found: ${localPath}`);
         }
       } else if (url.startsWith("http")) {
-        // Fallback: Check if we have a local backup file first to prevent downloads and handle expired remote hosts
         const urlParts = url.split("/");
         const originalFilename = urlParts[urlParts.length - 1].split("?")[0];
         const localBackupPath = path.join(process.cwd(), "assets", originalFilename);
         if (fs.existsSync(localBackupPath)) {
           localPaths.push(localBackupPath);
-          console.log(`[Toonflow CDN Fallback] Resolved remote URL ${url} to local backup in stitch-videos: ${localBackupPath}`);
         } else {
-          // Download remote URL to a temporary file
           const filename = `temp-download-${Date.now()}-${i}.mp4`;
           const localPath = path.join(process.cwd(), "assets", filename);
-          console.log(`[Toonflow] Downloading remote video: ${url} to ${localPath}`);
+          sendLog(`🔍 正在下載分鏡: ${url.substring(0, 30)}...`);
           
           try {
             const response = await fetch(url);
-            if (!response.ok) {
-              throw new Error(`Failed to download remote video clip: ${url}`);
-            }
-            
-            const contentType = response.headers.get("content-type") || "";
-            if (contentType.includes("text/html")) {
-              throw new Error(`Remote URL returned HTML instead of a video file (possibly expired): ${url}`);
-            }
-            
+            if (!response.ok) throw new Error(`Download failed`);
             const buffer = await response.arrayBuffer();
             fs.writeFileSync(localPath, Buffer.from(buffer));
-            
             localPaths.push(localPath);
             tempFilesToCleanup.push(localPath);
           } catch (downloadErr: any) {
-            console.error(`[Toonflow] Download failed for ${url}:`, downloadErr);
-            console.log(`[Toonflow Fallback] Generating a 3-second black clip to replace failed/expired video: ${url}`);
-            try {
-              // Create a 3-second 1280x720 video with a simple black stream and audio stream so stitching remains robust
-              const fallbackCmd = `ffmpeg -y -f lavfi -i color=c=black:s=1280x720:d=3 -f lavfi -i anullsrc=cl=mono:r=44100 -c:v libx264 -tune stillimage -pix_fmt yuv420p -c:a aac -shortest "${localPath}"`;
-              require('child_process').execSync(fallbackCmd);
-              localPaths.push(localPath);
-              tempFilesToCleanup.push(localPath);
-            } catch (fallbackErr: any) {
-              console.error("[Toonflow Fallback] Failed to generate fallback clip:", fallbackErr);
-              throw downloadErr; // Throw original error if even fallback generation fails
-            }
+            sendLog(`⚠️ 下載失敗，使用替代素材...`);
+            const fallbackCmd = `ffmpeg -y -f lavfi -i color=c=black:s=1280x720:d=3 -f lavfi -i anullsrc=cl=mono:r=44100 -c:v libx264 -tune stillimage -pix_fmt yuv420p -c:a aac -shortest "${localPath}"`;
+            require('child_process').execSync(fallbackCmd);
+            localPaths.push(localPath);
+            tempFilesToCleanup.push(localPath);
           }
         }
       }
@@ -3119,31 +3128,21 @@ app.post("/api/stitch-videos", async (req, res) => {
     const outputFilename = `stitched-film-${Date.now()}.mp4`;
     const localOutputPath = path.join(process.cwd(), "assets", outputFilename);
 
-    // Build robust filter_complex for concatenating videos of potentially different sizes
+    // Build robust filter_complex
     let filterComplex = "";
     let concatInputs = "";
-    
     for (let i = 0; i < localPaths.length; i++) {
-       // Scale to 1280x720 (standard 720p HD), padding with black bars to maintain aspect ratio
        filterComplex += `[${i}:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v${i}]; `;
-       
        let hasAudio = false;
        let duration = 5.0;
        try {
          const probe = require('child_process').execSync(`ffprobe -i "${localPaths[i]}" -show_streams -select_streams a -loglevel error`).toString();
          hasAudio = probe.trim().length > 0;
          const probeDur = require('child_process').execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${localPaths[i]}"`).toString();
-         const parsedDur = parseFloat(probeDur.trim());
-         if (!isNaN(parsedDur) && parsedDur > 0) duration = parsedDur;
-       } catch (e) {
-         console.error(`[Toonflow] Error probing audio for ${localPaths[i]}:`, e);
-       }
-
-       if (hasAudio) {
-         filterComplex += `[${i}:a]aresample=44100[a${i}]; `;
-       } else {
-         filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}[a${i}]; `;
-       }
+         duration = parseFloat(probeDur.trim()) || 5.0;
+       } catch (e) {}
+       if (hasAudio) filterComplex += `[${i}:a]aresample=44100[a${i}]; `;
+       else filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}[a${i}]; `;
        concatInputs += `[v${i}][a${i}]`;
     }
     filterComplex += `${concatInputs}concat=n=${localPaths.length}:v=1:a=1[outv][outa]`;
@@ -3151,49 +3150,37 @@ app.post("/api/stitch-videos", async (req, res) => {
     const inputArgs = localPaths.map(p => `-i "${p}"`).join(" ");
     const ffmpegCmd = `ffmpeg -y ${inputArgs} -filter_complex "${filterComplex}" -map "[outv]" -map "[outa]" -c:v libx264 -pix_fmt yuv420p -profile:v high -level:v 4.0 -c:a aac -b:a 128k "${localOutputPath}"`;
     
-    console.log(`[Toonflow] Stitching videos with robust filter_complex command: ${ffmpegCmd}`);
+    sendLog("🎞️ 正在向剪輯核心提交已生成的分鏡影片檔案...");
+
+    // Run ffmpeg with spawn and stream logs
+    const ffmpeg = spawn('ffmpeg', ffmpegCmd.split(' ').slice(1));
+    ffmpeg.stderr.on('data', (data) => {
+        // Optionally stream stderr log
+    });
+
+    await new Promise((resolve, reject) => {
+        ffmpeg.on('close', (code) => {
+            if (code === 0) resolve(true);
+            else reject(new Error(`FFmpeg exited with code ${code}`));
+        });
+    });
     
-    try {
-      execSync(ffmpegCmd);
-    } catch (err: any) {
-      console.error("[Toonflow] Robust stitch failed:", err.message);
-      throw new Error("Stitch failed: " + err.message);
-    }
+    sendLog("🎉 恭喜！手動一鍵拼接已完美完成！");
 
-    // Cleanup temp files
+    // Cleanup...
     for (const tempFile of tempFilesToCleanup) {
-      try {
-        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-      } catch (e) {
-        console.error("Failed to delete temp file:", tempFile, e);
-      }
+        try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (e) {}
     }
 
-    if (fs.existsSync(localOutputPath)) {
-      const publicBaseUrl = getPublicBaseUrl(req);
-      const videoUrl = `${publicBaseUrl}/assets/${outputFilename}`;
-      console.log(`[Toonflow] Videos stitched successfully: ${videoUrl}. Returning local URL immediately to prevent HTTP timeouts...`);
-      
-      // Attempt durable cloud backup in the background
-      uploadFileToCatbox(localOutputPath).then((cloudUrl) => {
-        if (cloudUrl) {
-          console.log(`[Toonflow Background] Stitched video successfully uploaded to cloud: ${cloudUrl}`);
-        }
-      }).catch((cloudErr: any) => {
-        console.log("[Toonflow Background] Durable cloud upload bypassed, using local asset fallback");
-      });
-
-      return res.json({ videoUrl });
-    } else {
-      throw new Error("ffmpeg execution succeeded but output file was not created");
-    }
+    const publicBaseUrl = getPublicBaseUrl(req);
+    const videoUrl = `${publicBaseUrl}/assets/${outputFilename}`;
+    
+    res.write(JSON.stringify({ type: 'result', videoUrl }) + '\n');
+    res.end();
   } catch (err: any) {
     console.error("[Toonflow Error] API /api/stitch-videos failed:", err);
-    let errorMsg = err.message || "Failed to stitch videos";
-    if (errorMsg.includes("Remote URL returned HTML") || errorMsg.includes("expired") || errorMsg.includes("download")) {
-      errorMsg = "AI 影片拼接失敗：部分分鏡影片連結已過期或失效（例如舊的免費空間檔案已失效）。請在下方對應的分鏡卡片上，點選「🎬 一鍵 AI 延伸影片」或重新生成該分鏡的影像與影片，然後再次進行「極速出片」即可解決！";
-    }
-    return res.status(500).json({ error: errorMsg });
+    res.write(JSON.stringify({ type: 'error', error: err.message }) + '\n');
+    res.end();
   }
 });
 

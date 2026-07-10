@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Download, Film, RefreshCw, Clapperboard, Video } from "lucide-react";
+import { Download, Film, RefreshCw, Clapperboard, Video, Trash2 } from "lucide-react";
 import { ScrubbableVideoPlayer } from "./ScrubbableVideoPlayer";
 import { Project } from "../types";
 
@@ -175,6 +175,22 @@ export default function VideoGallery({ activeProject }: VideoGalleryProps) {
     }
   }, [processedVideos, selectedVideoUrl]);
 
+  const handleDelete = async (e: React.MouseEvent, filename: string) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/delete-video?filename=${encodeURIComponent(filename)}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        fetchVideos();
+      } else {
+        console.error("Failed to delete video");
+      }
+    } catch (e) {
+      console.error("Error deleting video:", e);
+    }
+  };
+
   return (
     <div className="bg-slate-900/60 rounded-2xl p-6 border border-slate-800 shadow-xl backdrop-blur-md space-y-5">
       <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -263,6 +279,13 @@ export default function VideoGallery({ activeProject }: VideoGalleryProps) {
                   >
                     <Download className="w-3.5 h-3.5" />
                   </a>
+                  <button
+                    onClick={(e) => handleDelete(e, video.filename)}
+                    className="p-1.5 bg-slate-850 hover:bg-red-900/50 text-slate-400 hover:text-red-400 rounded-lg transition"
+                    title="刪除"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
             );
