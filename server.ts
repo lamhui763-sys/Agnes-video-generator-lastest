@@ -8,9 +8,16 @@ import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
+import OpenAI from "openai";
 
 // Load environment variables
 dotenv.config();
+
+// Initialize OpenAI TTS client for Edge TTS
+const openai = new OpenAI({
+  apiKey: "sk-edge-tts", // dummy key for local edge-tts
+  baseURL: "http://localhost:3001/v1",
+});
 
 // Helper to sanitize API keys from user comments, trailing characters or copy-paste whitespace
 function sanitizeApiKey(key: string | undefined): string {
@@ -56,6 +63,46 @@ function getAgnesApiKey(customApiKey?: string): string {
   }
   
   return clean;
+}
+
+// Generate narration audio via a local Edge TTS-compatible OpenAI endpoint
+async function generateNarrationAudioWithEdgeTts(text: string, sceneId: string, voice: string): Promise<{ audioPath: string; voice: string; generatedAt: string }> {
+  const trimmedText = (text || "").trim();
+  if (!trimmedText) {
+    throw new Error("旁白內容不能為空");
+  }
+
+  const resolvedVoice = voice || process.env.EDGE_TTS_VOICE || "zh-CN-XiaoxiaoNeural";
+  const baseUrl = (process.env.EDGE_TTS_BASE_URL || "http://localhost:3001").replace(/\/$/, "");
+
+  const response = await fetch(`${baseUrl}/v1/audio/speech`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "tts-1",
+      input: trimmedText,
+      voice: resolvedVoice
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(errorText || `Edge TTS 服務返回錯誤 (${response.status})`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const audioDir = path.join(process.cwd(), "public", "narration_audio");
+  fs.mkdirSync(audioDir, { recursive: true });
+
+  const fileName = `narration_${sceneId}_${Date.now()}.mp3`;
+  const filePath = path.join(audioDir, fileName);
+  fs.writeFileSync(filePath, buffer);
+
+  return {
+    audioPath: `/narration_audio/${fileName}`,
+    voice: resolvedVoice,
+    generatedAt: new Date().toISOString()
+  };
 }
 
 // Pre-fetch/cache a public image to prevent Pollinations dynamic image generation timeouts on external endpoints
@@ -2239,6 +2286,8 @@ ${history.map((h: any) => `${h.role === 'user' ? 'User' : 'AI'}: ${h.content}`).
    - "transitionPrompt" (過渡到下個場景提示詞 TRANSITION PROMPT - 必須是流暢且豐富的英文描繪)
    - "directorNotes" (導演註記 / 個人拍攝筆記 - 繁體中文)
 4. 【重要性 - 角色性別與外觀明確化】：如果用戶在問題或修改中提到要把主角角色性別與外觀描述改得更明確（例如：避免混淆），請務必提供明確的性別和外觀特徵描述。
+   - 如果用戶要求「第一把旁白數目減少至5秒能讀完」，請把 narration 改寫為一句簡潔的背景描述或氣氛敘述，避免冗長文字，並儘量控制在可在5秒內讀完的短句範圍。
+   - 如果用戶要求「第二把旁白的內容加入導演註記 / 個人拍攝筆記 (DIRECTOR'S NOTES) 及氛圍音效與背景音樂」，請務必將原旁白重構：narration 保留最簡短的場景氛圍描寫，directorNotes 填入細緻的鏡頭、運鏡、燈光與情緒指引，audioCue 填入具體音效與背景音樂描述。
 
 請直接輸出上述 JSON 對象，不要包含任何 markdown 標記或解釋文字，保持純 JSON 格式。`;
 
@@ -3669,8 +3718,27 @@ app.post("/api/generate-image", async (req, res) => {
   }
 });
 
-// Serve assets folder statically
+// Serve assets and public narration audio statically
 app.use("/assets", express.static(path.join(process.cwd(), "assets")));
+app.use(express.static(path.join(process.cwd(), "public")));
+
+app.post("/api/scenes/:sceneId/narration/generate", async (req, res) => {
+  try {
+    const { sceneId } = req.params;
+    const { text, voice } = req.body || {};
+    const narrationText = typeof text === "string" ? text.trim() : "";
+
+    if (!narrationText) {
+      return res.status(400).json({ error: "請先輸入旁白內容" });
+    }
+
+    const result = await generateNarrationAudioWithEdgeTts(narrationText, sceneId, voice);
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    console.error("[Toonflow] Edge TTS narration generation failed:", error);
+    res.status(500).json({ error: error?.message || "生成旁白音檔失敗" });
+  }
+});
 
 // Vite Middleware for development, or static serving in production
 async function startServer() {

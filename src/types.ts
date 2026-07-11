@@ -40,6 +40,9 @@ export interface Scene {
   useMidpointSplit?: boolean;
   audioCue?: string;
   directorNotes?: string;
+  narrationAudioPath?: string;
+  narrationVoice?: string;
+  narrationGeneratedAt?: string;
   aiReviewStatus?: "passed" | "needs_refinement" | "reviewing";
   aiReviewAlignmentCheck?: string;
   aiReviewLogicCheck?: string;

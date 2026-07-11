@@ -141,6 +141,7 @@ export default function App() {
   const [selectedSceneForSimulation, setSelectedSceneForSimulation] = useState<Scene | null>(null);
   const [isPlayingSimulation, setIsPlayingSimulation] = useState<boolean>(false);
   const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
+  const [isGeneratingNarrationAudio, setIsGeneratingNarrationAudio] = useState<Record<string, boolean>>({});
 
   // Global Character Library & Toast States
   const [characterLibrary, setCharacterLibrary] = useState<Character[]>([]);
@@ -1013,6 +1014,59 @@ export default function App() {
       }));
     } finally {
       setIsSceneChatting(prev => ({ ...prev, [sceneId]: false }));
+    }
+  };
+
+  const handleGenerateNarrationAudio = async (sceneId: string) => {
+    if (!activeProject) return;
+    const scene = activeProject.scenes.find((s) => s.id === sceneId);
+    if (!scene) return;
+
+    const narrationText = (scene.narration || "").trim();
+    if (!narrationText) {
+      showToast("請先輸入旁白內容再生成音檔", "error");
+      return;
+    }
+
+    setIsGeneratingNarrationAudio((prev) => ({ ...prev, [sceneId]: true }));
+    try {
+      const res = await fetch(`/api/scenes/${sceneId}/narration/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: narrationText,
+          voice: scene.narrationVoice || undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "生成旁白音檔失敗");
+      }
+
+      const data = await res.json();
+      const updatedScenes = activeProject.scenes.map((s) => {
+        if (s.id === sceneId) {
+          return {
+            ...s,
+            narrationAudioPath: data.audioPath,
+            narrationVoice: data.voice,
+            narrationGeneratedAt: data.generatedAt,
+          };
+        }
+        return s;
+      });
+      updateActiveProject({ scenes: updatedScenes });
+      showToast("已生成旁白音檔，可直接播放", "success");
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || "生成旁白音檔失敗", "error");
+    } finally {
+      setIsGeneratingNarrationAudio((prev) => {
+        const next = { ...prev };
+        delete next[sceneId];
+        return next;
+      });
     }
   };
 
@@ -3478,6 +3532,23 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       return s;
     });
     updateActiveProject({ scenes: updated });
+  };
+
+  const shortenNarrationToOneSentence = (text: string): string => {
+    const trimmed = (text || "").trim();
+    if (!trimmed) return "";
+    const normalized = trimmed.replace(/\s+/g, " ");
+    const sentenceMatch = normalized.match(/^[^。！？]*[。！？]/);
+    let sentence = sentenceMatch ? sentenceMatch[0].trim() : normalized;
+    if (sentence.length > 40) {
+      const shortSlice = sentence.slice(0, 40);
+      const lastComma = shortSlice.lastIndexOf("，");
+      if (lastComma > 10) {
+        return `${shortSlice.slice(0, lastComma)}。`;
+      }
+      return `${shortSlice}。`;
+    }
+    return sentence;
   };
 
   // Export active project scenes to CSV
@@ -6203,15 +6274,52 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                   />
                                 </div>
                                 <div className="space-y-1">
-                                  <label className="text-[10px] font-mono text-emerald-400 font-bold uppercase flex items-center gap-1">
-                                    <span>📖 背景場景旁白 (旁白字幕)</span>
-                                  </label>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <label className="text-[10px] font-mono text-emerald-400 font-bold uppercase flex items-center gap-1">
+                                      <span>📖 背景場景旁白 (旁白字幕)</span>
+                                    </label>
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateSceneField(scene.id, "narration", shortenNarrationToOneSentence(scene.narration || ""))}
+                                        className="text-[10px] text-emerald-300 hover:text-white font-bold underline transition"
+                                        title="將這段旁白縮成一句簡短描述"
+                                      >
+                                        縮成一句
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleGenerateNarrationAudio(scene.id)}
+                                        disabled={isGeneratingNarrationAudio[scene.id]}
+                                        className="text-[10px] text-slate-200 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 px-2 py-1 rounded-lg font-bold transition disabled:opacity-50"
+                                        title="使用本地 Edge TTS 生成此旁白的語音音檔"
+                                      >
+                                        {isGeneratingNarrationAudio[scene.id] ? "生成中..." : "生成旁白音檔"}
+                                      </button>
+                                    </div>
+                                  </div>
                                   <textarea
                                     className="w-full bg-slate-950 border border-slate-850 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition min-h-[60px]"
                                     value={scene.narration || ""}
                                     onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
                                     placeholder="例如：夜色漸深，窗外的雨滴答作響，他心中滿是焦慮...（嘴唇不會說話）"
                                   />
+                                  {scene.narrationAudioPath && (
+                                    <div className="space-y-2 p-3 rounded-lg border border-emerald-900 bg-slate-950/70">
+                                      <div className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
+                                        <span className="font-medium text-emerald-300">已生成旁白音檔</span>
+                                        <span>{scene.narrationVoice || "無聲音設定"}</span>
+                                      </div>
+                                      <audio
+                                        controls
+                                        className="w-full rounded-lg bg-slate-900"
+                                        src={scene.narrationAudioPath}
+                                      />
+                                      {scene.narrationGeneratedAt && (
+                                        <div className="text-[10px] text-slate-500">生成時間：{new Date(scene.narrationGeneratedAt).toLocaleString()}</div>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                                 <div className="space-y-1">
                                   <label className="text-[10px] font-mono text-pink-400 font-bold uppercase flex items-center gap-1">
@@ -7108,13 +7216,104 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                     />
                                   </div>
                                   <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">場景旁白 (Narration)</label>
+                                    <div className="flex items-center justify-between gap-2">
+                                      <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">場景旁白 (Narration)</label>
+                                      <div className="flex items-center gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleUpdateSceneField(scene.id, "narration", shortenNarrationToOneSentence(scene.narration || ""))}
+                                          className="text-[10px] text-emerald-300 hover:text-white font-bold underline transition"
+                                          title="將這段旁白縮成一句簡短描述"
+                                        >
+                                          縮成一句
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleGenerateNarrationAudio(scene.id)}
+                                          disabled={isGeneratingNarrationAudio[scene.id]}
+                                          className="text-[10px] text-slate-200 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 px-2 py-1 rounded-lg font-bold transition disabled:opacity-50"
+                                          title="使用本地 Edge TTS 生成此旁白的語音音檔"
+                                        >
+                                          {isGeneratingNarrationAudio[scene.id] ? "生成中..." : "生成旁白音檔"}
+                                        </button>
+                                      </div>
+                                    </div>
                                     <textarea
                                       className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
                                       value={scene.narration || ""}
                                       onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
                                       placeholder="此場景的背景氛圍旁白"
                                     />
+                                    {scene.narrationAudioPath && (
+                                      <div className="space-y-2 p-3 rounded-lg border border-emerald-900 bg-slate-950/70">
+                                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
+                                          <span className="font-medium text-emerald-300">已生成旁白音檔</span>
+                                          <span>{scene.narrationVoice || "無聲音設定"}</span>
+                                        </div>
+                                        <audio
+                                          controls
+                                          className="w-full rounded-lg bg-slate-900"
+                                          src={scene.narrationAudioPath}
+                                        />
+                                        {scene.narrationGeneratedAt && (
+                                          <div className="text-[10px] text-slate-500">生成時間：{new Date(scene.narrationGeneratedAt).toLocaleString()}</div>
+                                        )}
+                                      </div>
+                                    )}    title="使用本地 Edge TTS 生成此旁白的語音音檔"
+                                        >
+                                          {isGeneratingNarrationAudio[scene.id] ? "生成中..." : "生成旁白音檔"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <textarea
+                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
+                                      value={scene.narration || ""}
+                                      onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
+                                      placeholder="此場景的背景氛圍旁白"
+                                    />
+                                    {scene.narrationAudioPath && (
+                                      <div className="space-y-2 p-3 rounded-lg border border-emerald-900 bg-slate-950/70">
+                                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
+                                          <span className="font-medium text-emerald-300">已生成旁白音檔</span>
+                                          <span>{scene.narrationVoice || "無聲音設定"}</span>
+                                        </div>
+                                        <audio
+                                          controls
+                                          className="w-full rounded-lg bg-slate-900"
+                                          src={scene.narrationAudioPath}
+                                        />
+                                        {scene.narrationGeneratedAt && (
+                                          <div className="text-[10px] text-slate-500">生成時間：{new Date(scene.narrationGeneratedAt).toLocaleString()}</div>
+                                        )}
+                                      </div>
+                                    )}    title="使用本地 Edge TTS 生成此旁白的語音音檔"
+                                        >
+                                          {isGeneratingNarrationAudio[scene.id] ? "生成中..." : "生成旁白音檔"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <textarea
+                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
+                                      value={scene.narration || ""}
+                                      onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
+                                      placeholder="此場景的背景氛圍旁白"
+                                    />
+                                    {scene.narrationAudioPath && (
+                                      <div className="space-y-2 p-3 rounded-lg border border-emerald-900 bg-slate-950/70">
+                                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
+                                          <span className="font-medium text-emerald-300">已生成旁白音檔</span>
+                                          <span>{scene.narrationVoice || "無聲音設定"}</span>
+                                        </div>
+                                        <audio
+                                          controls
+                                          className="w-full rounded-lg bg-slate-900"
+                                          src={scene.narrationAudioPath}
+                                        />
+                                        {scene.narrationGeneratedAt && (
+                                          <div className="text-[10px] text-slate-500">生成時間：{new Date(scene.narrationGeneratedAt).toLocaleString()}</div>
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
                                   <div className="space-y-1">
                                     <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">🎵 氛圍音效與背景音樂 (鏡頭音訊)</label>
