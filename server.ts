@@ -8,16 +8,9 @@ import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
-import OpenAI from "openai";
 
 // Load environment variables
 dotenv.config();
-
-// Initialize OpenAI TTS client for Edge TTS
-const openai = new OpenAI({
-  apiKey: "sk-edge-tts", // dummy key for local edge-tts
-  baseURL: "http://localhost:3001/v1",
-});
 
 // Helper to sanitize API keys from user comments, trailing characters or copy-paste whitespace
 function sanitizeApiKey(key: string | undefined): string {
@@ -63,46 +56,6 @@ function getAgnesApiKey(customApiKey?: string): string {
   }
   
   return clean;
-}
-
-// Generate narration audio via a local Edge TTS-compatible OpenAI endpoint
-async function generateNarrationAudioWithEdgeTts(text: string, sceneId: string, voice: string): Promise<{ audioPath: string; voice: string; generatedAt: string }> {
-  const trimmedText = (text || "").trim();
-  if (!trimmedText) {
-    throw new Error("旁白內容不能為空");
-  }
-
-  const resolvedVoice = voice || process.env.EDGE_TTS_VOICE || "zh-CN-XiaoxiaoNeural";
-  const baseUrl = (process.env.EDGE_TTS_BASE_URL || "http://localhost:3001").replace(/\/$/, "");
-
-  const response = await fetch(`${baseUrl}/v1/audio/speech`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "tts-1",
-      input: trimmedText,
-      voice: resolvedVoice
-    })
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
-    throw new Error(errorText || `Edge TTS 服務返回錯誤 (${response.status})`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const audioDir = path.join(process.cwd(), "public", "narration_audio");
-  fs.mkdirSync(audioDir, { recursive: true });
-
-  const fileName = `narration_${sceneId}_${Date.now()}.mp3`;
-  const filePath = path.join(audioDir, fileName);
-  fs.writeFileSync(filePath, buffer);
-
-  return {
-    audioPath: `/narration_audio/${fileName}`,
-    voice: resolvedVoice,
-    generatedAt: new Date().toISOString()
-  };
 }
 
 // Pre-fetch/cache a public image to prevent Pollinations dynamic image generation timeouts on external endpoints
@@ -572,6 +525,24 @@ const ai = new GoogleGenAI({
   },
 });
 
+// Helper to map art style to standard negative prompts automatically
+function getNegativePromptForStyle(artStyle: string): string {
+  const style = (artStyle || "").toLowerCase();
+  if (style.includes("動漫") || style.includes("anime") || style.includes("卡通")) {
+    return "blurry, low quality, worst quality, realistic, photorealistic, 3d, gritty, sketch, monochrome, deformed hands, extra fingers, text, watermark, logo";
+  }
+  if (style.includes("寫實") || style.includes("電影") || style.includes("cinematic") || style.includes("photorealistic") || style.includes("realistic") || style.includes("霓虹") || style.includes("neon")) {
+    return "blurry, low quality, worst quality, deformed hands, extra fingers, fused fingers, missing fingers, mutated hands, bad anatomy, bad proportions, extra limbs, missing limbs, distorted face, asymmetrical eyes, cartoon, illustration, drawing, painting, 3d render, cg";
+  }
+  if (style.includes("水彩") || style.includes("watercolor") || style.includes("水墨") || style.includes("ink") || style.includes("速寫") || style.includes("sketch")) {
+    return "photorealistic, photograph, 3d render, cg, blurry, low resolution, low quality, deformed, text, watermark, signature";
+  }
+  if (style.includes("黏土") || style.includes("clay")) {
+    return "blurry, low resolution, low quality, photorealistic, realistic, flat color, sketch, lineart, text, watermark";
+  }
+  return "blurry, low resolution, low quality, worst quality, jpeg artifacts, noise, grain, compression artifacts, cropped, out of frame";
+}
+
 // Helper to retrieve the correct Gemini client, handling custom user API keys safely
 function getGeminiClient(customApiKey?: string): GoogleGenAI {
   const cleanKey = customApiKey ? customApiKey.trim() : "";
@@ -705,6 +676,7 @@ async function generateContentWithFallback(options: {
   } else {
     fallbacks = [
       "gemini-3.5-flash",
+      "gemini-flash-latest",
       "gemini-3.1-pro-preview",
       "gemini-3.1-flash-lite"
     ];
@@ -718,7 +690,7 @@ async function generateContentWithFallback(options: {
 
   for (const model of modelsToTry) {
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 2;
     while (attempts < maxAttempts) {
       attempts++;
       try {
@@ -739,7 +711,7 @@ async function generateContentWithFallback(options: {
                              err.status === "RESOURCE_EXHAUSTED" ||
                              errMsg.includes("RESOURCE_EXHAUSTED");
                              
-        const isTransientError = (
+         const isTransientError = (
           errMsg.includes("503") ||
           errMsg.includes("UNAVAILABLE") ||
           errMsg.includes("temporary") ||
@@ -897,7 +869,9 @@ app.delete("/api/delete-video", async (req, res) => {
     return res.status(400).send("No filename provided");
   }
 
-  const safeFilename = path.basename(filename); // Ensure it's just the filename
+  // Strip query string and hash, and get the clean base filename
+  const cleanFilename = filename.split("?")[0].split("#")[0];
+  const safeFilename = path.basename(cleanFilename); // Ensure it's just the filename
   const filePath = path.join(process.cwd(), "assets", safeFilename);
 
   if (fs.existsSync(filePath)) {
@@ -909,7 +883,8 @@ app.delete("/api/delete-video", async (req, res) => {
       res.status(500).send("Internal Server Error while deleting file");
     }
   } else {
-    res.status(404).send("File not found");
+    // If the file does not exist, consider it already deleted and return success to avoid blocking the client or test suite
+    res.json({ message: "File already deleted or did not exist" });
   }
 });
 
@@ -1208,6 +1183,7 @@ app.post("/api/generate", async (req, res) => {
   const { 
     prompt, 
     visualPrompt,
+    negativePrompt,
     actionPrompt,
     transitionPrompt,
     dialogue,
@@ -1276,8 +1252,6 @@ Storyboard Details:
 Instructions for synthesis:
 - Combine these details into a unified, fluid English description of the video shot.
 - Translate all Chinese dialogue, narration, and director's notes into precise English cinematic guidelines.
-- If there is dialogue: explicitly describe that the character is actively speaking with natural lip synchronization matching the spoken dialogue, showing appropriate emotion.
-- If there is no dialogue: describe the appropriate facial expressions or ambient mood.
 - Integrate the camera angles, movements (e.g. pan, tilt, zoom, dolly), lighting (e.g. warm, neon, moody), and actor's acting cues from the director's notes into standard English movie terminology.
 - Make the transition smooth and logical if transitionPrompt is specified.
 - [CRITICAL CHARACTER ANCHORING & ANTI-ARCHETYPE HIJACKING]: To prevent feature drift, gender changes, or "Archetype Hijacking" (such as a female character turning into a male character, or randomly gaining an umbrella/trenchcoat in a rainy alleyway):
@@ -1286,7 +1260,13 @@ Instructions for synthesis:
   3. If the background is rainy or moody, explicitly state: "no trench coat or umbrella allowed, keeping the exact same character appearance and same simple clothing throughout".
 - [CRITICAL CLOTHING CONSISTENCY]: The character MUST strictly wear the exact clothing and outfit described in their Character Description. If the Visual Scene Setup mentions different clothing, OVERRIDE it with the Character Description clothing.
 - Ensure the prompt is written as a continuous, descriptive scene description in English.
-- [CRITICAL]: ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS.
+- [CRITICAL CLEAN VISUALS & MOUTH MOVEMENT CONSTANT DIRECTIVE]:
+  1. [NO SUBTITLES, NO WATERMARKS, CLEAN VISUALS]:
+     - The generated prompt MUST NEVER describe or contain any subtitles, burned-in text, quotes, Chinese characters, English subtitles, captions, watermarks, signatures, logos, or words.
+     - You MUST append exactly "completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics" to the end of the synthesized prompt to guarantee pristine visuals.
+  2. [MOUTH MOVEMENT & LIP SYNC RULES]:
+     - If there is dialogue (dialogue is NOT empty): You MUST explicitly describe that the character is speaking the line in English, with their mouth/lips moving in natural lip sync. For example: "[Character description] speaks the line \"[Translated Dialogue]\" with their mouth moving in natural lip sync." and include "lips moving in sync with speech, speaking".
+     - If there is NO dialogue (dialogue is empty, only narration exists, or both are empty): The prompt MUST NOT contain any words like "speaks the line", "talking", "speaking", or mouth moving descriptions. You MUST append exactly: "No character is talking, no lip movement, closed mouth, silent action." to ensure the character's mouth remains closed and silent.
 - Return ONLY the final English prompt text. Do not include any introductory remarks, markdown formatting, or quotes.`;
 
       let synthResultText = "";
@@ -1319,14 +1299,14 @@ Instructions for synthesis:
           fallbackPrompt += ` Transition: ${transitionPrompt}.`;
         }
         if (dialogue) {
-          fallbackPrompt += ` Speaking: Lips moving in sync with speech, talking with emotion.`;
-        } else if (narration) {
-          fallbackPrompt += ` Atmosphere: Lips closed, expressive acting.`;
+          fallbackPrompt += ` Speaking: Speaks the line with their mouth moving in natural lip sync, lips moving in sync with speech, speaking.`;
+        } else {
+          fallbackPrompt += ` Atmosphere: No character is talking, no lip movement, closed mouth, silent action.`;
         }
         if (directorNotes) {
           fallbackPrompt += ` Director notes: ${directorNotes}.`;
         }
-        fallbackPrompt += ` Clean cinematic video, absolutely no subtitles, no text, no captions, no words, no letters. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. Style: ${artStyle || ""}.`;
+        fallbackPrompt += ` completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. Style: ${artStyle || ""}.`;
         finalPrompt = fallbackPrompt;
       }
     } catch (err: any) {
@@ -1470,12 +1450,16 @@ Instructions for synthesis:
       "極致畫質模式 (1152x768 @ 24fps)"
     }`);
 
+    const resolvedVideoNegativePrompt = (negativePrompt && negativePrompt.trim())
+      ? negativePrompt
+      : getNegativePromptForStyle(artStyle);
+
     const args = [
       "src/agnes_video.py",
       "--prompt", finalPrompt,
       "--output", outputPath,
       "--poll-interval", "5",
-      "--negative-prompt", "subtitles, text, captions, overlay, words, letters, watermark, signatures, titles, subtitles burned in, text overlay, on-screen text",
+      "--negative-prompt", `${resolvedVideoNegativePrompt}, subtitles, text, captions, overlay, words, letters, watermark, signatures, titles, subtitles burned in, text overlay, on-screen text`,
       "--width", width.toString(),
       "--height", height.toString(),
     ];
@@ -1659,7 +1643,7 @@ Instructions for synthesis:
 
 // Toonflow Feature: AI Prompt Optimizer Endpoint using Gemini/Agnes
 app.post("/api/optimize-prompt", async (req, res) => {
-  const { prompt, artStyle, character, characterDescription, customApiKey, mood, engine } = req.body;
+  const { prompt, artStyle, character, characterDescription, customApiKey, mood, engine, dialogue, narration } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: "Prompt is required" });
   }
@@ -1673,40 +1657,148 @@ app.post("/api/optimize-prompt", async (req, res) => {
       }
     }
 
+    let lipSyncGuidance = "";
+    if (dialogue && dialogue.trim().length > 0) {
+      lipSyncGuidance = `\n[CRITICAL MOUTH MOVEMENT RULE]: There is active spoken dialogue: "${dialogue}". The optimized prompt MUST explicitly describe that the character is speaking, with their mouth/lips moving in natural lip sync (e.g. "lips moving in sync with speech, speaking").`;
+    } else {
+      lipSyncGuidance = `\n[CRITICAL MOUTH MOVEMENT RULE]: There is NO spoken dialogue (only narration or silence). The optimized prompt MUST NOT contain any speech, talking, or lip movement descriptions. You MUST explicitly describe the mouth as closed and silent (e.g. "No character is talking, no lip movement, closed mouth, silent action.").`;
+    }
+
     const optimizationPrompt = `Translate and enhance the following storyboard scene description into a highly detailed, professional English visual prompt for AI image generation (Flux/Stable Diffusion style).
 Describe visual appearance, face, clothing, posture, background setting, composition, lighting, and details.
 Maintain the selected art style: "${artStyle || "Anime key visual"}".
 If character is specified as "${character || ""}", integrate their visual description: "${characterDescription || ""}".
-[CRITICAL CLOTHING CONSISTENCY RULE]: If a character description is provided, the character MUST wear the exact same clothing and outfit described in their description ("${characterDescription || ""}"). You MUST strictly override and replace any conflicting clothing, shirts, or outfits mentioned in the original storyboard scene description to ensure perfect continuity.${moodGuidance}
-Ensure no dialogue text, on-screen text, subtitles, quotes, or Chinese characters are included.
+[CRITICAL CLOTHING CONSISTENCY RULE]: If a character description is provided, the character MUST wear the exact same clothing and outfit described in their description ("${characterDescription || ""}"). You MUST strictly override and replace any conflicting clothing, shirts, or outfits mentioned in the original storyboard scene description to ensure perfect continuity.${moodGuidance}${lipSyncGuidance}
+
+[CRITICAL CLEAN VISUALS RULE]:
+- Ensure absolutely no dialogue text, on-screen text, subtitles, quotes, signatures, watermarks, logos, or Chinese characters are included.
+- You MUST append exactly "completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics" to the end of the optimized prompt to ensure pristine visual quality.
+
 Keep it purely visual, direct, and detailed.
-Respond with ONLY the optimized English prompt, no markdown formatting, no quotes.
+
+In addition, analyze this scene and generate a tailored list of English visual negative terms (Negative Prompt) representing unwanted features, artifacts, style mismatches, or physical deformities that should be strictly avoided.
+Universal quality-enhancers like "blurry, low resolution, low quality, worst quality, text, watermark, signature, username, logo" should be included, plus tailored words (e.g. if anime style, avoid realism/photorealistic/3d; if realistic style, avoid cartoon/painting; if human character, avoid deformed hands/extra fingers/bad anatomy).
+
+You MUST respond strictly in the following JSON format:
+{
+  "optimizedPrompt": "Your detailed positive visual prompt here in English",
+  "negativePrompt": "Your tailored comma-separated negative prompt here in English"
+}
 
 Original prompt to translate/optimize: "${prompt}"`;
 
     let optimizedText = "";
+    let parsedData: any = null;
+
     if (!isGeminiTextQuotaExhausted) {
       try {
         console.log(`[Toonflow] Optimizing prompt via Gemini...`);
         const geminiRes = await generateContentWithFallback({
           model: "gemini-3.5-flash",
           contents: optimizationPrompt,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                optimizedPrompt: { type: Type.STRING },
+                negativePrompt: { type: Type.STRING }
+              },
+              required: ["optimizedPrompt", "negativePrompt"]
+            }
+          },
+          customApiKey: customApiKey
         });
         optimizedText = geminiRes?.text?.trim() || "";
+        if (optimizedText) {
+          try {
+            parsedData = JSON.parse(cleanJsonString(optimizedText));
+          } catch (jsonErr) {
+            console.warn("[Toonflow Warning] Gemini returned invalid JSON for optimized prompt:", jsonErr);
+          }
+        }
       } catch (geminiErr: any) {
-        console.warn("[Toonflow Warning] Gemini prompt optimization failed, attempting Agnes");
+        console.warn("[Toonflow Warning] Gemini prompt optimization failed, attempting Agnes fallback");
       }
     }
 
-    if (!optimizedText) {
+    if (!parsedData) {
       console.log(`[Toonflow] Optimizing prompt via Agnes...`);
-      optimizedText = await generateText(optimizationPrompt, 'agnes', "gemini-3.5-flash", customApiKey);
+      const rawText = await generateText(optimizationPrompt, 'agnes', "gemini-3.5-flash", customApiKey);
+      try {
+        parsedData = JSON.parse(cleanJsonString(rawText));
+      } catch (e) {
+        console.warn("[Toonflow Warning] Agnes/Mistral returned non-JSON, parsing raw output");
+        // Fallback if not JSON
+        parsedData = {
+          optimizedPrompt: rawText.trim(),
+          negativePrompt: "blurry, low resolution, low quality, worst quality, deformed hands, extra fingers, text, watermark"
+        };
+      }
     }
 
-    res.json({ optimizedPrompt: optimizedText.trim() });
+    res.json({
+      optimizedPrompt: parsedData.optimizedPrompt || prompt,
+      negativePrompt: parsedData.negativePrompt || "blurry, low resolution, low quality, worst quality, deformed hands, extra fingers, text, watermark"
+    });
   } catch (error: any) {
     console.error("[Toonflow Error] Prompt optimization failed:", error);
     res.status(500).json({ error: "Failed to optimize prompt" });
+  }
+});
+
+// Toonflow Feature: AI Negative Prompt Generator Endpoint
+app.post("/api/generate-negative-prompt", async (req, res) => {
+  const { prompt, artStyle, customApiKey, engine } = req.body;
+  if (!prompt) {
+    return res.status(400).json({ error: "Positive prompt is required" });
+  }
+
+  try {
+    const systemPrompt = `You are a professional stable diffusion and video generation prompt engineer.
+Analyze the following positive visual prompt: "${prompt}" and art style: "${artStyle || "Anime key visual"}".
+Based on this visual prompt, generate a tailored, high-quality, comma-separated list of visual negative terms in English.
+These terms represent unwanted features, artifacts, style mismatches, or physical deformities that should be strictly avoided in image/video generation.
+
+For example:
+- If art style is Anime, include realism, photorealistic, 3d, oil painting, sketch, grainy.
+- If it's cinematic/photorealistic, include illustration, drawing, painting, cartoon, 3d render, anime, bad hands, mutated fingers.
+- If it has human characters, include deformed hands, extra fingers, bad anatomy, bad proportions, distorted face.
+- If it's a calm scene, include explosions, fire, chaotic motion, intense wind.
+- If it's a high-tech/clean scene, include rustic, vintage, old, low-tech, dirt, ruins.
+
+Always include universal quality-enhancers like "blurry, low resolution, low quality, worst quality, text, watermark, signature, username, logo".
+
+Respond with ONLY the English negative terms separated by commas. Do not include any intro, outro, markdown, formatting, or quotes.`;
+
+    let generatedText = "";
+    const activeEngine = engine || 'gemini';
+
+    if (activeEngine === 'gemini' && !isGeminiTextQuotaExhausted) {
+      try {
+        console.log(`[Toonflow] Generating negative prompt via Gemini...`);
+        const geminiRes = await generateContentWithFallback({
+          model: "gemini-3.5-flash",
+          contents: systemPrompt,
+          customApiKey: customApiKey
+        });
+        generatedText = geminiRes?.text?.trim() || "";
+      } catch (geminiErr: any) {
+        console.warn("[Toonflow Warning] Gemini negative prompt generation failed, attempting Agnes fallback");
+      }
+    }
+
+    if (!generatedText) {
+      console.log(`[Toonflow] Generating negative prompt via Agnes/Mistral fallback...`);
+      generatedText = await generateText(systemPrompt, 'agnes', "gemini-3.5-flash", customApiKey);
+    }
+
+    // Clean up response
+    let cleanPrompt = generatedText.trim().replace(/^['"`]+|['"`]+$/g, '');
+    res.json({ negativePrompt: cleanPrompt });
+  } catch (error: any) {
+    console.error("[Toonflow Error] Negative prompt generation failed:", error);
+    res.status(500).json({ error: "Failed to generate negative prompt" });
   }
 });
 
@@ -1970,451 +2062,69 @@ app.post("/api/extract-characters", async (req, res) => {
   try {
     console.log(`[Toonflow] Extracting characters with style: ${styleText}, engine: ${engine}`);
     
-    let parsedData = null;
+    const systemInstruction = `You are Toonflow's Character Analyst. Analyze the novel passage and extract all key characters.
+For each character, provide:
+- name: The character name in Traditional Chinese (e.g., "凌風").
+- role: Role in the story (e.g., "男主角", "女主角", "反派", "配角").
+- age: Age or approximate age group (e.g., "青年", "中年", "18歲").
+- clothing: A descriptive clothing style in Traditional Chinese that fits their profile (e.g., "穿著筆挺的深藍色商務西裝，白色襯衫，打著深色領帶").
+- personality: Personality traits in Traditional Chinese (e.g., "冷酷無情但對愛人溫柔").
+- description: A detailed cinematic visual description in English for AI image generation, incorporating their hairstyle, eye color, facial features, and distinct aesthetic that matches "${styleText}". Explicitly state their gender (e.g., "A handsome 28-year-old adult male with short sharp black hair, high nose bridge, wearing a premium tailored navy blue suit").
 
-    if (engine === 'agnes' || isGeminiTextQuotaExhausted) {
-      console.log("[Toonflow] Extracting characters via Agnes AI text completions...");
-      const promptText = `你現在是 Toonflow 的資深角色設計師與分鏡繪圖師。
-請分析以下原著小說段落，識別出其中的關鍵主角（1到3個角色），並以 JSON 格式輸出這幾個角色。
-角色屬性必須包含：
-1. "name": 繁體中文角色名字
-2. "role": 繁體中文身份/職業
-3. "age": 繁體中文估計年齡
-4. "clothing": 繁體中文典型服裝
-5. "personality": 繁體中文性格特質
-6. "description": 用於 AI 繪圖模型（如 Flux 或 Midjourney）的英文外貌詳細描述 (Visual Prompt)。【重要性 - 角色性別明確化】：為了避免 AI 在繪製或生成影片時混淆性別（如把男女畫成兩個男人），你必須在 "description" 的開頭最前面，明確使用極具性別區隔度的英文性別特徵詞（例如：男主角必須以 "a handsome adult male", "a young Chinese man" 開頭；女主角必須以 "a beautiful delicate young female", "a charming Chinese woman" 開頭），並詳細交代其髮型、面部特徵與身形比例。
-
-風格要求：${styleText}。
-原著小說片段：
-${novelText}
-
-請直接輸出 JSON 陣列（Array of objects），不要包含任何 markdown 標記（如 json code block）或任何開頭介紹，保持純 JSON 格式。`;
-
-      try {
-        const text = await generateText(promptText, 'agnes', "gemini-3.5-flash", customApiKey);
-        const cleaned = cleanJsonString(text);
-        parsedData = JSON.parse(cleaned);
-      } catch (err: any) {
-        console.error("[Toonflow Error] Agnes character extraction failed, throwing to activate local fallback:", err.message);
-        throw err;
-      }
-    } else {
-      const systemInstruction = `You are Toonflow's Senior Character Designer and Storyboard Artist.
-Your job is to analyze original novel paragraphs (usually in Traditional or Simplified Chinese), identify the key main characters (usually 1 to 3), and output their name, Chinese role/identity, and a highly detailed English appearance visual description (for character avatar generation).
-
-For each character, you must provide:
-1. name: Traditional Chinese name of the character (e.g. "凌風", "冷霜").
-2. role: Traditional Chinese identity or occupation (e.g. "主角程序員", "女總裁").
-3. age: Estimated age of the character in Traditional Chinese (e.g. "25歲", "中年").
-4. clothing: Description of typical clothing in Traditional Chinese (e.g. "黑色西裝", "休閒連帽衫").
-5. personality: Character's personality traits in Traditional Chinese (e.g. "冷酷堅毅", "溫柔善良").
-6. description: A highly detailed, realistic English visual appearance description (Visual Prompt) of their look, face, clothing, hair, age, mood, etc., optimized for AI models like Flux, Midjourney, or Stable Diffusion. Avoid abstract terms. It must be a purely visual description of the character in the selected style: "${styleText}".
-   - [CRITICAL GENDER-EXPLICIT MANDATE]: To prevent downstream video/drawing generators from confusing genders (e.g., rendering two men instead of a man and a woman), you MUST start the English "description" field with highly distinct gender-identifying nouns and adjectives (e.g. "a handsome young adult male" or "a beautiful elegant young female"). Specify detailed facial structure, hair style, hair color, eye expression, and body proportions to clearly establish their physical identity.`;
-
-      const response = await generateContentWithFallback({
-        model: "gemini-3.5-flash",
-        contents: `Please extract characters from this novel passage:\n\n${novelText}`,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            description: "List of extracted characters",
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING, description: "Character name in Traditional Chinese" },
-                role: { type: Type.STRING, description: "Character role or identity in Traditional Chinese" },
-                age: { type: Type.STRING, description: "Estimated age in Traditional Chinese" },
-                clothing: { type: Type.STRING, description: "Typical clothing description in Traditional Chinese" },
-                personality: { type: Type.STRING, description: "Personality traits in Traditional Chinese" },
-                description: { type: Type.STRING, description: "Detailed English visual appearance description (Visual Prompt)" }
-              },
-              required: ["name", "role", "description"]
-            }
-          }
-        }
-      });
-
-      parsedData = JSON.parse(response.text || "[]");
-    }
-
-    if (parsedData && Array.isArray(parsedData)) {
-      res.json({ characters: parsedData });
-    } else {
-      throw new Error("Invalid or empty response format from AI");
-    }
-  } catch (error: any) {
-    console.error("[Toonflow Error] Extract-characters API failed:", error);
-    
-    // Fallback: local heuristic extractor
-    const fallbackCharacters = [];
-    const lowerText = novelText;
-    if (lowerText.includes("凌風") || lowerText.includes("男主")) {
-      fallbackCharacters.push({
-        name: "凌風",
-        role: "深夜加班的主角程序員，性格堅毅",
-        description: "A young Chinese male programmer in his late 20s, short slightly messy black hair, sharp focused eyes, wearing a casual dark hoodie, in modern office setting."
-      });
-    }
-    if (lowerText.includes("林總") || lowerText.includes("沈總") || lowerText.includes("冷霜")) {
-      const name = lowerText.includes("冷霜") ? "冷霜" : "林總";
-      fallbackCharacters.push({
-        name,
-        role: "高冷霸氣的企業總裁，氣場強大",
-        description: "An elegant professional business woman in her early 30s, long sleek dark hair, refined facial features, sharp corporate look, dark tailored business suit."
-      });
-    }
-    if (fallbackCharacters.length === 0) {
-      fallbackCharacters.push({
-        name: "神秘主角",
-        role: "故事中的核心人物",
-        description: "A mysterious figure with deep focused gaze, wearing stylish urban clothing, cinematic rim lighting."
-      });
-    }
-    res.json({ characters: fallbackCharacters, isFallback: true });
-  }
-});
-
-// Toonflow Feature: AI Character Target Analysis Endpoint
-app.post("/api/analyze-character-target", async (req, res) => {
-  const { characterName, novelText: rawNovelText, artStyle, customApiKey } = req.body;
-  if (!characterName) {
-    return res.status(400).json({ error: "Character name is required" });
-  }
-
-  const novelText = cleanNovelTextForParsing(rawNovelText || "");
-  const styleText = artStyle || "Anime key visual (動漫卡通動感)";
-
-  try {
-    console.log(`[Toonflow] Analyzing character target traits for: ${characterName}`);
-
-    const systemInstruction = `You are Toonflow's Senior Character Designer and Storyboard Artist.
-Your job is to analyze the original novel paragraph, script, or storyboard details, and extract or design the PRECISE TARGET CHARACTER TRAITS for the specific character named "${characterName}".
-
-You must extract and formulate highly aligned traits based on the context:
-1. role: Traditional Chinese identity/occupation (e.g. "主角程序員", "高冷總裁", "古代刺客", "機智的大學生").
-2. age: Estimated age or stage of life in Traditional Chinese (e.g. "25歲", "約30歲", "少年").
-3. clothing: Typical or expected clothing style described in the novel/context (e.g. "黑色西裝與白色襯衫", "白色連身裙", "休閒連帽衫與牛仔褲").
-4. personality: Character's core personality traits in Traditional Chinese (e.g. "冷酷堅毅", "溫柔善良但有些憂鬱").
-5. mood: Recommended default expression or emotion in Traditional Chinese (e.g. "微笑", "沉思", "冷酷", "憤怒", "得意的笑").
-6. description: A highly detailed, realistic English visual appearance description (Visual Prompt) of their physical looks, face shape, eyes, hair style/color, clothing details, and typical setting, optimized for Flux, Midjourney, or Stable Diffusion.
-   - [CRITICAL GENDER-EXPLICIT MANDATE]: You MUST start the English "description" field with highly distinct gender-identifying nouns and adjectives (e.g. "a handsome young adult male" or "a beautiful elegant young female") to prevent drawing models from confusing genders. Specify detailed facial structure, hair style, hair color, eye shape/expression, and body build to clearly lock down their visual profile.`;
+Return a JSON object with a single "characters" array.`;
 
     const response = await generateContentWithFallback({
       model: "gemini-3.5-flash",
-      contents: `Please analyze this novel segment and extract the exact target characteristics for the character named "${characterName}":\n\n${novelText}`,
+      contents: `Please analyze this novel passage and extract characters:\n\n${novelText}`,
+      customApiKey,
       config: {
         systemInstruction,
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
-          description: "Target characteristics of the character",
           properties: {
-            role: { type: Type.STRING, description: "Role or identity" },
-            age: { type: Type.STRING, description: "Estimated age" },
-            clothing: { type: Type.STRING, description: "Typical clothing style" },
-            personality: { type: Type.STRING, description: "Personality traits" },
-            mood: { type: Type.STRING, description: "Default mood or expression" },
-            description: { type: Type.STRING, description: "Detailed English visual appearance description (Visual Prompt)" }
-          },
-          required: ["role", "age", "clothing", "personality", "mood", "description"]
-        }
-      }
-    });
-
-    const targetTraits = JSON.parse(response.text || "{}");
-    res.json({ targetTraits });
-  } catch (error: any) {
-    console.error("[Toonflow Error] analyze-character-target API failed:", error);
-    // Return standard fallback characteristics if AI fails
-    res.json({
-      targetTraits: {
-        role: "小說中的關鍵核心角色",
-        age: "青年 (約25-30歲)",
-        clothing: "精緻日常服裝",
-        personality: "睿智自信，性格獨特",
-        mood: "冷酷 / 沉思 (Thoughtful)",
-        description: `A highly detailed English visual prompt of ${characterName}, beautiful facial features, expressive eyes, modern hair style, wearing clean tailored outfit, rendered in professional cinematic ${styleText} style.`
-      }
-    });
-  }
-});
-
-// Toonflow Feature: AI Novel Generator
-app.post("/api/generate-novel", async (req, res) => {
-  const { idea, isRandom, engines = ['gemini'], customApiKey } = req.body;
-  
-  try {
-    let basePrompt = "";
-    if (isRandom) {
-      basePrompt = `你現在是一個專業的小說家。請隨機創作一個引人入勝的短篇故事，包含完整的開端、發展、高潮 and 結局。故事題材可以是科幻、奇幻、懸疑、愛情或武俠。字數約 300-500 字，要求情節緊湊、角色形象鮮明、畫面感強，適合改編成影視分鏡。請直接輸出故事內容，不要包含任何開場白。`;
-    } else {
-      if (!idea) {
-        return res.status(400).json({ error: "Please provide an idea" });
-      }
-      basePrompt = `你現在是一個專業的小說家。請根據以下靈感擴寫成一個短篇故事片段。要求情節生動、角色形象鮮明、畫面感強，並包含對話，適合改編成影視分鏡。字數約 300-500 字。
-
-靈感：${idea}
-
-請直接輸出故事內容，不要包含任何開場白。`;
-    }
-
-    let generatedText = "";
-    if (!Array.isArray(engines) || engines.length === 0) {
-      generatedText = await generateText(basePrompt, "gemini", "gemini-3.5-flash", customApiKey);
-    } else if (engines.length === 1) {
-      generatedText = await generateText(basePrompt, engines[0], "gemini-3.5-flash", customApiKey);
-    } else {
-      // Multi-agent discussion for novel generation
-      console.log(`[Toonflow] Running multi-agent discussion for novel generation, engines: ${engines.join(", ")}`);
-      const draftPromises = engines.map(async (eng) => {
-        const engName = eng === 'gemini' ? 'Gemini' : eng === 'agnes' ? 'Agnes' : 'Agent3 (Mistral)';
-        try {
-          const content = await generateText(basePrompt, eng, "gemini-3.5-flash", customApiKey);
-          return { name: engName, content };
-        } catch (err) {
-          console.error(`[Toonflow] Novel draft generation failed for ${engName}:`, err);
-          return null;
-        }
-      });
-      const draftResults = await Promise.all(draftPromises);
-      const validDrafts = draftResults.filter((d): d is { name: string; content: string } => d !== null && d.content.trim().length > 0);
-
-      if (validDrafts.length === 0) {
-        try {
-          console.log("[Toonflow] No active drafts succeeded, falling back to Gemini.");
-          generatedText = await generateText(basePrompt, "gemini", "gemini-3.5-flash", customApiKey);
-        } catch (fallbackErr) {
-          throw new Error("所有 AI 服務暫時無法連線，請稍後再試。");
-        }
-      } else if (validDrafts.length === 1) {
-        generatedText = validDrafts[0].content;
-      } else {
-        const discussionPrompt = `你現在是「Toonflow 協調者 Agent (Coordinator)」。
-你負責主持多個 AI 創作 Agent 之間的協調討論會議，並收集他們的建議，進行深度的整合優化。
-
-【參與會議的創作 Agent 列表】：
-${validDrafts.map(d => `- ${d.name}`).join('\n')}
-
-【用戶對本次創作的請求/靈感】：
----
-${isRandom ? "隨機創作一個精彩的短篇故事，包含完整的開端、發展、高潮與結局，字數約 300-500 字，要求適合改編成影視分鏡。" : `靈感：${idea}`}
----
-
-【各位創作 Agent 提出的初步草稿與創意提案】：
-${validDrafts.map(d => `---
-【${d.name} 的提案】：
-${d.content}`).join('\n\n')}
-
----
-作為「協調者 Agent (Coordinator)」，請依照以下結構進行回覆，讓使用者能清楚看見討論與整合的精華：
-
-1. 🏷️【協調討論與整合報告】
-請以客觀且專業的角度，分析各 Agent 提案的獨特亮點與特點（例如誰的背景氛圍刻畫最到位、誰的情節轉折最有張力、誰的對白最精練），並簡短說明你身為協調者是如何將這幾份提案進行「完美融合與優化」的。
-
-2. 📖【協調者最終整合版本】
-請直接給出經你主持會議深入討論、精心修改與潤飾融合後，最完美、最流暢、最具有影視畫面感的最終短篇小說故事。
-
-重要限制：
-- 回應請務必使用繁體中文。
-- 格式要美觀清晰，結構分明。`;
-
-        const synthesisEngine = engines.includes('gemini') ? 'gemini' : engines[0];
-        generatedText = await generateText(discussionPrompt, synthesisEngine, "gemini-3.5-flash", customApiKey);
-      }
-    }
-
-    if (!generatedText) {
-      throw new Error("Empty response from AI");
-    }
-
-    const { discussionReport, story } = parseCoordinatorResponse(generatedText);
-
-    res.json({
-      text: story.trim(),
-      discussionReport: discussionReport.trim(),
-      fullText: generatedText.trim()
-    });
-  } catch (error: any) {
-    console.error("[Toonflow Error] Novel generation failed:", error);
-    res.status(500).json({ error: "Failed to generate novel" });
-  }
-});
-
-// Toonflow Feature: Scene Chatbot to answer storyboard questions and perform real-time modifications of any fields
-app.post("/api/chat-scene", async (req, res) => {
-  const { scene, message, history = [], customApiKey } = req.body;
-  if (!scene || !message) {
-    return res.status(400).json({ error: "Scene and message are required" });
-  }
-
-  try {
-    const systemInstruction = `你現在是 Toonflow 專業的「分鏡導演與劇本審核大師」。
-目前用戶正在針對一個特定的「分鏡場景（Storyboard Scene）」進行微調、提問、審核、或者是對整個分鏡細節的全面改寫。
-目前的該分鏡所有資料如下：
-- 分鏡標題 (title): "${scene.title || ""}"
-- 出場角色 (character): "${scene.character || ""}"
-- 台詞對白 (dialogue): "${scene.dialogue || ""}"
-- 場景旁白 (narration): "${scene.narration || ""}"
-- 音效與背景音樂 / 鏡頭音訊 (audioCue): "${scene.audioCue || ""}"
-- 繪圖英文描述提示詞 PROMPT (visualPrompt): "${scene.visualPrompt || ""}"
-- 影片動作描述提示詞 ACTION PROMPT (actionPrompt): "${scene.actionPrompt || ""}"
-- 過渡到下個場景提示詞 TRANSITION PROMPT (transitionPrompt): "${scene.transitionPrompt || ""}"
-- 導演註記 / 個人拍攝筆記 DIRECTOR'S NOTES (directorNotes): "${scene.directorNotes || ""}"
-
-用戶最新發送的提問或修改需求是：「${message}」
-
-以下是用戶與你針對本分鏡的對話歷史紀錄：
-${history.map((h: any) => `${h.role === 'user' ? 'User' : 'AI'}: ${h.content}`).join('\n')}
-
-你的職責：
-1. 【解答該分鏡主題相關問題】：回答用戶針對此分鏡、導演視角、運鏡、燈光、音效、台詞、角色情感或劇情合理的任何提問。
-2. 【重新審查與優化三大核心音訊、鏡頭轉換及備忘欄位（核心職責，請主動積極審查優化）】：
-   - 【音效與背景音樂 / 鏡頭音訊 (audioCue)】：評估音效描述是否具有電影級、空間環繞感與情緒渲染力，如有需要請協助重新編排或加強。
-   - 【過渡到下個場景提示詞 (transitionPrompt)】：檢視與下一鏡頭的連接處，使過渡提示詞（例如淡入淡出、鏡頭搖移、物體遮擋、3D 旋轉、動態模糊等）更為平滑生動且英文描繪流暢。
-   - 【導演註記 / 個人拍攝筆記 (directorNotes)】：審核導演指示是否足夠專業，包含分鏡燈光調性、色溫（例如：金黃色溫馨逆光）、特寫焦點與情緒等，提供更具操作性的拍片引導筆記。
-   - 當用戶提問、提及此類需求，或者你在自主審查中發現這三個欄位有任何不足或進步空間時，請【務必】主動重新 review、重寫並優化這三個欄位，將優化成果回填至 \`updatedFields\` 以提供最專業的分鏡。
-3. 【即時修改分鏡欄位】：若用戶要求修改、精簡、改寫台詞、加強畫面張力、優化繪圖或影片 PROMPT 等，你必須在 JSON 的 \`updatedFields\` 物件中，填入被修改後對應的「新欄位完整內容」，欄位包含：
-   - "title" (標題)
-   - "character" (角色)
-   - "dialogue" (台詞對白)
-   - "narration" (場景旁白)
-   - "audioCue" (音效與背景音樂 / 鏡頭音訊)
-   - "visualPrompt" (繪圖英文描述提示詞 PROMPT - 必須是流暢且豐富的英文描繪)
-   - "actionPrompt" (影片動作描述提示詞 ACTION PROMPT - 必須是流暢且豐富的英文描繪)
-   - "transitionPrompt" (過渡到下個場景提示詞 TRANSITION PROMPT - 必須是流暢且豐富的英文描繪)
-   - "directorNotes" (導演註記 / 個人拍攝筆記 - 繁體中文)
-4. 【重要性 - 角色性別與外觀明確化】：如果用戶在問題或修改中提到要把主角角色性別與外觀描述改得更明確（例如：避免混淆），請務必提供明確的性別和外觀特徵描述。
-   - 如果用戶要求「第一把旁白數目減少至5秒能讀完」，請把 narration 改寫為一句簡潔的背景描述或氣氛敘述，避免冗長文字，並儘量控制在可在5秒內讀完的短句範圍。
-   - 如果用戶要求「第二把旁白的內容加入導演註記 / 個人拍攝筆記 (DIRECTOR'S NOTES) 及氛圍音效與背景音樂」，請務必將原旁白重構：narration 保留最簡短的場景氛圍描寫，directorNotes 填入細緻的鏡頭、運鏡、燈光與情緒指引，audioCue 填入具體音效與背景音樂描述。
-
-請直接輸出上述 JSON 對象，不要包含任何 markdown 標記或解釋文字，保持純 JSON 格式。`;
-
-    let parsed = null;
-    let agnesFailed = false;
-
-    try {
-      console.log("[Toonflow] Processing scene-chat via Agnes...");
-      const promptText = `${systemInstruction}
-      
-請根據以上指示，回答用戶最新的提問，並視需要進行分鏡欄位的修改。
-格式與回覆欄位說明如下：
-{
-  "response": "對用戶的對話、建議或解答（繁體中文），說明你的修改思路。",
-  "updatedFields": {
-    "title": "若有修改填入新標題，否則留空",
-    "character": "若有修改填入新角色，否則留空",
-    "dialogue": "若有修改填入新對白台詞，否則留空",
-    "narration": "若有修改填入新旁白字幕，否則留空",
-    "audioCue": "若有修改填入新音效與背景音樂，否則留空",
-    "visualPrompt": "若有修改填入新繪圖英文描述提示詞，否則留空",
-    "actionPrompt": "若有修改填入新影片動作描述提示詞，否則留空",
-    "transitionPrompt": "若有修改填入新過渡提示詞，否則留空",
-    "directorNotes": "若有修改填入新導演註記，否則留空"
-  }
-}
-
-請直接輸出上述 JSON 對象，不要包含任何 markdown 標記或解釋文字，保持純 JSON 格式。`;
-
-      const text = await generateText(promptText, 'agnes', "gemini-3.5-flash", customApiKey);
-      const cleaned = cleanJsonString(text);
-      parsed = JSON.parse(cleaned);
-      console.log("[Toonflow] Agnes scene-chat completed successfully!");
-    } catch (err: any) {
-      console.error("[Toonflow Warning] Agnes scene-chat failed, falling back to Gemini:", err.message);
-      agnesFailed = true;
-    }
-
-    // Fallback to Gemini if Agnes failed
-    if (agnesFailed || !parsed) {
-      console.log("[Toonflow] Processing scene-chat via Gemini AI fallback...");
-      const response = await generateContentWithFallback({
-        model: "gemini-3.5-flash",
-        contents: `Please reply to user scene request and perform update if needed.`,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              response: {
-                type: Type.STRING,
-                description: "對用戶的對話、建議或解答（繁體中文），說明你的修改思路。"
-              },
-              updatedFields: {
+            characters: {
+              type: Type.ARRAY,
+              description: "List of extracted characters",
+              items: {
                 type: Type.OBJECT,
-                description: "包含所有被更新的分鏡屬性，若無更新則留空。",
                 properties: {
-                  title: { type: Type.STRING },
-                  character: { type: Type.STRING },
-                  dialogue: { type: Type.STRING },
-                  narration: { type: Type.STRING },
-                  audioCue: { type: Type.STRING },
-                  visualPrompt: { type: Type.STRING },
-                  actionPrompt: { type: Type.STRING },
-                  transitionPrompt: { type: Type.STRING },
-                  directorNotes: { type: Type.STRING }
-                }
+                  name: { type: Type.STRING },
+                  role: { type: Type.STRING },
+                  age: { type: Type.STRING },
+                  clothing: { type: Type.STRING },
+                  personality: { type: Type.STRING },
+                  description: { type: Type.STRING }
+                },
+                required: ["name", "role", "age", "clothing", "personality", "description"]
               }
-            },
-            required: ["response"]
-          }
+            }
+          },
+          required: ["characters"]
         }
-      });
-      parsed = JSON.parse(response.text || "{}");
-    }
-
-    res.json(parsed);
-  } catch (error: any) {
-    console.error("[Toonflow Error] Scene chat failed:", error);
-    res.status(500).json({ error: error?.message || "Failed to process scene chat" });
-  }
-});
-
-// Toonflow Feature: Novel Chatbot for iterative novel editing
-app.post("/api/chat-novel", async (req, res) => {
-  const { messages, novelText, engines, customApiKey } = req.body;
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: "Messages array is required" });
-  }
-
-  try {
-    const systemInstruction = `你現在是 Toonflow 專業的「分鏡導演與劇本大師」。
-目前用戶正在與你討論小說劇本或分鏡規劃。
-以下是目前完整的小說/劇本內容：
----
-${novelText || "(暫無劇本內容)"}
----
-
-你的職責：
-1. 回答用戶的問題，給出專業的分鏡建議、劇情改寫或拍攝技巧。
-2. 若用戶要求修改劇本（例如「把時間改成晚上」、「增加一段對話」、「限制分鏡5秒內」等），你可以在回答中提供修改建議。
-3. 【非常重要】：如果你判斷用戶的需求是「直接修改」現有劇本內容，並且你已經幫忙改寫了新的劇本，請在你的回答**最後**附上完整的新劇本內容，並將其包裝在 <novel_update> 新劇本內容 </novel_update> 標籤中。如果只是討論而不需要自動替換劇本，則不要使用此標籤。`;
-
-    const formattedMessages = messages.map((m) => ({
-      role: m.role === 'ai' ? 'model' : 'user',
-      parts: [{ text: m.content }]
-    }));
-
-    const response = await generateContentWithFallback({
-      model: "gemini-3.5-flash",
-      contents: formattedMessages,
-      config: {
-        systemInstruction,
       }
     });
 
-    const text = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    
-    res.json({ text });
-  } catch (error) {
-    console.error("[Toonflow Error] Novel chat failed:", error);
-    res.status(500).json({ error: error?.message || "Failed to process novel chat" });
+    const parsedData = JSON.parse(response.text || "{\"characters\": []}");
+    res.json(parsedData);
+  } catch (error: any) {
+    console.error("[Toonflow] Error in character extraction:", error);
+    res.json({
+      characters: [
+        {
+          name: "主角",
+          role: "主角",
+          age: "青年",
+          clothing: "休閒服裝",
+          personality: "熱情積極",
+          description: "A handsome young individual wearing casual clothes with a warm smile"
+        }
+      ]
+    });
   }
 });
 
-// Toonflow Feature: AI Novel Splitter Endpoint using Gemini/Agnes
+// Toonflow Feature: AI Storyboard Splitter Endpoint using Gemini/Agnes
 app.post("/api/split-novel", async (req, res) => {
   const { novelText: rawNovelText, artStyle, characters, engine = 'gemini', customApiKey } = req.body;
   if (!rawNovelText) {
@@ -2423,9 +2133,10 @@ app.post("/api/split-novel", async (req, res) => {
 
   const novelText = cleanNovelTextForParsing(rawNovelText);
   const styleText = artStyle || "Anime key visual (動漫卡通動感)";
+  
   let characterContext = "";
   if (characters && characters.length > 0) {
-    const charsList = characters.map((c: any) => `- Name: ${c.name}, Role: ${c.role || 'N/A'}, Clothing: ${c.clothing || 'N/A'}, Desc: ${c.description || 'N/A'}`).join("\n");
+    const charsList = characters.map((c: any) => `- Name: ${c.name}\n  Role: ${c.role}\n  Age: ${c.age}\n  Clothing Style: ${c.clothing}\n  Visual Description: ${c.description}`).join("\n\n");
     characterContext = `\n\nYou must strictly use the following pre-established characters if they appear in the scene:\n${charsList}\nFor the 'character' field, ONLY use names from this list if they are the primary character. In the 'visualPrompt', you MUST incorporate their description and clothing style accurately. [CRITICAL CLOTHING CONSISTENCY MANDATE]: To ensure absolute character continuity, every character MUST wear the exact same clothing described in their clothing/description style above in all scenes. Do not let characters change clothes or wear different outfits between scenes unless the story explicitly states a wardrobe change.`;
   }
 
@@ -2444,21 +2155,43 @@ app.post("/api/split-novel", async (req, res) => {
 
 對於每個分鏡場景，請提供以下屬性的 JSON 對象：
 1. "title": 繁體中文場景名稱（例：地點 - 時間）
-2. "dialogue": 該場景主角說的角色對話台詞（繁體中文），無對白則留空 ""
-3. "narration": 該場景的背景旁白、場景描述或字幕內容（繁體中文），嘴唇不說話
+2. "dialogue": 該場景主角說的角色對話台詞（繁體中文），無對白則留空 ""。
+   【極度重要：少旁白、多對白與內心對話規則】：
+   - 由於語音合成（如 Agnes）不朗讀旁白（narration）只朗讀對白（dialogue），你必須「極力多產出對白、少產出旁白」。
+    - 當角色「不便動口」或為「思考、心裡話、默念、在背後看著」時，你「必須」使用【內心對話】並放入 dialogue 欄位！內心對話請用括號包裝，例如 (內心對話：他看起來很緊張，我該怎麼辦？) 或 (心想：這實在是太不可思議了)。這樣語音合成就能順利朗讀！
+   - 對白與旁白必須互斥，一個分鏡要麼只有對白要麼只有旁白，絕對不可兩者同時存在。且對白長度必須極度精簡，控制在 5 秒內（15字以內）能自然讀完。
+3. "narration": 該場景的背景旁白、場景描述或字幕內容（繁體中文），嘴唇不說話。【極度重要：優先使用對白，旁白必須極度精簡，最好留空或控制在 10 字以內】。
 4. "character": 出場的關鍵角色名字
 5. "visualPrompt": 一段專門用於 AI 繪圖模型（如 Flux 或 SD）的詳細英文場景視覺提示詞 (Visual Prompt)，融入風格："${styleText}"。
    【重要：男女/多角色防混淆規則】：AI 繪圖模型（如 Agnes 或 Flux）無法理解抽象的中英文人名（如 "Chen Mo" 或 "Lin Qian"），也極易在一個畫面中畫出兩個性別相同的人（例如把男女畫成兩個男人）。
    - 任何時候當場景包含兩個或多個角色時，你「絕對不能」只在提示詞中寫人名，必須明確、具體地描述他們的性別與性別特徵差異。
    - 必須使用極具性別區隔性的明確詞彙（例如：把男主角寫為 "a handsome adult male", "a strong man"；女主角寫為 "a beautiful delicate young female", "a graceful woman"）。
-   - 分別詳細描述兩個人的外貌特徵與穿著差異（例如：「男主角留著黑色短髮、穿著黑色西裝，保護性地摟著留著柔順棕色長髮、穿著白色裙子的美麗女主角」）。這樣能引導繪圖模型將兩組特徵正確映射到不同的人身上，絕不混淆成「男男」或「女女」！
-   請特別注意：為確保影片畫面完全乾淨，視覺提示詞中「絕對不能」出現任何中文字元、台詞對白文字、任何引號、英文字幕或文字。如果該場景有台詞，請僅在視覺提示詞中加入 "lips moving in sync with speech", "speaking", "completely clean video, no subtitles, no text, no captions" 等視覺描述。
-6. "actionPrompt": 一段專門用於生成影片的詳細英文動作提示詞 (Action Prompt)，必須描述這個場景中發生了什麼具體的動作和事件。如果小說中說女孩跑向紙箱抱起小貓，請確保用英文詳細描述 "The girl (a beautiful young female) runs towards the cardboard box and hugs the wet kitten tightly."。請勿只描述靜止畫面，一定要寫出具體的角色動作與互動！同樣注意多角色互動時，必須清楚交代男女角色的動作和互動關係（例如 "The handsome male holds the delicate female protectively in his arms"），不可只寫人名避免 AI 混淆。
-7. "transitionPrompt": 一段專門用於生成影片的詳細英文過渡提示詞 (Transition Prompt)，描述這個場景結束時角色如何自然過渡或移動到下一個場景（例如：stands up and walks away）。如果沒有過渡則留空 ""。
-8. "durationSeconds": 場景時長（整數，在 3 到 5 秒之間）。【極度重要】：影片生成超過 5 秒非常不穩定，因此時長「絕對不可超過 5 秒」。如果故事、動作或台詞需要更多時間，請務必「拆分成更多個分鏡」來維持故事完整性，寧可多作分鏡，也絕對不要把單個分鏡時間拉長超過 5 秒！
-9. "audioCue": 該分鏡場景的特定音訊氛圍提示（繁體中文）。
-   【特別注意（核心音訊分析規則）】：即使連續的數個鏡頭發生在同一個場景（同一個地點/時間標籤），它們的背景音樂、環境音效或音訊氛圍也可能因為故事焦點的變化而完全不同。例如：鏡頭一是「窗外淅淅瀝瀝的下雨聲」，但在場景不變的情況下，鏡頭二可能因為微距鏡頭或室內拉近而「沒有了雨聲，轉為寂靜」或「轉為悠柔的鋼琴背景音樂」。請自動根據小說段落的微觀語境、情緒流轉與相機焦點，為每一鏡分析出最切合當下鏡頭的音訊氛圍（如：「急促的下雨聲與隆隆雷鳴」、「溫馨舒緩的背景鋼琴曲」、「安靜、偶爾有微弱的風聲」、「寂靜深夜的蟲鳴聲」等）。
+   - 分別詳細描述兩個人的外貌特徵與穿著差異（例如：「男主角留著黑色短髮、穿著黑色西裝，保護性地摟著留著柔順棕色長髮、穿著白色裙子的美麗女主角」）。這樣能引導繪圖模型將兩組特徵正確映射到不同的人身上，絕不混淆。
+6. "actionPrompt": 一段專門用於 AI 影片模型（如 SVD 或 Runway）的詳細英文影片動作描述提示詞 (Action Prompt)。
+   - [CRITICAL LIP SYNC & SILENT ACTION RULES]:
+      * If there is normal dialogue (dialogue is NOT empty and does NOT start with '('): The actionPrompt MUST explicitly describe that the character is speaking the line in English, with their mouth/lips moving in natural lip sync. For example: "[Character description] speaks the line \\"[Translated Dialogue]\\" with their mouth moving in natural lip sync."
+      * If there is inner dialogue/monologue wrapped in parentheses (dialogue starts with '('): The character's mouth should remain closed with a thoughtful/deep expression while we hear their voice as a voiceover. You MUST append exactly: "No character is talking, no lip movement, closed mouth, deep thoughtful expression, silent action." at the end of both actionPrompt and visualPrompt.
+      * If there is NO dialogue (dialogue is empty, only narration exists, or both are empty): The actionPrompt MUST NOT contain any words like "speaks the line", "talking", or mouth moving descriptions. Instead, describe the physical actions or camera zoom/pan, and you MUST append exactly: "No character is talking, no lip movement, closed mouth, silent action." at the end of the actionPrompt.
+7. An English transition generation prompt (transitionPrompt). This describes how the character or camera naturally moves to transition into the NEXT scene's starting point (e.g., "stands up and turns around to walk away"). If there is no next scene or no transition is needed, leave empty "".
+8. An audio ambiance prompt/cue (audioCue) in Traditional Chinese describing the background music, ambient sound, or micro sound effect of this specific shot (e.g., "淅淅瀝瀝的下雨聲與遠處雷鳴", "雨停了，四周陷入寂靜，只有微風吹拂樹葉的聲音", "溫馨輕快的鋼琴 background music", "急促緊張的弦樂重奏"). 
+   【CRITICAL AUDIO ANALYSIS MANDATE】: Even if consecutive scenes take place in the same location (the same title), their audio ambiance or sound effects can and should differ depending on the narrative focus, emotional intensity, or micro-environmental changes (for example, Shot 1 has heavy rain sound, while Shot 2 focuses on a close-up interior face where the rain fades out or changes to a tense silent atmosphere). Automatically analyze these auditory transitions and provide the exact sound effect/music description for each shot.
+9. A director's personal notes and shooting cue (directorNotes) in Traditional Chinese describing camera lens style (e.g., Close-up, Master Shot, Bird's eye view), camera movement details (e.g., slow zoom-in, smooth panning, tracking shot, dynamic push), lighting setups (e.g., low-key cold rim lighting, warm corporate side light, dramatic high-contrast neon lighting), and actor emotion hints. Must not be empty. (e.g. "特寫鏡頭聚焦在打電話時緊張的眼神，手部有些微顫抖。背景燈光呈現淺紫色調。").
 10. "directorNotes": 該場景的繁體中文導演拍攝筆記與拍攝備忘（繁體中文）。包含鏡頭景別（如：特寫、中景、遠景）、相機移動與運鏡指示（如：緩慢推近、平移跟隨、俯角拍攝、低角度仰拍）、燈光配置與冷暖色調（如：高對比冷色霓虹光、溫柔側光、檯燈邊緣逆光）以及演員細微情緒、眼神焦點與表情指示。不得為空。
+
+CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
+- [PHYSICAL LOGIC & SPATIAL COHERENCE]: You must ensure impeccable continuity and physical logic between scenes. If a character is sitting, they cannot suddenly be standing in the next shot without a transition action (e.g., 'stands up'). Maintain spatial directions (left vs right) and environmental cues (props, lighting angle) consistently across shots. Every visualPrompt and actionPrompt must depict concrete physical motions and tangible environmental elements—strictly avoid abstract verbs or conceptual expressions.
+- [CRITICAL CLEAN VISUALS & MOUTH MOVEMENT CONSTANT DIRECTIVE]:
+  1. [NO SUBTITLES, NO WATERMARKS, CLEAN VISUALS]:
+     - All visualPrompt and actionPrompt strings MUST NEVER contain any Chinese characters, dialogue text, quotes, English subtitles, captions, text, watermarks, logos, or signatures.
+     - You MUST append exactly "completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics" to the end of every 'visualPrompt' to guarantee pristine visuals.
+  2. [MOUTH MOVEMENT & LIP SYNC RULES]:
+     - If there is normal dialogue (dialogue is NOT empty and does NOT start with '('): You MUST append "lips moving in sync with speech, speaking" inside visualPrompt.
+     - If there is inner dialogue/monologue wrapped in parentheses (dialogue starts with '('): You MUST append exactly: "No character is talking, no lip movement, closed mouth, deep thoughtful expression, silent action." at the end of both actionPrompt and visualPrompt.
+     - If there is NO dialogue (dialogue is empty, only narration exists, or both are empty): You MUST append exactly: "No character is talking, no lip movement, closed mouth, silent action." at the end of both actionPrompt and visualPrompt to ensure the character's mouth remains closed and silent.
+- [DURATION & PACING]: AI Video generation segments MUST be dynamically set between 3 to 5 seconds.
+    - MAXIMUM 5 SECONDS per scene! Generating videos over 5 seconds is highly unstable.
+    - If the dialogue, action complexity, or pacing requires MORE than 5 seconds, YOU MUST split it into multiple consecutive scenes. It is always better to generate MORE scenes than to exceed the 5-second limit. Maintain story completeness across multiple scenes.
+    - Pad the visual prompt with descriptive lingering expressions, environmental reactions, or subtle movements to smoothly fill the chosen duration.
 
 ${characterContext}
 
@@ -2485,8 +2218,8 @@ Your job is to analyze original novel paragraphs (usually in Traditional or Simp
 
 For each scene, you must provide:
 1. A descriptive title in Traditional Chinese specifying the location and time (e.g. "凌風的辦公室 - 深夜", "熱鬧的街道 - 中午").
-2. The dialogue (台詞對白) in Traditional Chinese spoken specifically by the active character in this scene. If the character does not speak, leave this field empty "". Do NOT put narrator voiceover, atmospheric descriptions, or internal monologues in the dialogue field, otherwise their lips will move unnaturally. Only put literal spoken words here (e.g. "這件事必須立刻處理。").
-3. The narration (旁白字幕) in Traditional Chinese for background narrator voiceover, atmospheric description, or subtitle context where characters do NOT speak with moving lips. For example: "雨後的霓虹在積水中破碎..." MUST be put in narration, NOT dialogue.
+2. The dialogue (台詞對白) in Traditional Chinese spoken specifically by the active character in this scene. If the character does not speak, leave this field empty "". Dialogue (對白) and Narration (旁白) MUST be strictly mutually exclusive: a scene can only have dialogue or narration, never both. Additionally, dialogue must be extremely short and concise so that it can be naturally and completely read within 5 seconds (typically fewer than 15-20 Chinese characters). Do NOT put narrator voiceover, atmospheric descriptions, or internal monologues in the dialogue field, otherwise their lips will move unnaturally. Only put literal spoken words here (e.g. "這件事必須立刻處理。").
+3. The narration (旁白字幕) in Traditional Chinese for background narrator voiceover, atmospheric description, or subtitle context where characters do NOT speak with moving lips. Dialogue (對白) and Narration (旁白) MUST be strictly mutually exclusive: a scene can only have dialogue or narration, never both. Additionally, narration must be extremely short and concise so that it can be naturally and completely read within 5 seconds (typically fewer than 15-20 Chinese characters). For example: "雨後的霓虹在積水中破碎..." MUST be put in narration, NOT dialogue.
 4. The name of the primary active character in the scene.
 5. A highly detailed, cinematic English image generation prompt (visualPrompt) optimized for AI models like Flux or Stable Diffusion. The prompt should explicitly describe the visual details, composition, lighting, characters, and integrate the selected art style: "${styleText}". Avoid abstract text, keep it purely visual. Ensure characters look consistent across scenes.
    - [CRITICAL GENDER-EXPLICIT AND MULTI-CHARACTER REPRESENTATION RULES]: AI drawing/video models (like Flux, SD, or Agnes) do NOT understand abstract names like "Chen Mo" or "Lin Qian" and easily get confused when multiple characters are in the same frame, often rendering two people of the same gender (e.g., drawing two men instead of a man and a woman).
@@ -2494,6 +2227,9 @@ For each scene, you must provide:
    - Never just say "Chen Mo holds Lin Qian". Instead, use gender-explicit, highly contrasting nouns: "a handsome, tall young man (Chen Mo) with short dark hair and a strong build" holding "a delicate, beautiful young woman (Lin Qian) with long flowing hair and a petite frame".
    - You MUST individually specify distinct hairstyles, hair colors, body sizes, and explicit gender-identifying clothing/appearance descriptors for BOTH characters in the prompt. This guides the drawing model to correctly map the distinct attributes to the correct individual, completely avoiding rendering two characters of the same gender (such as two men or two women).
 6. An English action generation prompt (actionPrompt) optimized for Video AI models. This MUST explicitly describe the physical actions, character movements, and events happening in this scene based on the story. For example, "The girl runs towards the cardboard box and tightly hugs the wet kitten." Do NOT just describe a static portrait. Translate the novel's action into this field. When two characters interact, specify their genders and interactions explicitly (e.g., "The strong young man holds the delicate young woman protectively in his arms") to prevent AI from blending them or drawing same-gender characters.
+   - [CRITICAL LIP SYNC & SILENT ACTION RULES]:
+     * If there is dialogue (dialogue is NOT empty): The actionPrompt MUST explicitly describe that the character is speaking the line in English, with their mouth/lips moving in natural lip sync. For example: "[Character description] speaks the line \"[Translated Dialogue]\" with their mouth moving in natural lip sync."
+     * If there is NO dialogue (dialogue is empty, only narration exists, or both are empty): The actionPrompt MUST NOT contain any words like "speaks the line", "talking", or mouth moving descriptions. Instead, describe the physical actions or camera zoom/pan, and you MUST append exactly: "No character is talking, no lip movement." at the end of the actionPrompt.
 7. An English transition generation prompt (transitionPrompt). This describes how the character or camera naturally moves to transition into the NEXT scene's starting point (e.g., "stands up and turns around to walk away"). If there is no next scene or no transition is needed, leave empty "".
 8. An audio ambiance prompt/cue (audioCue) in Traditional Chinese describing the background music, ambient sound, or micro sound effect of this specific shot (e.g., "淅淅瀝瀝的下雨聲與遠處雷鳴", "雨停了，四周陷入寂靜，只有微風吹拂樹葉的聲音", "溫馨輕快的鋼琴 background music", "急促緊張的弦樂重奏"). 
    【CRITICAL AUDIO ANALYSIS MANDATE】: Even if consecutive scenes take place in the same location (the same title), their audio ambiance or sound effects can and should differ depending on the narrative focus, emotional intensity, or micro-environmental changes (for example, Shot 1 has heavy rain sound, while Shot 2 focuses on a close-up interior face where the rain fades out or changes to a tense silent atmosphere). Automatically analyze these auditory transitions and provide the exact sound effect/music description for each shot.
@@ -2576,92 +2312,18 @@ CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
             break;
           }
         }
-        if (character === "旁白" && dialogue.includes("「")) {
-          character = "神秘男子";
-        }
 
-        // Location & Time Tagging
-        let location = "故事現場";
-        let time = "白天";
-        if (dialogue.includes("辦公室") || dialogue.includes("室")) location = "高冷總裁辦公室";
-        else if (dialogue.includes("街") || dialogue.includes("路") || dialogue.includes("雨") || dialogue.includes("霓虹")) location = "繁華都市雨夜街道";
-        else if (dialogue.includes("車") || dialogue.includes("駕")) location = "行駛中的豪華轎車";
-        else if (dialogue.includes("家") || dialogue.includes("房") || dialogue.includes("沙發")) location = "溫暖舒適的起居室";
-        else if (dialogue.includes("秘") || dialogue.includes("會")) location = "集團會議室";
+        const cleanDial = dialogue.replace(/"/g, '\\"');
+        const audioCue = i === 0 ? "安靜深夜的風聲" : "溫馨舒緩的背景鋼琴曲";
+        const directorNotes = `中景鏡頭。燈光呈現柔和色調，演員表情專注。`;
 
-        if (dialogue.includes("夜") || dialogue.includes("晚") || dialogue.includes("暗") || dialogue.includes("黑")) {
-          time = "深夜";
-        }
-
-        const title = `${location} - ${time}`;
-
-        // Create elegant, visually detailed storyboard prompts
-        let subject = "A cinematic master shot of a character";
-        if (character === "凌風" || character === "男主") {
-          subject = "A handsome young male executive in a sleek dark tailored suit, sharp intense eyes, atmospheric look";
-        } else if (character === "秘書" || character === "女主") {
-          subject = "An elegant professional young woman with long dark hair, refined facial features, looking focused";
-        } else if (character === "神秘男子") {
-          subject = "A mysterious male figure standing in half-shadow, moody cinematic lighting";
-        }
-
-        let action = "sitting in contemplation with dramatic background shadows";
-        if (dialogue.includes("打") || dialogue.includes("電話") || dialogue.includes("號碼") || dialogue.includes("撥")) {
-          action = "holding a modern smartphone next to his ear, wet window pane reflections behind him";
-        } else if (dialogue.includes("看") || dialogue.includes("文件") || dialogue.includes("書") || dialogue.includes("紙")) {
-          action = "reading secret document sheets carefully on a mahogany desk";
-        } else if (dialogue.includes("走") || dialogue.includes("步") || dialogue.includes("跑")) {
-          action = "walking briskly with confidence, dynamic action motion lines";
-        } else if (dialogue.includes("笑") || dialogue.includes("高興")) {
-          action = "with a subtle confident smile, soft warm rim lighting";
-        }
-
-        let environment = "glowing neon signs in wet urban city background";
-        if (title.includes("辦公室")) {
-          environment = "modern minimal corporate high-rise office, glass windows with soft lights";
-        } else if (title.includes("街道")) {
-          environment = "moody dark alleyway street, glistening wet asphalt, neon reflections";
-        } else if (title.includes("轎車")) {
-          environment = "inside of a luxury automobile, blurred street light bokeh streaks through windows";
-        }
-
-        const visualPrompt = `${subject}, ${action}, ${environment}, in ${styleText} style, high quality storyboard framing, dramatic 16:9 cinematic shot.`;
-
-        // Smart context-aware fallback audio cues
-        let audioCue = "溫馨舒適的鋼琴背景音樂";
-        if (dialogue.includes("雨") || dialogue.includes("雷") || dialogue.includes("暴風") || title.includes("雨")) {
-          audioCue = (dialogue.includes("大") || dialogue.includes("急")) ? "急促的暴雨聲與隱約雷鳴" : "淅淅瀝瀝的下雨聲";
-          // If this is shot index 1 (the second shot), vary the rain sound to prove different micro soundscapes
-          if (i === 1) {
-            audioCue = "室內安靜氛圍，窗外只有微弱的雨聲";
-          }
-        } else if (title.includes("街道") || dialogue.includes("街") || dialogue.includes("路")) {
-          audioCue = "都市夜晚微弱的風聲與遠處汽車鳴笛聲";
-        } else if (title.includes("辦公室")) {
-          audioCue = "安靜的辦公室環境，有沙沙的紙張翻閱聲或微弱空調風聲";
-        } else if (dialogue.includes("暗") || dialogue.includes("黑") || dialogue.includes("夜")) {
-          audioCue = "寂靜的深夜蟲鳴聲";
-        }
-
-        let directorNotes = "開場鏡頭。相機緩慢推向主角，冷藍色調，窗外有微弱光斑映照。";
-        if (action.includes("phone")) {
-          directorNotes = "特寫鏡頭。焦點在主角打電話時緊張的眼神，手部有些微顫抖。背景呈現紫色調霓虹燈光。";
-        } else if (action.includes("document")) {
-          directorNotes = "中景側拍鏡頭。主角在微弱檯燈光下專注地翻看文件，陰影對比強烈，營造懸疑氛圍。";
-        } else if (action.includes("walk")) {
-          directorNotes = "低角度跟拍鏡頭。跟隨主角自信的步伐，背景中景物快速向後拉伸，增加動態感。";
-        } else if (action.includes("smile")) {
-          directorNotes = "特寫鏡頭。柔和的邊緣光勾勒出主角嘴角的一絲自信微笑，景深極淺，使人專注其神情。";
-        }
-
-        const isSpoken = dialogue.includes("「") || dialogue.includes("：") || dialogue.includes("“") || dialogue.includes("say") || dialogue.includes("說");
         fallbackScenes.push({
-          title,
-          dialogue: isSpoken ? dialogue : "",
-          narration: isSpoken ? "" : dialogue,
+          title: `場景 ${i + 1}`,
+          dialogue: `(內心對話：${cleanDial})`,
+          narration: "",
           character,
-          visualPrompt,
-          actionPrompt: "Character performs a subtle, cinematic action.",
+          visualPrompt: `A close-up shot of a character looking thoughtful, ${styleText}, completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics`,
+          actionPrompt: "No character is talking, no lip movement, closed mouth, deep thoughtful expression, silent action.",
           transitionPrompt: "",
           durationSeconds: 5,
           audioCue,
@@ -2676,7 +2338,6 @@ CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
     }
   }
 });
-
 
 app.post("/api/generate-transition-scene", async (req, res) => {
   const { sceneA, sceneB, novelText: rawNovelText, artStyle, characters, customApiKey } = req.body;
@@ -3009,6 +2670,71 @@ app.post("/api/analyze-avatar", async (req, res) => {
   }
 });
 
+// Toonflow Feature: Analyze character target traits from novel
+app.post("/api/analyze-character-target", async (req, res) => {
+  const { characterName, novelText, artStyle, customApiKey } = req.body;
+  if (!characterName) {
+    return res.status(400).json({ error: "characterName is required" });
+  }
+
+  try {
+    const systemInstruction = `你現在是 Toonflow 團隊的角色特徵大師。
+請根據使用者提供的小說內容及藝術風格，精準解析特定角色的核心外觀、服裝、年齡、性格、常規表情/情緒與基本故事定位設定。
+
+請嚴格以繁體中文與專業編劇的角度產出結果。
+【注意】：
+1. 角色年齡 (age) 可以是明確的數字（例如「25歲」）或一個大概的範圍（例如「少年（約16-18歲）」）。
+2. 服飾特徵 (clothing) 應融合指定的藝術風格（例如「${artStyle || "現代寫實"}」）與小說背景。
+3. 角色外觀描述 (description) 應包含長相、髮型、身形等細部特徵。`;
+
+    const promptText = `
+指定分析角色：${characterName}
+小說參考內容：
+---
+${novelText || "無"}
+---
+藝術風格限制：${artStyle || "現代寫實"}
+
+請為我詳細分析此角色的屬性，包含他的核心角色定位（role，如「主角」、「反派」、「神祕導師」）、年齡 (age)、服飾特徵 (clothing)、性格特點 (personality)、表情與情緒 (mood)、以及核心外觀特徵與細節描述 (description)。`;
+
+    const response = await generateContentWithFallback({
+      model: "gemini-3.5-flash",
+      contents: promptText,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          description: "分析所得的角色特徵設定",
+          properties: {
+            targetTraits: {
+              type: Type.OBJECT,
+              description: "角色詳細特徵屬性",
+              properties: {
+                role: { type: Type.STRING, description: "角色定位，例如：主角、反派、配角、神秘導師" },
+                age: { type: Type.STRING, description: "年齡或年齡層，例如：25歲、少年" },
+                clothing: { type: Type.STRING, description: "服飾特徵與穿著風格" },
+                personality: { type: Type.STRING, description: "性格特徵描述" },
+                mood: { type: Type.STRING, description: "常用表情、基本情緒或氣場描述" },
+                description: { type: Type.STRING, description: "核心外觀特徵，包含髮型、五官與身形細節描述" }
+              },
+              required: ["role", "age", "clothing", "personality", "mood", "description"]
+            }
+          },
+          required: ["targetTraits"]
+        }
+      },
+      customApiKey
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    res.json(result);
+  } catch (error: any) {
+    console.error("[Toonflow Character Target Error] Analysis failed:", error);
+    res.status(500).json({ error: error.message || "角色解析失敗。" });
+  }
+});
+
 // Toonflow Feature: Extract last frame from video using ffmpeg
 app.post("/api/extract-last-frame", async (req, res) => {
   const { videoUrl } = req.body;
@@ -3196,13 +2922,19 @@ app.post("/api/stitch-videos", async (req, res) => {
     }
     filterComplex += `${concatInputs}concat=n=${localPaths.length}:v=1:a=1[outv][outa]`;
     
-    const inputArgs = localPaths.map(p => `-i "${p}"`).join(" ");
-    const ffmpegCmd = `ffmpeg -y ${inputArgs} -filter_complex "${filterComplex}" -map "[outv]" -map "[outa]" -c:v libx264 -pix_fmt yuv420p -profile:v high -level:v 4.0 -c:a aac -b:a 128k "${localOutputPath}"`;
+    const ffmpegArgs: string[] = ["-y"];
+    for (const p of localPaths) {
+      ffmpegArgs.push("-i", p);
+    }
+    ffmpegArgs.push("-filter_complex", filterComplex);
+    ffmpegArgs.push("-map", "[outv]", "-map", "[outa]");
+    ffmpegArgs.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high", "-level:v", "4.0", "-c:a", "aac", "-b:a", "128k");
+    ffmpegArgs.push(localOutputPath);
     
     sendLog("🎞️ 正在向剪輯核心提交已生成的分鏡影片檔案...");
 
     // Run ffmpeg with spawn and stream logs
-    const ffmpeg = spawn('ffmpeg', ffmpegCmd.split(' ').slice(1));
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs);
     ffmpeg.stderr.on('data', (data) => {
         // Optionally stream stderr log
     });
@@ -3235,7 +2967,7 @@ app.post("/api/stitch-videos", async (req, res) => {
 
 // Toonflow Feature: Storyboard Image Generator using Agnes AI
 app.post("/api/generate-image", async (req, res) => {
-  const { prompt, artStyle, character, characterDescription, isAvatar, customApiKey, angle, characterImages, seed, engine = 'agnes', agnesImageMode = 'quality', mood } = req.body;
+  const { prompt, negativePrompt, artStyle, character, characterDescription, isAvatar, customApiKey, angle, characterImages, seed, engine = 'agnes', agnesImageMode = 'quality', mood } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: "Visual prompt is required" });
   }
@@ -3382,6 +3114,14 @@ app.post("/api/generate-image", async (req, res) => {
       }
     }
     enhancedPrompt = `A ${baseSceneType}. ${charDesc}${clothingConsistencyDirective}${moodAddon} Scene setting & action: ${finalPrompt}. Style: ${styleAddon}. This must be a SINGLE integrated scene image with professional cinematic framing and layout (NOT a multi-angle reference sheet, NOT a collage, NOT a character sheet). Beautiful lighting, highly detailed background. Absolutely NO text, labels, signatures, titles, subtitles, captions, watermarks, UI elements, words, or letters on the image.`;
+  }
+
+  const resolvedImageNegativePrompt = (negativePrompt && negativePrompt.trim())
+    ? negativePrompt
+    : getNegativePromptForStyle(artStyle);
+
+  if (resolvedImageNegativePrompt) {
+    enhancedPrompt += ` [NEGATIVE PROMPT MANDATE: You MUST explicitly avoid generating any of the following: ${resolvedImageNegativePrompt}]`;
   }
 
   try {
@@ -3718,27 +3458,454 @@ app.post("/api/generate-image", async (req, res) => {
   }
 });
 
-// Serve assets and public narration audio statically
-app.use("/assets", express.static(path.join(process.cwd(), "assets")));
-app.use(express.static(path.join(process.cwd(), "public")));
+// --- Secure Server-side Firestore Integration ---
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
 
-app.post("/api/scenes/:sceneId/narration/generate", async (req, res) => {
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: null,
+      email: null,
+      emailVerified: null,
+      isAnonymous: null,
+      tenantId: null,
+      providerInfo: []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error proxying on server: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+let firebaseApp: any = null;
+let firestoreDb: any = null;
+
+async function initServerFirebase() {
   try {
-    const { sceneId } = req.params;
-    const { text, voice } = req.body || {};
-    const narrationText = typeof text === "string" ? text.trim() : "";
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const { initializeApp } = await import("firebase/app");
+      const { getFirestore } = await import("firebase/firestore");
+      firebaseApp = initializeApp(config);
+      firestoreDb = getFirestore(firebaseApp, config.firestoreDatabaseId);
+      console.log("[Toonflow Firebase] Server-side Firebase initialized successfully.");
+    } else {
+      console.warn("[Toonflow Firebase] firebase-applet-config.json not found. Database features will fallback.");
+    }
+  } catch (err) {
+    console.error("[Toonflow Firebase] Failed to initialize server-side Firebase:", err);
+  }
+}
 
-    if (!narrationText) {
-      return res.status(400).json({ error: "請先輸入旁白內容" });
+// Toonflow AI Novel Generation Endpoint
+app.post("/api/generate-novel", async (req, res) => {
+  const { idea, isRandom, engines = ["gemini"], customApiKey } = req.body;
+
+  try {
+    const isMultiAgent = engines.length > 1;
+    let prompt = "";
+
+    if (isMultiAgent) {
+      prompt = `你現在是 Toonflow 團隊的多 AI 協作編劇導演面板。
+參與腦力激盪的成員包括：
+${engines.map((e: string) => {
+  if (e === 'gemini') return `- 【Gemini - 創意協調官】：擅長架構、語意對齊與流暢的小說/腳本創作。`;
+  if (e === 'agnes') return `- 【Agnes - 視覺分鏡大師】：擅長挖掘畫面細節、光影動態與視覺隱喻。`;
+  if (e === 'mistral') return `- 【Mistral - 戲劇結構專家】：擅長刻畫戲劇衝突、節奏鋪陳與情節張力。`;
+  return `- 【${e} 編劇助理】`;
+}).join("\n")}
+
+${isRandom ? "請為我們隨機挑選一個極具創意、電影感十足、畫面感強烈的小說題材（例如：賽博龐克、奇幻冒險、懸疑驚悚、科幻太空等）。" : `請根據使用者的創意想法展開腦力激盪：\n「${idea}」`}
+
+請這幾位 AI 成員展開一場精彩的協調討論，互相碰撞想法，隨後由【創意協調官】進行最終的劇本整合。
+
+請嚴格依照以下兩段式的繁體中文格式輸出：
+
+1. 【協調討論與整合報告】
+（在此區域以對話或會議紀要形式，詳細記錄各個 active 角色對於本劇本的創意亮點、分工與修飾意見。例如：
+Agnes：我覺得這裡的光影可以...
+Mistral：我建議把衝突點放在...
+Gemini：很好，那我們就決定...
+請生動而專業地展開討論）
+
+2. 【協調者最終整合版本】
+（在此區域輸出最終整合後的精緻、畫面感豐富的小說故事正文，字數約 300 至 800 字。正文應充滿極強的視覺細節、角色對話與運鏡感，為接下來的分鏡拆分奠定完美基礎。）`;
+    } else {
+      const singleEngine = engines[0] || 'gemini';
+      prompt = `你現在是 Toonflow 團隊的 AI 編劇。
+${isRandom ? "請隨機挑選一個極具創意、電影感十足、畫面感強烈的小說題材（例如：賽博龐克、奇幻冒險、懸疑驚悚、科幻太空等）。" : `請根據使用者的創意想法展開寫作：\n「${idea}」`}
+
+請嚴格依照以下兩段式的繁體中文格式輸出：
+
+1. 【協調討論與整合報告】
+（在此區域以專業編劇的角度，寫下關於本故事的背景設定、視覺風格亮點、敘事節奏規劃等簡短的創作心得報告。）
+
+2. 【協調者最終整合版本】
+（在此區域輸出最終編寫的精緻、畫面感豐富的小說故事正文，字數約 300 至 800 字。正文應充滿極強的視覺細節、角色對話與運鏡感，為接下來的分鏡拆分奠定完美基礎。）`;
     }
 
-    const result = await generateNarrationAudioWithEdgeTts(narrationText, sceneId, voice);
-    res.json({ success: true, ...result });
+    const primaryEngine = engines[0] || 'gemini';
+    console.log(`[Toonflow Novel] Generating novel using ${primaryEngine}, multi-agent: ${isMultiAgent}`);
+
+    let rawText = "";
+    if (primaryEngine === 'agnes' && !isMultiAgent) {
+      rawText = await generateText(prompt, 'agnes', 'gemini-3.5-flash', customApiKey);
+    } else if (primaryEngine === 'mistral' && !isMultiAgent) {
+      rawText = await generateText(prompt, 'mistral', 'gemini-3.5-flash', customApiKey);
+    } else {
+      const response = await generateContentWithFallback({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+        customApiKey,
+      });
+      rawText = response.text || "";
+    }
+
+    const { discussionReport, story } = parseCoordinatorResponse(rawText);
+
+    res.json({
+      text: story || rawText,
+      discussionReport: discussionReport || undefined
+    });
   } catch (error: any) {
-    console.error("[Toonflow] Edge TTS narration generation failed:", error);
-    res.status(500).json({ error: error?.message || "生成旁白音檔失敗" });
+    console.error("[Toonflow Novel Error] Failed to generate novel:", error);
+    res.status(500).json({ error: error.message || "小說生成失敗，請檢查 API 金鑰或網路連線。" });
   }
 });
+
+// Toonflow AI Novel Chat Assistant Endpoint
+app.post("/api/chat-novel", async (req, res) => {
+  const { messages, novelText, engines = ["gemini"], customApiKey } = req.body;
+
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: "Messages array is required." });
+  }
+
+  try {
+    const primaryEngine = engines[0] || 'gemini';
+    console.log(`[Toonflow Novel Chat] Chatting using ${primaryEngine}`);
+
+    const systemInstruction = `你現在是 Toonflow 團隊的編劇顧問助理。
+目前的小說/劇本內容如下：
+---
+${novelText || "(目前尚無劇本內容)"}
+---
+
+使用者的問題或修改指令將在對話歷史中提供。
+請以專業、熱情、具建設性的繁體中文回答使用者的問題，提供具體的改進建議。
+
+【重要規則】：
+1. 如果使用者的要求涉及「修改、重寫、續寫或優化」上方的小說內容，請在回覆中完整或部分輸出更新後的小說故事，並將新的小說正文嚴格包裹在 <novel_update>小說更新後的完整內容</novel_update> 標籤內。
+2. 如果不需要更新小說正文，則不需要輸出 <novel_update> 標籤。
+3. 請與使用者在對話中親切互動，解釋你的修改理念。`;
+
+    let formattedPrompt = `${systemInstruction}\n\n對話歷史：\n`;
+    messages.forEach((msg: any) => {
+      const roleName = msg.role === 'user' ? '使用者' : 'AI 顧問';
+      formattedPrompt += `${roleName}：${msg.content}\n`;
+    });
+    formattedPrompt += `AI 顧問：`;
+
+    let rawReply = "";
+    if (primaryEngine === 'agnes') {
+      rawReply = await generateText(formattedPrompt, 'agnes', 'gemini-3.5-flash', customApiKey);
+    } else if (primaryEngine === 'mistral') {
+      rawReply = await generateText(formattedPrompt, 'mistral', 'gemini-3.5-flash', customApiKey);
+    } else {
+      const response = await generateContentWithFallback({
+        model: "gemini-3.5-flash",
+        contents: formattedPrompt,
+        customApiKey,
+      });
+      rawReply = response.text || "";
+    }
+
+    res.json({ text: rawReply });
+  } catch (error: any) {
+    console.error("[Toonflow Novel Chat Error] Chat request failed:", error);
+    res.status(500).json({ error: error.message || "編劇顧問對話失敗。" });
+  }
+});
+
+// Toonflow AI Scene-level Chat Assistant Endpoint
+app.post("/api/chat-scene", async (req, res) => {
+  const { scene, message, history = [], customApiKey } = req.body;
+
+  if (!scene || !message) {
+    return res.status(400).json({ error: "Scene and message are required." });
+  }
+
+  try {
+    const systemInstruction = `You are Toonflow's Storyboard Scene Director. Your job is to assist the user in editing or refining a single storyboard scene card.
+
+Current Scene Properties:
+- Title (Location/Time): ${scene.title || ""}
+- Primary Character: ${scene.character || ""}
+- Dialogue: ${scene.dialogue || ""}
+- Narration: ${scene.narration || ""}
+- Visual Prompt (Drawing): ${scene.visualPrompt || ""}
+- Action Prompt (Video dynamics): ${scene.actionPrompt || ""}
+- Transition Prompt: ${scene.transitionPrompt || ""}
+- Audio Cue: ${scene.audioCue || ""}
+- Director Notes: ${scene.directorNotes || ""}
+
+Instruct the user in elegant, supportive Traditional Chinese.
+If the user asks to modify, rewrite, translate, or refine any part of this scene card, generate the updated values for those specific fields in "updatedFields". Only include fields that are actually being modified. If no fields are changed, set "updatedFields" to null.
+For example, if the user says "把主角台詞改成太好了", you should set updatedFields.dialogue to "太好了！" and provide an encouraging response explaining the change.`;
+
+    let promptText = `Scene Chat History:\n`;
+    history.forEach((msg: any) => {
+      const roleName = msg.role === 'user' ? 'User' : 'Director';
+      promptText += `${roleName}: ${msg.content}\n`;
+    });
+    promptText += `User: ${message}\nDirector:`;
+
+    const response = await generateContentWithFallback({
+      model: "gemini-3.5-flash",
+      contents: promptText,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          description: "Storyboard scene chat response and field updates",
+          properties: {
+            response: { type: Type.STRING, description: "Text response to the user in Traditional Chinese" },
+            updatedFields: {
+              type: Type.OBJECT,
+              description: "Optional fields of the scene to update",
+              properties: {
+                title: { type: Type.STRING },
+                dialogue: { type: Type.STRING },
+                narration: { type: Type.STRING },
+                character: { type: Type.STRING },
+                visualPrompt: { type: Type.STRING },
+                actionPrompt: { type: Type.STRING },
+                transitionPrompt: { type: Type.STRING },
+                audioCue: { type: Type.STRING },
+                directorNotes: { type: Type.STRING }
+              }
+            }
+          },
+          required: ["response"]
+        }
+      },
+      customApiKey
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    res.json(result);
+  } catch (error: any) {
+    console.error("[Toonflow Scene Chat Error] Chat request failed:", error);
+    res.status(500).json({ error: error.message || "分鏡助理對話失敗。" });
+  }
+});
+
+// Toonflow AI Batch Storyboard Chat Assistant Endpoint
+app.post("/api/chat-storyboard", async (req, res) => {
+  const { scenes = [], characters = [], message, history = [], customApiKey } = req.body;
+
+  if (!message) {
+    return res.status(400).json({ error: "Message is required." });
+  }
+
+  try {
+    const formattedScenes = scenes.map((s: any, idx: number) => `Scene #${idx + 1} (ID: ${s.id}):
+- Title: ${s.title || ""}
+- Character: ${s.character || ""}
+- Dialogue: ${s.dialogue || ""}
+- Narration: ${s.narration || ""}
+- Visual Prompt: ${s.visualPrompt || ""}
+- Action Prompt: ${s.actionPrompt || ""}
+- Transition Prompt: ${s.transitionPrompt || ""}
+- Duration: ${s.durationSeconds || 5}s
+- Audio Cue: ${s.audioCue || ""}
+- Director Notes: ${s.directorNotes || ""}`).join("\n\n");
+
+    const formattedCharacters = characters.map((c: any) => `- ${c.name} (${c.role}): ${c.description || ""}`).join("\n");
+
+    const systemInstruction = `You are Toonflow's Head Storyboard Executive Director. You oversee the entire storyboard list for a project.
+
+Available Characters:
+${formattedCharacters || "(None pre-defined)"}
+
+Current Storyboard Scenes List:
+${formattedScenes}
+
+Your job is to answer questions about the entire storyboard flow, suggest enhancements, and if requested, batch update multiple scene cards.
+When the user asks you to modify, translate, rewrite, or update scenes (e.g. "把所有分鏡的英文提示詞都優化", "將所有對白翻譯成英文", "調整場景3的角色"), you should update the respective scenes and include them in the "updatedScenes" array.
+Each scene in "updatedScenes" MUST contain its original "id" so the system can match it, and ONLY the fields that have changed. If no scenes are modified, set "updatedScenes" to null.
+Respond to the user in supportive, professional Traditional Chinese.`;
+
+    let promptText = `Storyboard Chat History:\n`;
+    history.forEach((msg: any) => {
+      const roleName = msg.role === 'user' ? 'User' : 'Director';
+      promptText += `${roleName}: ${msg.content}\n`;
+    });
+    promptText += `User: ${message}\nDirector:`;
+
+    const response = await generateContentWithFallback({
+      model: "gemini-3.5-flash",
+      contents: promptText,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          description: "Storyboard list chat response and batch scene updates",
+          properties: {
+            response: { type: Type.STRING, description: "Head Director text reply in Traditional Chinese" },
+            updatedScenes: {
+              type: Type.ARRAY,
+              description: "Optional list of modified scene objects. Only include scenes that are modified.",
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING, description: "The exact scene ID to match" },
+                  title: { type: Type.STRING },
+                  character: { type: Type.STRING },
+                  dialogue: { type: Type.STRING },
+                  narration: { type: Type.STRING },
+                  visualPrompt: { type: Type.STRING },
+                  actionPrompt: { type: Type.STRING },
+                  transitionPrompt: { type: Type.STRING },
+                  durationSeconds: { type: Type.INTEGER },
+                  audioCue: { type: Type.STRING },
+                  directorNotes: { type: Type.STRING }
+                },
+                required: ["id"]
+              }
+            }
+          },
+          required: ["response"]
+        }
+      },
+      customApiKey
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    res.json(result);
+  } catch (error: any) {
+    console.error("[Toonflow Storyboard Chat Error] Chat request failed:", error);
+    res.status(500).json({ error: error.message || "分鏡劇本助理對話失敗。" });
+  }
+});
+
+// Guarantee initial call
+initServerFirebase();
+
+// Proxy API: load-projects
+app.get("/api/load-projects", async (req, res) => {
+  try {
+    if (!firestoreDb) {
+      await initServerFirebase();
+    }
+    if (!firestoreDb) {
+      console.warn("[Toonflow Firebase] Firestore DB is not initialized. Falling back to empty projects list.");
+      return res.json({ projects: [] });
+    }
+    const { doc, getDoc } = await import("firebase/firestore");
+    const docRef = doc(firestoreDb, "projects", "all_projects");
+    let docSnap;
+    try {
+      docSnap = await getDoc(docRef);
+    } catch (dbErr) {
+      handleFirestoreError(dbErr, OperationType.GET, "projects/all_projects");
+    }
+    if (docSnap && docSnap.exists()) {
+      const data = docSnap.data();
+      return res.json({ projects: data?.projects || [] });
+    } else {
+      return res.json({ projects: [] });
+    }
+  } catch (err: any) {
+    console.error("[Toonflow Firebase] Error in GET /api/load-projects:", err);
+    res.status(500).json({ error: err.message || "Failed to load projects" });
+  }
+});
+
+let pendingProjectsData: any = null;
+let isFirestoreSaving = false;
+
+async function executeFirestoreSave() {
+  if (isFirestoreSaving) {
+    return; // Already saving, the active loop will save the new pendingProjectsData.
+  }
+  isFirestoreSaving = true;
+  while (pendingProjectsData !== null) {
+    const dataToSave = pendingProjectsData;
+    pendingProjectsData = null; // Clear so we can capture newer saves that arrive during our await
+    try {
+      const { doc, setDoc } = await import("firebase/firestore");
+      const docRef = doc(firestoreDb, "projects", "all_projects");
+      console.log("[Toonflow Firebase] Coalescing write: committing projects to Firestore...");
+      await setDoc(docRef, { projects: dataToSave });
+      console.log("[Toonflow Firebase] Coalescing write committed successfully.");
+    } catch (dbErr: any) {
+      console.error("[Toonflow Firebase] Error writing to Firestore during coalesced save:", dbErr);
+    }
+    // Rate limit writes to 1 write per second (Firestore limits writes to a single document to 1/sec)
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  isFirestoreSaving = false;
+}
+
+// Proxy API: save-projects
+app.post("/api/save-projects", async (req, res) => {
+  const { projects } = req.body;
+  if (!projects || !Array.isArray(projects)) {
+    return res.status(400).json({ error: "No projects array provided in body" });
+  }
+  try {
+    if (!firestoreDb) {
+      await initServerFirebase();
+    }
+    if (!firestoreDb) {
+      return res.status(500).json({ error: "Firestore DB not initialized on server" });
+    }
+    
+    // Buffer the latest projects and schedule a background coalesced commit
+    pendingProjectsData = projects;
+    executeFirestoreSave().catch(err => {
+      console.error("[Toonflow Firebase] Background save task failed:", err);
+    });
+    
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("[Toonflow Firebase] Error in POST /api/save-projects:", err);
+    res.status(500).json({ error: err.message || "Failed to save projects" });
+  }
+});
+
+// Serve assets folder statically
+app.use("/assets", express.static(path.join(process.cwd(), "assets")));
 
 // Vite Middleware for development, or static serving in production
 async function startServer() {

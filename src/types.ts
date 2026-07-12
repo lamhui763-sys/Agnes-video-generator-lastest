@@ -1,3 +1,4 @@
+
 export interface Scene {
   id: string;
   title: string;
@@ -5,6 +6,7 @@ export interface Scene {
   narration?: string;
   character: string;
   visualPrompt: string;
+  negativePrompt?: string;
   actionPrompt?: string;
   transitionPrompt?: string;
   durationSeconds?: number;
@@ -40,9 +42,6 @@ export interface Scene {
   useMidpointSplit?: boolean;
   audioCue?: string;
   directorNotes?: string;
-  narrationAudioPath?: string;
-  narrationVoice?: string;
-  narrationGeneratedAt?: string;
   aiReviewStatus?: "passed" | "needs_refinement" | "reviewing";
   aiReviewAlignmentCheck?: string;
   aiReviewLogicCheck?: string;
@@ -51,6 +50,39 @@ export interface Scene {
   isReviewing?: boolean;
   hasAutoRegeneratedReview?: boolean;
 }
+
+export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character' | 'visualPrompt'> = {
+  narration: "",
+  negativePrompt: "",
+  actionPrompt: "",
+  transitionPrompt: "",
+  durationSeconds: 5,
+  imageUrl: "",
+  videoUrl: "",
+  isGeneratingImage: false,
+  isGeneratingVideo: false,
+  videoProgress: "0%",
+  videoLogs: [],
+  videoError: "",
+  imageUrlExt: "",
+  videoUrlExt: "",
+  isGeneratingImageExt: false,
+  isGeneratingVideoExt: false,
+  videoProgressExt: "0%",
+  videoLogsExt: [],
+  videoErrorExt: "",
+  imageUrlKeyframes: "",
+  videoUrlKeyframes: "",
+  isGeneratingImageKeyframes: false,
+  isGeneratingVideoKeyframes: false,
+  videoProgressKeyframes: "0%",
+  videoLogsKeyframes: [],
+  videoErrorKeyframes: "",
+  audioCue: "",
+  directorNotes: "",
+  aiReviewStatus: "passed",
+  isReviewing: false,
+};
 
 export interface Character {
   id: string;
