@@ -56,6 +56,9 @@ def request_json(request, timeout):
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        # Check for rate limit error (429)
+        if exc.code == 429:
+            raise SystemExit(f"Agnes API HTTP 429: {body}") from exc
         raise SystemExit(f"Agnes API HTTP {exc.code}: {body}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Agnes API request failed: {exc}") from exc
@@ -137,7 +140,16 @@ def create_video_task(base_url, api_key, payload, timeout):
             return post_json(endpoint, api_key, payload, timeout)
         except SystemExit as exc:
             err_str = str(exc)
-            if "503" in err_str and "Service busy" in err_str:
+            # Handle 429 rate limit with exponential backoff
+            if "429" in err_str or "rate_limit" in err_str.lower() or "rate limit" in err_str.lower():
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 10s, 20s, 40s, 80s, 160s, max 120s
+                    backoff_time = min(10 * (2 ** attempt), 120)
+                    print(f"[SYSTEM] Rate limit detected. Waiting {backoff_time} seconds before retry... (Attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    time.sleep(backoff_time)
+                else:
+                    raise
+            elif "503" in err_str and "Service busy" in err_str:
                 if attempt < max_retries - 1:
                     print(f"[SYSTEM] Agnes server is busy. Retrying in 10 seconds... (Attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                     time.sleep(10)
@@ -191,9 +203,17 @@ def poll_until_complete(base_url, api_key, timeout, poll_interval, video_id=None
             )
         except SystemExit as exc:
             err_str = str(exc)
+            # Handle transient errors (503, 502, 504)
             if "503" in err_str or "502" in err_str or "504" in err_str or "Service busy" in err_str:
                 print(f"[DEBUG] Polling caught transient error: {err_str}. Retrying...", file=sys.stderr)
                 time.sleep(poll_interval)
+                continue
+            # Handle 429 rate limit with backoff
+            if "429" in err_str or "rate_limit" in err_str.lower() or "rate limit" in err_str.lower():
+                # Wait longer for rate limit
+                rate_limit_wait = min(poll_interval * 2, 60)
+                print(f"[DEBUG] Rate limit detected during polling. Waiting {rate_limit_wait} seconds...", file=sys.stderr)
+                time.sleep(rate_limit_wait)
                 continue
             else:
                 raise
