@@ -1,7 +1,8 @@
 import React from 'react';
 import { Scene, Character, Project } from '../types';
-import { Trash2, GripVertical, Clock, Info, Sparkles, Users, ChevronLeft, Plus, RefreshCw, Upload } from 'lucide-react';
+import { Trash2, GripVertical, Clock, Info, Sparkles, Users, ChevronLeft, Plus, RefreshCw, Upload, Film } from 'lucide-react';
 import { STYLE_PRESETS } from '../data'; // Need to make sure this is available
+import { ScrubbableVideoPlayer } from './ScrubbableVideoPlayer';
 
 interface SceneItemProps {
   scene: Scene;
@@ -259,14 +260,19 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
         </div>
       </div>
 
-      {/* Right Col: Storyboard Image / Agnes Video Generation Frame */}
-      <div className="md:col-span-5 flex flex-col justify-between space-y-4">
+      {/* Right Col: Storyboard Image / Agnes Video Generation Frame with upgraded 3-Screen Layout */}
+      <div className="md:col-span-5 flex flex-col space-y-4">
+        {/* Screen 1: Playback Screen / Canvas */}
         <div 
           onDragOver={handleImageDragOver}
           onDrop={(e) => handleImageDrop(e, scene.id, "imageUrl")}
-          onClick={() => document.getElementById(`upload-scene-img-${scene.id}`)?.click()}
-          className="relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center group/img cursor-pointer"
-          title="點擊或拖曳圖片至此處上傳自訂照片"
+          onClick={() => {
+            if (!scene.videoUrl) {
+              document.getElementById(`upload-scene-img-${scene.id}`)?.click();
+            }
+          }}
+          className={`relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center ${!scene.videoUrl ? 'cursor-pointer group/img' : ''}`}
+          title={!scene.videoUrl ? "點擊或拖曳圖片至此處上傳自訂照片" : undefined}
         >
           <input 
             type="file" 
@@ -276,18 +282,12 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
             onChange={(e) => handleUploadSceneImage(e, scene.id, "imageUrl")} 
           />
 
-          {scene.imageUrl ? (
-            <div className="relative w-full h-full">
-              <img 
-                src={scene.imageUrl} 
-                alt={scene.title} 
-                className="w-full h-full object-cover transition-transform duration-[6000ms] ease-out transform scale-100 group-hover/img:scale-105" 
+          {scene.videoUrl ? (
+            <div className="relative w-full h-full" onClick={(e) => e.stopPropagation()}>
+              <ScrubbableVideoPlayer
+                src={scene.videoUrl}
+                className="w-full h-full object-cover"
               />
-              {/* Hover overlay */}
-              <div className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover/img:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1.5">
-                <Upload className="w-5 h-5 text-indigo-400 animate-bounce" />
-                <span className="text-[11px] font-bold text-slate-200">點擊或拖曳更換自訂照片</span>
-              </div>
               {/* Manual redo / reset button */}
               <div className="absolute top-2 right-2 flex gap-1 z-30">
                 <button
@@ -322,12 +322,76 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                     }
                   }}
                   className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-45 cursor-pointer active:scale-95"
-                  title="不滿意插圖嗎？點此重置以重新繪製"
                 >
                   <RefreshCw className="w-2.5 h-2.5" />
-                  <span>重做/重置此影鏡</span>
+                  <span>重做/重置影片</span>
                 </button>
               </div>
+            </div>
+          ) : scene.imageUrl ? (
+            <div className="relative w-full h-full">
+              <img 
+                src={scene.imageUrl} 
+                alt={scene.title} 
+                className={`w-full h-full object-cover transition-transform duration-[6000ms] ease-out transform scale-100 ${scene.isGeneratingVideo ? 'opacity-40 scale-105' : 'group-hover/img:scale-105'}`} 
+              />
+              {/* If generating, display a nice overlay status */}
+              {scene.isGeneratingVideo ? (
+                <div className="absolute inset-0 bg-indigo-950/20 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold bg-indigo-950/90 text-indigo-400 border border-indigo-500/30 shadow-lg animate-pulse">
+                    <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+                    <span>COMPILING DIGITAL PREVIEW...</span>
+                  </span>
+                </div>
+              ) : (
+                <>
+                  {/* Hover overlay */}
+                  <div className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover/img:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1.5">
+                    <Upload className="w-5 h-5 text-indigo-400 animate-bounce" />
+                    <span className="text-[11px] font-bold text-slate-200">點擊或拖曳更換自訂照片</span>
+                  </div>
+                  {/* Manual redo / reset button */}
+                  <div className="absolute top-2 right-2 flex gap-1 z-30">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        if (confirm("您確定要重置並重新繪製此分鏡插圖嗎？(這也會清除已生成的影片)")) {
+                          setProjects(prevProjects => {
+                            const updatedList = prevProjects.map(p => {
+                              if (p.id === activeProjectId) {
+                                const updatedScenes = p.scenes.map(s => {
+                                  if (s.id === scene.id) {
+                                    return {
+                                      ...s,
+                                      imageUrl: undefined,
+                                      videoUrl: undefined,
+                                      videoProgress: undefined,
+                                      videoLogs: undefined,
+                                      videoError: undefined
+                                    };
+                                  }
+                                  return s;
+                                });
+                                return { ...p, scenes: updatedScenes };
+                              }
+                              return p;
+                            });
+                            try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); } catch (err) { console.error(err); }
+                            return updatedList;
+                          });
+                          showToast("已成功重置！您可以現在重新繪圖或重新生成影片。", "success");
+                        }
+                      }}
+                      className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-45 cursor-pointer active:scale-95"
+                      title="不滿意插圖嗎？點此重置以重新繪製"
+                    >
+                      <RefreshCw className="w-2.5 h-2.5" />
+                      <span>重做/重置此影鏡</span>
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ) : scene.isGeneratingImage ? (
             <div className="flex flex-col items-center space-y-3" onClick={(e) => e.stopPropagation()}>
@@ -340,6 +404,127 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
             </div>
           )}
         </div>
+
+        {/* If generating video, render Screen 2 & Screen 3 below */}
+        {scene.isGeneratingVideo && (
+          <div className="space-y-4 animate-fadeIn">
+            {/* Screen 2: Render Output Screen */}
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <span className="text-[10px] font-mono text-indigo-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                  <Film className="w-3.5 h-3.5" />
+                  <span>🎬 Render Output</span>
+                </span>
+                <span className="bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 text-[9px] font-mono font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                  <Sparkles className="w-2.5 h-2.5 text-indigo-400" />
+                  Cinematic Compiler
+                </span>
+              </div>
+
+              <div className="flex flex-col items-center py-2 text-center">
+                {/* SVG Circular progress */}
+                <div className="relative w-16 h-16 mb-3">
+                  <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                    <path
+                      className="text-slate-850"
+                      strokeWidth="2.5"
+                      stroke="currentColor"
+                      fill="none"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    />
+                    <path
+                      className="text-indigo-500 transition-all duration-300 stroke-linecap-round"
+                      strokeWidth="2.5"
+                      strokeDasharray={`${parseInt(scene.videoProgress || "0")}, 100`}
+                      stroke="currentColor"
+                      fill="none"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <Film className="w-5 h-5 text-indigo-400 animate-spin" style={{ animationDuration: '6s' }} />
+                  </div>
+                </div>
+
+                <span className="text-xs font-bold text-white mb-1">Rendering Cinematic Frames...</span>
+                <span className="text-[10px] text-slate-400 font-medium">
+                  Agnes AI is compiling <strong className="text-indigo-400">{scene.videoProgress || "0%"}</strong> of the video stream.
+                </span>
+              </div>
+
+              {/* API Latency & Resource Allocation Indicator */}
+              <div className="grid grid-cols-2 gap-3 text-left">
+                <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
+                  <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    <Clock className="w-2.5 h-2.5 text-indigo-400" />
+                    <span>回應時間 (Latency)</span>
+                  </span>
+                  <div className="flex flex-col gap-0.5 mt-1 font-mono text-[9px]">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-500">Agnes API:</span>
+                      <span className="text-indigo-400 font-bold">{scene.videoApiLatency || "偵測中..."}</span>
+                    </div>
+                    {scene.videoDownloadLatency && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">檔案下載:</span>
+                        <span className="text-emerald-400 font-bold">{scene.videoDownloadLatency}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
+                  <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    <Info className="w-2.5 h-2.5 text-indigo-400" />
+                    <span>資源分配 (Resources)</span>
+                  </span>
+                  <div className="text-[8px] text-indigo-300 font-mono line-clamp-2 mt-1 leading-normal">
+                    {scene.videoResourceAllocation || "初始化算力資源..."}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Screen 3: Console Logs Screen */}
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono text-slate-400 font-semibold tracking-wider flex items-center gap-1">
+                  <span>&gt; agnes_video.py console logs</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      const logText = (scene.videoLogs || []).join('\n') || "[SYSTEM] Initiating Agnes Video V2.0 call...";
+                      navigator.clipboard.writeText(logText);
+                      showToast("日誌已複製到剪貼簿！", "success");
+                    }}
+                    className="text-[9px] text-slate-400 hover:text-white bg-slate-950 hover:bg-slate-800 px-2 py-0.5 rounded border border-slate-800 transition"
+                  >
+                    Copy
+                  </button>
+                  <span className="inline-flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-900/20">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                    <span>streaming...</span>
+                  </span>
+                </div>
+              </div>
+
+              <div className="w-full bg-black/95 p-3 rounded-lg text-[9px] font-mono text-emerald-400 text-left h-32 overflow-y-auto border border-emerald-500/20 select-text leading-relaxed font-mono shadow-inner">
+                {scene.videoLogs && scene.videoLogs.length > 0 ? (
+                  scene.videoLogs.map((logLine, logIdx) => (
+                    <div key={logIdx} className="break-all">{logLine}</div>
+                  ))
+                ) : (
+                  <>
+                    <div className="text-emerald-500/80">[SYSTEM] Initiating Agnes Video V2.0 call...</div>
+                    <div className="text-emerald-500/80">[SYSTEM] Requesting compute resource allocation...</div>
+                    <div className="text-emerald-500/80">[SYSTEM] Initializing cinematic stream compiler...</div>
+                    <div className="text-slate-500 animate-pulse mt-1">&gt; Compiling audio-visual streams...</div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

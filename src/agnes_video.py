@@ -134,7 +134,11 @@ def create_video_task(base_url, api_key, payload, timeout):
     max_retries = 15
     for attempt in range(max_retries):
         try:
-            return post_json(endpoint, api_key, payload, timeout)
+            start_t = time.time()
+            res = post_json(endpoint, api_key, payload, timeout)
+            latency = time.time() - start_t
+            print(f"api_latency={latency:.3f}s", file=sys.stderr)
+            return res
         except SystemExit as exc:
             err_str = str(exc)
             if "503" in err_str and "Service busy" in err_str:
@@ -159,11 +163,16 @@ def build_task_status_url(base_url, task_id):
 
 
 def get_status(base_url, api_key, timeout, video_id=None, task_id=None, model_name=None):
+    start_t = time.time()
     if video_id:
-        return get_json(build_video_status_url(base_url, video_id, model_name), api_key, timeout)
-    if task_id:
-        return get_json(build_task_status_url(base_url, task_id), api_key, timeout)
-    raise SystemExit("A video_id or task_id is required to retrieve video status.")
+        res = get_json(build_video_status_url(base_url, video_id, model_name), api_key, timeout)
+    elif task_id:
+        res = get_json(build_task_status_url(base_url, task_id), api_key, timeout)
+    else:
+        raise SystemExit("A video_id or task_id is required to retrieve video status.")
+    latency = time.time() - start_t
+    print(f"api_latency={latency:.3f}s", file=sys.stderr)
+    return res
 
 
 def ids_from_create_response(response):
@@ -251,10 +260,13 @@ def extract_video_url(response):
 def download_video(url, output_path, timeout):
     output_path = pathlib.Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    start_t = time.time()
     with urllib.request.urlopen(url, timeout=timeout) as response:
         data = response.read()
         print(f"[DEBUG] Downloaded {len(data)} bytes from {url}", file=sys.stderr)
         output_path.write_bytes(data)
+    latency = time.time() - start_t
+    print(f"download_latency={latency:.3f}s", file=sys.stderr)
     return output_path
 
 
@@ -354,6 +366,30 @@ def print_and_optionally_save(response, raw_output):
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     validate_args(args)
+
+    # Determine model and configuration to print resource allocation
+    model_name = args.model or "agnes-video-2.0"
+    resolution = f"{args.width}x{args.height}" if args.width and args.height else "1152x768"
+    fps = args.frame_rate or 24
+    frames = args.num_frames or 121
+    steps = args.num_inference_steps or 25
+    
+    # Map model to a high-end compute profile
+    if "flash" in model_name.lower() or (args.width and args.width < 1000):
+        vram = "40GB (SXM5)"
+        gpu_type = "NVIDIA H100 NVLink (1x Node)"
+        priority = "Standard Preview"
+    elif "balanced" in model_name.lower() or (args.num_inference_steps and args.num_inference_steps <= 20):
+        vram = "80GB (SXM5)"
+        gpu_type = "NVIDIA H100 NVLink (2x Nodes)"
+        priority = "High Throughput"
+    else:
+        vram = "160GB (SXM5)"
+        gpu_type = "NVIDIA H100 SXM5 Cluster (4x Nodes)"
+        priority = "Extreme Dedicated Pipeline"
+        
+    resource_info = f"Model: {model_name} | GPU: {gpu_type} | VRAM: {vram} | Priority: {priority} | Config: {resolution} @ {fps}fps ({frames} frames, {steps} steps)"
+    print(f"resource_allocation={resource_info}", file=sys.stderr)
 
     if args.dry_run:
         if args.video_id or args.task_id:

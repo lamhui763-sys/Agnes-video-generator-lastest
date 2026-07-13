@@ -12,6 +12,9 @@ import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
 // Load environment variables
 dotenv.config();
 
+// Disable SSL rejection for external file servers in sandbox environment
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 // Helper to sanitize API keys from user comments, trailing characters or copy-paste whitespace
 function sanitizeApiKey(key: string | undefined): string {
   if (!key) return "";
@@ -318,26 +321,32 @@ async function uploadToCatbox(localPath: string): Promise<string> {
 }
 
 async function uploadFileToCatbox(localPath: string): Promise<string> {
+  const absPath = path.resolve(localPath);
   try {
     console.log(`[Toonflow CDN] Uploading ${localPath} to Catbox...`);
     const catboxUrl = await uploadToCatbox(localPath);
+    registerCloudMapping(catboxUrl, absPath);
     return catboxUrl;
   } catch (err: any) {
     console.log(`[Toonflow CDN] Catbox upload bypassed, trying Tmpfiles backup`);
     try {
       const tmpfilesUrl = await uploadToTmpfiles(localPath);
       console.log(`[Toonflow CDN] File successfully uploaded to Tmpfiles backup: ${tmpfilesUrl}`);
+      registerCloudMapping(tmpfilesUrl, absPath);
       return tmpfilesUrl;
     } catch (tmpfilesErr: any) {
       console.log(`[Toonflow CDN] Tmpfiles upload bypassed, trying Qu.ax last fallback`);
       try {
         const quaxUrl = await uploadToQuax(localPath);
         console.log(`[Toonflow CDN] File successfully uploaded to Qu.ax backup: ${quaxUrl}`);
+        registerCloudMapping(quaxUrl, absPath);
         return quaxUrl;
       } catch (quaxErr: any) {
         console.log("[Toonflow CDN] External cloud uploads bypassed. Gracefully falling back to local static asset serving.");
         const localFilename = path.basename(localPath);
-        return `/assets/${localFilename}`;
+        const relativeUrl = `/assets/${localFilename}`;
+        registerCloudMapping(relativeUrl, absPath);
+        return relativeUrl;
       }
     }
   }
@@ -778,15 +787,55 @@ interface TaskState {
   outputPath?: string;
   prompt?: string;
   startTime?: number;
+  apiLatency?: string;
+  downloadLatency?: string;
+  resourceAllocation?: string;
 }
 
 let activeTask: TaskState = {
   status: "idle",
   progress: "0%",
   logs: [],
+  apiLatency: "",
+  downloadLatency: "",
+  resourceAllocation: "",
 };
 
 let activeChildProcess: any = null;
+
+// Persistent cloud-to-local mapping for generated assets to bypass network fetching
+const MAPPING_FILE = path.join(process.cwd(), "assets", "cloud-mapping.json");
+
+function loadCloudMapping(): Record<string, string> {
+  try {
+    if (fs.existsSync(MAPPING_FILE)) {
+      return JSON.parse(fs.readFileSync(MAPPING_FILE, "utf-8"));
+    }
+  } catch (err) {
+    console.warn("Failed to load cloud mapping:", err);
+  }
+  return {};
+}
+
+function saveCloudMapping(mapping: Record<string, string>) {
+  try {
+    const dir = path.dirname(MAPPING_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(MAPPING_FILE, JSON.stringify(mapping, null, 2), "utf-8");
+  } catch (err) {
+    console.warn("Failed to save cloud mapping:", err);
+  }
+}
+
+function registerCloudMapping(cloudUrl: string, localPath: string) {
+  if (!cloudUrl || !localPath) return;
+  const mapping = loadCloudMapping();
+  mapping[cloudUrl] = localPath;
+  saveCloudMapping(mapping);
+  console.log(`[Cloud Mapping] Registered: ${cloudUrl} -> ${localPath}`);
+}
 
 // Context-aware beautifully animated fallback videos (using high-quality royalty-free video clips)
 function getFallbackVideo(prompt: string): string {
@@ -902,6 +951,17 @@ app.get("/api/download", async (req, res) => {
     return res.status(400).send("No video URL provided");
   }
 
+  // Check the cloud-to-local mapping first
+  const mapping = loadCloudMapping();
+  const mappedPath = mapping[videoUrl] || mapping[decodeURIComponent(videoUrl)];
+  if (mappedPath) {
+    const localMappedPath = path.resolve(mappedPath);
+    if (fs.existsSync(localMappedPath)) {
+      console.log(`[Download] Servicing via local mapped file: ${videoUrl} -> ${localMappedPath}`);
+      return res.download(localMappedPath, 'video.mp4', { headers: { 'Content-Type': 'video/mp4' } });
+    }
+  }
+
   // If it's a local file, just serve it
   if (videoUrl.startsWith("/assets/")) {
     const localPath = path.join(process.cwd(), videoUrl);
@@ -926,14 +986,22 @@ app.get("/api/download", async (req, res) => {
   // If it's a remote URL, proxy it to the client with API key auth for Veo
   try {
     const headers: any = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Connection": "close"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     };
     if (videoUrl.includes("generativelanguage.googleapis.com")) {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
-    const fetchRes = await fetch(videoUrl, { headers });
+    let fetchRes;
+    try {
+      console.log(`[Download API] Trying native fetch for: ${videoUrl}`);
+      fetchRes = await fetch(videoUrl, { headers });
+    } catch (fetchErr: any) {
+      console.warn(`[Download API] Native fetch failed: ${fetchErr?.message || fetchErr}. Falling back to fetchWithNodeHttps.`);
+      const fallbackHeaders = { ...headers, "Connection": "close" };
+      fetchRes = await fetchWithNodeHttps(videoUrl, { headers: fallbackHeaders });
+    }
+
     if (!fetchRes.ok) {
       return res.status(fetchRes.status).send(`Failed to fetch video: ${fetchRes.statusText}`);
     }
@@ -957,24 +1025,122 @@ app.get("/api/download", async (req, res) => {
   }
 });
 
+// Robust Node.js https/http request helper supporting SSL bypass and redirection
+function fetchWithNodeHttps(urlStr: string, options: any = {}): Promise<{ ok: boolean, status: number, statusText: string, headers: any, arrayBuffer: () => Promise<ArrayBuffer> }> {
+  return new Promise((resolve, reject) => {
+    const maxRedirects = 5;
+    let redirectCount = 0;
+
+    function makeRequest(currentUrl: string) {
+      try {
+        const parsedUrl = new URL(currentUrl);
+        const isHttps = parsedUrl.protocol === "https:";
+        const requester = isHttps ? https : http;
+
+        const requestOptions: any = {
+          method: options.method || "GET",
+          headers: options.headers || {},
+          rejectUnauthorized: false, // Force bypass SSL certificate rejection
+        };
+
+        const req = requester.request(currentUrl, requestOptions, (res) => {
+          const statusCode = res.statusCode || 200;
+
+          // Handle redirects
+          if ([301, 302, 303, 307, 308].includes(statusCode) && res.headers.location) {
+            if (redirectCount >= maxRedirects) {
+              reject(new Error("Too many redirects"));
+              return;
+            }
+            redirectCount++;
+            const nextUrl = new URL(res.headers.location, currentUrl).toString();
+            makeRequest(nextUrl);
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk) => {
+            chunks.push(chunk);
+          });
+
+          res.on("end", () => {
+            const buffer = Buffer.concat(chunks);
+            resolve({
+              ok: statusCode >= 200 && statusCode < 300,
+              status: statusCode,
+              statusText: res.statusMessage || "",
+              headers: {
+                get: (headerName: string) => res.headers[headerName.toLowerCase()] as string || ""
+              },
+              arrayBuffer: async () => {
+                const ab = new ArrayBuffer(buffer.length);
+                const view = new Uint8Array(ab);
+                for (let i = 0; i < buffer.length; ++i) {
+                  view[i] = buffer[i];
+                }
+                return ab;
+              }
+            });
+          });
+        });
+
+        req.on("error", (err) => {
+          reject(err);
+        });
+
+        if (options.signal) {
+          options.signal.addEventListener("abort", () => {
+            req.destroy();
+            reject(new Error("Request aborted"));
+          });
+        }
+
+        req.end();
+      } catch (err) {
+        reject(err);
+      }
+    }
+
+    makeRequest(urlStr);
+  });
+}
+
 app.get("/api/video-proxy", async (req, res) => {
   const videoUrl = decodeURIComponent(req.query.url as string);
   if (!videoUrl || videoUrl === "undefined" || videoUrl === "null") {
     return res.status(400).send("No video URL provided");
   }
 
-  // If it's a local file, serve it directly
-  const cleanAssetPath = videoUrl.startsWith("/") ? videoUrl : `/${videoUrl}`;
-  if (cleanAssetPath.startsWith("/assets/")) {
-    const safePath = path.normalize(cleanAssetPath).replace(/^(\.\.(\/|\\|$))+/, '');
+  // Check the cloud-to-local mapping first
+  const mapping = loadCloudMapping();
+  const mappedPath = mapping[videoUrl] || mapping[decodeURIComponent(videoUrl)];
+  if (mappedPath) {
+    const localMappedPath = path.resolve(mappedPath);
+    if (fs.existsSync(localMappedPath)) {
+      console.log(`[Video Proxy] Servicing via local mapped file: ${videoUrl} -> ${localMappedPath}`);
+      res.setHeader("Content-Type", "video/mp4");
+      return res.sendFile(localMappedPath);
+    }
+  }
+
+  // Support absolute or relative URLs containing /assets/ or assets/
+  let matchedAssetPath = "";
+  if (videoUrl.includes("/assets/")) {
+    matchedAssetPath = videoUrl.substring(videoUrl.indexOf("/assets/"));
+  } else if (videoUrl.startsWith("assets/")) {
+    matchedAssetPath = "/" + videoUrl;
+  } else if (videoUrl.startsWith("/assets/")) {
+    matchedAssetPath = videoUrl;
+  }
+
+  if (matchedAssetPath) {
+    const safePath = path.normalize(matchedAssetPath).replace(/^(\.\.(\/|\\|$))+/, '');
     const localPath = path.join(process.cwd(), safePath);
     const resolvedPath = path.resolve(localPath);
     const assetsDir = path.resolve(path.join(process.cwd(), "assets"));
     if (resolvedPath.startsWith(assetsDir) && fs.existsSync(resolvedPath)) {
       res.setHeader("Content-Type", "video/mp4");
       return res.sendFile(resolvedPath);
-    } else {
-      return res.status(404).send("File not found on this ephemeral instance.");
     }
   }
 
@@ -990,23 +1156,31 @@ app.get("/api/video-proxy", async (req, res) => {
 
   try {
     const headers: any = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Connection": "close"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     };
     if (videoUrl.includes("generativelanguage.googleapis.com")) {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
-
     let buffer: Buffer;
     let retries = 3;
     while (retries > 0) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout per attempt
       try {
-        const fetchRes = await fetch(videoUrl, { headers, signal: controller.signal });
+        console.log(`[Video Proxy] Fetching URL: ${videoUrl} (Attempt ${4 - retries}/3)...`);
+        let fetchRes;
+        try {
+          console.log(`[Video Proxy] Trying native fetch for: ${videoUrl}`);
+          fetchRes = await fetch(videoUrl, { headers, signal: controller.signal });
+        } catch (fetchErr: any) {
+          console.warn(`[Video Proxy] Native fetch failed: ${fetchErr?.message || fetchErr}. Falling back to fetchWithNodeHttps.`);
+          const fallbackHeaders = { ...headers, "Connection": "close" };
+          fetchRes = await fetchWithNodeHttps(videoUrl, { headers: fallbackHeaders, signal: controller.signal });
+        }
+
         if (!fetchRes.ok) {
-          throw new Error(`Failed to fetch video: ${fetchRes.statusText}`);
+          throw new Error(`Failed to fetch video: HTTP ${fetchRes.status} ${fetchRes.statusText}`);
         }
         const contentType = fetchRes.headers.get("content-type") || "video/mp4";
         res.setHeader("Content-Type", contentType);
@@ -1015,14 +1189,14 @@ app.get("/api/video-proxy", async (req, res) => {
         buffer = Buffer.from(arrayBuffer);
         clearTimeout(timeoutId);
         break; // Success
-      } catch (error) {
+      } catch (error: any) {
+        clearTimeout(timeoutId);
         if (retries === 1) {
-          clearTimeout(timeoutId);
           console.error("Video proxy error after retries:", error);
-          return res.status(502).send("Upstream video service closed connection or failed");
+          return res.status(502).send(`Upstream video service connection failed: ${error?.message || error}`);
         }
         retries--;
-        console.warn(`Video proxy fetch failed, retrying... (${retries} retries left)`);
+        console.warn(`Video proxy fetch failed: ${error?.message || error}. Retrying... (${retries} retries left)`);
         // Add a small delay before retrying
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
@@ -1211,49 +1385,50 @@ async function ensurePublicCdnUrl(urlOrPath: string, activeTaskLogs?: string[], 
 
 // Main Video generation router (calls Agnes API via Python backend)
 app.post("/api/generate", async (req, res) => {
-  const { 
-    prompt, 
-    visualPrompt,
-    negativePrompt,
-    actionPrompt,
-    transitionPrompt,
-    dialogue,
-    narration,
-    directorNotes,
-    character,
-    characterDescription,
-    artStyle,
-    customApiKey, 
-    imageUrl, 
-    endImageUrl, 
-    extendFromVideoUrl, 
-    durationSeconds, 
-    agnesVideoMode = "quality",
-    useFreezeAndMove = false,
-    useMidpointSplit = false,
-    sceneIndex,
-    sceneType
-  } = req.body;
-  const force = req.query.force === 'true';
+  try {
+    const { 
+      prompt, 
+      visualPrompt,
+      negativePrompt,
+      actionPrompt,
+      transitionPrompt,
+      dialogue,
+      narration,
+      directorNotes,
+      character,
+      characterDescription,
+      artStyle,
+      customApiKey, 
+      imageUrl, 
+      endImageUrl, 
+      extendFromVideoUrl, 
+      durationSeconds, 
+      agnesVideoMode = "quality",
+      useFreezeAndMove = false,
+      useMidpointSplit = false,
+      sceneIndex,
+      sceneType
+    } = req.body;
+    const force = req.query.force === 'true';
 
-  if (!prompt) {
-    return res.status(400).json({ error: "Prompt is required" });
-  }
-
-  if (activeTask.status === "running" || activeTask.status === "in_progress") {
-    const isStuck = activeTask.startTime && (Date.now() - activeTask.startTime > 10 * 60 * 1000);
-    if (force || isStuck) {
-      if (activeChildProcess) {
-        try { activeChildProcess.kill(); } catch(e) {}
-        activeChildProcess = null;
-      }
-      activeTask.status = "idle";
-      activeTask.logs = ["Task forcibly reset by user"];
-      console.log(`[Toonflow] Forcibly resetting stuck or overridden video task.`);
-    } else {
-      return res.status(400).json({ error: "A video generation is already in progress" });
+    if (!prompt) {
+      return res.status(400).json({ error: "Prompt is required" });
     }
-  }
+
+    if (activeTask.status === "running" || activeTask.status === "in_progress") {
+      const isStuck = activeTask.startTime && (Date.now() - activeTask.startTime > 10 * 60 * 1000);
+      if (force || isStuck) {
+        if (activeChildProcess) {
+          try { activeChildProcess.kill(); } catch(e) {}
+          activeChildProcess = null;
+        }
+        activeTask.status = "idle";
+        activeTask.logs = ["Task forcibly reset by user"];
+        console.log(`[Toonflow] Forcibly resetting stuck or overridden video task.`);
+      } else {
+        return res.status(400).json({ error: "A video generation is already in progress" });
+      }
+    }
 
   // Ensure assets folder exists
   const assetsDir = path.join(process.cwd(), "assets");
@@ -1362,6 +1537,9 @@ Instructions for synthesis:
     ],
     prompt: finalPrompt,
     startTime: Date.now(),
+    apiLatency: "",
+    downloadLatency: "",
+    resourceAllocation: "",
   };
 
   try {
@@ -1579,6 +1757,21 @@ Instructions for synthesis:
       if (progressMatch) {
         activeTask.progress = `${progressMatch[1]}%`;
       }
+
+      let latencyMatch = line.match(/api_latency=([\d\.]+)s/);
+      if (latencyMatch) {
+        activeTask.apiLatency = `${latencyMatch[1]}s`;
+      }
+      
+      let downloadMatch = line.match(/download_latency=([\d\.]+)s/);
+      if (downloadMatch) {
+        activeTask.downloadLatency = `${downloadMatch[1]}s`;
+      }
+      
+      let resourceMatch = line.match(/resource_allocation=(.+)/);
+      if (resourceMatch) {
+        activeTask.resourceAllocation = resourceMatch[1].trim();
+      }
       
       const cleanLine = line.trim();
       if (cleanLine && !cleanLine.startsWith("[DEBUG]")) {
@@ -1678,7 +1871,11 @@ Instructions for synthesis:
     activeChildProcess = null; // Important: ensure process is marked null
   }
 
-  res.json({ message: "Generation started", task: { ...activeTask, logs: activeTask.logs.slice(-10) } });
+    res.json({ message: "Generation started", task: { ...activeTask, logs: activeTask.logs.slice(-10) } });
+  } catch (outerErr: any) {
+    console.error("[Toonflow Error] Uncaught error inside /api/generate:", outerErr);
+    res.status(500).json({ error: outerErr?.message || "Uncaught server error inside /api/generate" });
+  }
 });
 
 // Toonflow Feature: AI Prompt Optimizer Endpoint using Gemini/Agnes

@@ -18,6 +18,9 @@ export interface Scene {
   videoLogs?: string[];
   videoError?: string;
   videoErrorCode?: number;
+  videoApiLatency?: string;
+  videoDownloadLatency?: string;
+  videoResourceAllocation?: string;
   
   imageUrlExt?: string;
   videoUrlExt?: string;
@@ -27,6 +30,9 @@ export interface Scene {
   videoLogsExt?: string[];
   videoErrorExt?: string;
   videoErrorCodeExt?: number;
+  videoApiLatencyExt?: string;
+  videoDownloadLatencyExt?: string;
+  videoResourceAllocationExt?: string;
 
   imageUrlKeyframes?: string;
   videoUrlKeyframes?: string;
@@ -36,6 +42,9 @@ export interface Scene {
   videoLogsKeyframes?: string[];
   videoErrorKeyframes?: string;
   videoErrorCodeKeyframes?: number;
+  videoApiLatencyKeyframes?: string;
+  videoDownloadLatencyKeyframes?: string;
+  videoResourceAllocationKeyframes?: string;
   isRetryingPolicy?: boolean;
   policyRetryCount?: number;
   useFreezeAndMove?: boolean;
@@ -64,6 +73,9 @@ export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character
   videoProgress: "0%",
   videoLogs: [],
   videoError: "",
+  videoApiLatency: "",
+  videoDownloadLatency: "",
+  videoResourceAllocation: "",
   imageUrlExt: "",
   videoUrlExt: "",
   isGeneratingImageExt: false,
@@ -71,6 +83,9 @@ export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character
   videoProgressExt: "0%",
   videoLogsExt: [],
   videoErrorExt: "",
+  videoApiLatencyExt: "",
+  videoDownloadLatencyExt: "",
+  videoResourceAllocationExt: "",
   imageUrlKeyframes: "",
   videoUrlKeyframes: "",
   isGeneratingImageKeyframes: false,
@@ -78,6 +93,9 @@ export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character
   videoProgressKeyframes: "0%",
   videoLogsKeyframes: [],
   videoErrorKeyframes: "",
+  videoApiLatencyKeyframes: "",
+  videoDownloadLatencyKeyframes: "",
+  videoResourceAllocationKeyframes: "",
   audioCue: "",
   directorNotes: "",
   aiReviewStatus: "passed",

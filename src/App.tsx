@@ -2362,6 +2362,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     const logsField = activeTab === "scenes_ext" ? "videoLogsExt" : (activeTab === "scenes_keyframes" ? "videoLogsKeyframes" : "videoLogs");
     const errorField = activeTab === "scenes_ext" ? "videoErrorExt" : (activeTab === "scenes_keyframes" ? "videoErrorKeyframes" : "videoError");
     const errorCodeField = activeTab === "scenes_ext" ? "videoErrorCodeExt" : (activeTab === "scenes_keyframes" ? "videoErrorCodeKeyframes" : "videoErrorCode");
+    const apiLatencyField = activeTab === "scenes_ext" ? "videoApiLatencyExt" : (activeTab === "scenes_keyframes" ? "videoApiLatencyKeyframes" : "videoApiLatency");
+    const downloadLatencyField = activeTab === "scenes_ext" ? "videoDownloadLatencyExt" : (activeTab === "scenes_keyframes" ? "videoDownloadLatencyKeyframes" : "videoDownloadLatency");
+    const resourceAllocationField = activeTab === "scenes_ext" ? "videoResourceAllocationExt" : (activeTab === "scenes_keyframes" ? "videoResourceAllocationKeyframes" : "videoResourceAllocation");
 
     const index = activeProject.scenes.findIndex(s => s.id === sceneId);
     let endImageUrl: string | undefined = undefined;
@@ -2461,7 +2464,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
              }
           }
           
-          throw new Error(errData.error || "Failed to call Agnes server API");
+          throw new Error(errData.error || (errText && errText.length < 200 ? errText : "Failed to call Agnes server API"));
         }
       } catch (e: any) {
         console.error("[Toonflow Video Gen] Failed to initiate generation:", e);
@@ -2533,7 +2536,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         [progressField]: "100%",
                         [logsField]: [...logs, "[SYSTEM] Video generated and mapped successfully!"],
                         [errorField]: statusData.error,
-                        [errorCodeField]: statusData.errorCode
+                        [errorCodeField]: statusData.errorCode,
+                        [apiLatencyField]: statusData.apiLatency || (s as any)[apiLatencyField],
+                        [downloadLatencyField]: statusData.downloadLatency || (s as any)[downloadLatencyField],
+                        [resourceAllocationField]: statusData.resourceAllocation || (s as any)[resourceAllocationField]
                       };
                     } else if (status === "failed") {
                       clearInterval(intervalId);
@@ -2544,14 +2550,20 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         [errorField]: statusData.error || "Generation process failed",
                         [errorCodeField]: statusData.errorCode,
                         [logsField]: logs,
-                        isRetryingPolicy: false
+                        isRetryingPolicy: false,
+                        [apiLatencyField]: statusData.apiLatency || (s as any)[apiLatencyField],
+                        [downloadLatencyField]: statusData.downloadLatency || (s as any)[downloadLatencyField],
+                        [resourceAllocationField]: statusData.resourceAllocation || (s as any)[resourceAllocationField]
                       };
                     }
 
                     return {
                       ...s,
                       [progressField]: progress,
-                      [logsField]: logs
+                      [logsField]: logs,
+                      [apiLatencyField]: statusData.apiLatency || (s as any)[apiLatencyField],
+                      [downloadLatencyField]: statusData.downloadLatency || (s as any)[downloadLatencyField],
+                      [resourceAllocationField]: statusData.resourceAllocation || (s as any)[resourceAllocationField]
                     };
                   }
                   return s;
@@ -2713,7 +2725,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         const errText = await res.text().catch(() => "");
         let errData: any = {};
         try { errData = JSON.parse(errText); } catch(e) {}
-        throw new Error(errData.error || "Failed to call Agnes server API");
+        throw new Error(errData.error || (errText && errText.length < 200 ? errText : "Failed to call Agnes server API"));
       }
 
       // Start polling specifically for this scene
@@ -3121,7 +3133,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         const errText = await res.text().catch(() => "");
         let errData: any = {};
         try { errData = JSON.parse(errText); } catch(e) {}
-        throw new Error(errData.error || "Failed to call Agnes server API");
+        throw new Error(errData.error || (errText && errText.length < 200 ? errText : "Failed to call Agnes server API"));
       }
 
       // Start polling specifically for this scene
@@ -6845,6 +6857,24 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                     </div>
                                   </div>
                                 )}
+                                {scene.isGeneratingVideo && (
+                                  <div className="flex gap-2 w-full mt-2 mb-2">
+                                    <button
+                                      onClick={() => handleStopGenerateVideo(scene.id)}
+                                      className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
+                                    >
+                                      <StopCircle className="w-3.5 h-3.5" />
+                                      <span>🛑 停止影片生成</span>
+                                    </button>
+                                    <button
+                                      onClick={() => handleResetVideoTask()}
+                                      className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5" />
+                                      <span>取消/重置</span>
+                                    </button>
+                                  </div>
+                                )}
                                 <div className="flex gap-2">
                                   <button
                                     onClick={() => {
@@ -7541,43 +7571,150 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                     )}
 
                                     {scene.isGeneratingVideoExt && (
-                                      <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center">
-                                        <RefreshCw className="w-7 h-7 text-emerald-400 animate-spin mb-2" />
-                                        <span className="text-xs font-bold text-white mb-1">正在進行影格延長渲染...</span>
-                                        <div className="w-3/4 bg-slate-800 h-1.5 rounded-full overflow-hidden mb-2">
-                                          <div 
-                                            className="bg-gradient-to-r from-emerald-500 to-teal-500 h-full transition-all duration-300"
-                                            style={{ width: scene.videoProgressExt || "0%" }}
-                                          />
-                                        </div>
-                                        <span className="text-[10px] text-slate-400 font-mono">進度: {scene.videoProgressExt || "0%"}</span>
-                                        {scene.videoLogsExt && scene.videoLogsExt.length > 0 && (
-                                          <div className="w-full mt-2 bg-black/90 p-2 rounded-lg text-[8px] font-mono text-emerald-400 text-left h-24 overflow-y-auto border border-emerald-500/20 select-text leading-relaxed">
-                                            {scene.videoLogsExt.map((logLine, logIdx) => (
-                                              <div key={logIdx}>{logLine}</div>
-                                            ))}
-                                          </div>
-                                        )}
+                                      <div className="absolute inset-0 bg-emerald-950/20 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold bg-emerald-950/90 text-emerald-400 border border-emerald-500/30 shadow-lg animate-pulse">
+                                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                                          <span>COMPILING DIGITAL PREVIEW...</span>
+                                        </span>
                                       </div>
                                     )}
                                   </div>
 
                                   {scene.isGeneratingVideoExt && (
-                                    <div className="flex gap-2 w-full mt-2 mb-2">
-                                      <button
-                                        onClick={() => handleStopGenerateVideo(scene.id)}
-                                        className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
-                                      >
-                                        <StopCircle className="w-3.5 h-3.5" />
-                                        <span>🛑 停止影片生成</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleResetVideoTask()}
-                                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5" />
-                                        <span>取消/重置</span>
-                                      </button>
+                                    <div className="space-y-4 animate-fadeIn">
+                                      {/* Screen 2: Render Output Screen */}
+                                      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-4">
+                                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                                          <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                            <Film className="w-3.5 h-3.5" />
+                                            <span>🎬 Render Output</span>
+                                          </span>
+                                          <span className="bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[9px] font-mono font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                                            <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
+                                            Cinematic Compiler
+                                          </span>
+                                        </div>
+
+                                        <div className="flex flex-col items-center py-2 text-center">
+                                          {/* SVG Circular progress */}
+                                          <div className="relative w-16 h-16 mb-3">
+                                            <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                                              <path
+                                                className="text-slate-850"
+                                                strokeWidth="2.5"
+                                                stroke="currentColor"
+                                                fill="none"
+                                                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                                              />
+                                              <path
+                                                className="text-emerald-500 transition-all duration-300 stroke-linecap-round"
+                                                strokeWidth="2.5"
+                                                strokeDasharray={`${parseInt(scene.videoProgressExt || "0")}, 100`}
+                                                stroke="currentColor"
+                                                fill="none"
+                                                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                                              />
+                                            </svg>
+                                            <div className="absolute inset-0 flex items-center justify-center">
+                                              <Film className="w-5 h-5 text-emerald-400 animate-spin" style={{ animationDuration: '6s' }} />
+                                            </div>
+                                          </div>
+
+                                          <span className="text-xs font-bold text-white mb-1">Rendering Cinematic Frames...</span>
+                                          <span className="text-[10px] text-slate-400 font-medium">
+                                            Agnes AI is compiling <strong className="text-emerald-400">{scene.videoProgressExt || "0%"}</strong> of the video stream.
+                                          </span>
+                                        </div>
+
+                                        {/* API Latency & Resource Allocation Indicator */}
+                                        <div className="grid grid-cols-2 gap-3 text-left">
+                                          <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
+                                            <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                                              <Clock className="w-2.5 h-2.5 text-emerald-400" />
+                                              <span>回應時間 (Latency)</span>
+                                            </span>
+                                            <div className="flex flex-col gap-0.5 mt-1 font-mono text-[9px]">
+                                              <div className="flex justify-between items-center">
+                                                <span className="text-slate-500">Agnes API:</span>
+                                                <span className="text-emerald-400 font-bold">{scene.videoApiLatencyExt || "偵測中..."}</span>
+                                              </div>
+                                              {scene.videoDownloadLatencyExt && (
+                                                <div className="flex justify-between items-center">
+                                                  <span className="text-slate-500">檔案下載:</span>
+                                                  <span className="text-teal-400 font-bold">{scene.videoDownloadLatencyExt}</span>
+                                                </div>
+                                              )}
+                                            </div>
+                                          </div>
+                                          <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
+                                            <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                                              <Info className="w-2.5 h-2.5 text-emerald-400" />
+                                              <span>資源分配 (Resources)</span>
+                                            </span>
+                                            <div className="text-[8px] text-emerald-300 font-mono line-clamp-2 mt-1 leading-normal">
+                                              {scene.videoResourceAllocationExt || "初始化算力資源..."}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* Screen 3: Console Logs Screen */}
+                                      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-2">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[10px] font-mono text-slate-400 font-semibold tracking-wider flex items-center gap-1">
+                                            <span>&gt; agnes_video.py console logs</span>
+                                          </span>
+                                          <div className="flex items-center gap-2">
+                                            <button
+                                              onClick={() => {
+                                                const logText = (scene.videoLogsExt || []).join('\n') || "[SYSTEM] Initiating Agnes Video V2.0 call...";
+                                                navigator.clipboard.writeText(logText);
+                                                showToast("日誌已複製到剪貼簿！", "success");
+                                              }}
+                                              className="text-[9px] text-slate-400 hover:text-white bg-slate-950 hover:bg-slate-800 px-2 py-0.5 rounded border border-slate-800 transition"
+                                            >
+                                              Copy
+                                            </button>
+                                            <span className="inline-flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-900/20">
+                                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                                              <span>streaming...</span>
+                                            </span>
+                                          </div>
+                                        </div>
+
+                                        <div className="w-full bg-black/95 p-3 rounded-lg text-[9px] font-mono text-emerald-400 text-left h-32 overflow-y-auto border border-emerald-500/20 select-text leading-relaxed font-mono shadow-inner">
+                                          {scene.videoLogsExt && scene.videoLogsExt.length > 0 ? (
+                                            scene.videoLogsExt.map((logLine, logIdx) => (
+                                              <div key={logIdx} className="break-all">{logLine}</div>
+                                            ))
+                                          ) : (
+                                            <>
+                                              <div className="text-emerald-500/80">[SYSTEM] Initiating Agnes Video V2.0 call...</div>
+                                              <div className="text-emerald-500/80">[SYSTEM] Requesting compute resource allocation...</div>
+                                              <div className="text-emerald-500/80">[SYSTEM] Initializing cinematic stream compiler...</div>
+                                              <div className="text-slate-500 animate-pulse mt-1">&gt; Compiling audio-visual streams...</div>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Action Buttons */}
+                                      <div className="flex gap-2 w-full mt-2 mb-2">
+                                        <button
+                                          onClick={() => handleStopGenerateVideo(scene.id)}
+                                          className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
+                                        >
+                                          <StopCircle className="w-3.5 h-3.5" />
+                                          <span>🛑 停止影片生成</span>
+                                        </button>
+                                        <button
+                                          onClick={() => handleResetVideoTask()}
+                                          className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
+                                        >
+                                          <RefreshCw className="w-3.5 h-3.5" />
+                                          <span>取消/重置</span>
+                                        </button>
+                                      </div>
                                     </div>
                                   )}
 
@@ -8603,45 +8740,150 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                     )}
 
                                     {scene.isGeneratingVideoKeyframes && (
-                                      <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center">
-                                        <RefreshCw className="w-7 h-7 text-purple-400 animate-spin mb-2" />
-                                        <span className="text-xs font-bold text-white mb-1">正在進行首尾影格轉換渲染...</span>
-                                        <div className="w-3/4 bg-slate-800 h-1.5 rounded-full overflow-hidden mb-2">
-                                          <div 
-                                            className="bg-gradient-to-r from-purple-500 to-indigo-500 h-full transition-all duration-300"
-                                            style={{ width: scene.videoProgressKeyframes || "0%" }}
-                                          />
-                                        </div>
-                                        <span className="text-[10px] text-slate-400 font-mono">進度: {scene.videoProgressKeyframes || "0%"}</span>
-                                        
-                                        {scene.videoLogsKeyframes && scene.videoLogsKeyframes.length > 0 && (
-                                          <div className="w-full mt-2 bg-black/90 p-2 rounded-lg text-[8px] font-mono text-purple-400 text-left h-24 overflow-y-auto border border-purple-500/20 select-text leading-relaxed">
-                                            {scene.videoLogsKeyframes.map((logLine, logIdx) => (
-                                              <div key={logIdx}>{logLine}</div>
-                                            ))}
-                                          </div>
-                                        )}
+                                      <div className="absolute inset-0 bg-purple-950/20 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold bg-purple-950/90 text-purple-400 border border-purple-500/30 shadow-lg animate-pulse">
+                                          <span className="w-2 h-2 rounded-full bg-purple-500 animate-ping" />
+                                          <span>COMPILING DIGITAL PREVIEW...</span>
+                                        </span>
                                       </div>
                                     )}
                                   </div>
 
-                                  {/* Rendering actions below video */}
                                   {scene.isGeneratingVideoKeyframes && (
-                                    <div className="flex gap-2 w-full mt-2 mb-2">
-                                      <button
-                                        onClick={() => handleStopGenerateVideo(scene.id)}
-                                        className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
-                                      >
-                                        <StopCircle className="w-3.5 h-3.5" />
-                                        <span>🛑 停止影片生成</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleResetVideoTask()}
-                                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5" />
-                                        <span>取消/重置</span>
-                                      </button>
+                                    <div className="space-y-4 animate-fadeIn">
+                                      {/* Screen 2: Render Output Screen */}
+                                      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-4">
+                                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                                          <span className="text-[10px] font-mono text-purple-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                            <Film className="w-3.5 h-3.5" />
+                                            <span>🎬 Render Output</span>
+                                          </span>
+                                          <span className="bg-purple-500/15 border border-purple-500/30 text-purple-300 text-[9px] font-mono font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                                            <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                                            Cinematic Compiler
+                                          </span>
+                                        </div>
+
+                                        <div className="flex flex-col items-center py-2 text-center">
+                                          {/* SVG Circular progress */}
+                                          <div className="relative w-16 h-16 mb-3">
+                                            <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                                              <path
+                                                className="text-slate-850"
+                                                strokeWidth="2.5"
+                                                stroke="currentColor"
+                                                fill="none"
+                                                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                                              />
+                                              <path
+                                                className="text-purple-500 transition-all duration-300 stroke-linecap-round"
+                                                strokeWidth="2.5"
+                                                strokeDasharray={`${parseInt(scene.videoProgressKeyframes || "0")}, 100`}
+                                                stroke="currentColor"
+                                                fill="none"
+                                                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                                              />
+                                            </svg>
+                                            <div className="absolute inset-0 flex items-center justify-center">
+                                              <Film className="w-5 h-5 text-purple-400 animate-spin" style={{ animationDuration: '6s' }} />
+                                            </div>
+                                          </div>
+
+                                          <span className="text-xs font-bold text-white mb-1">Rendering Cinematic Frames...</span>
+                                          <span className="text-[10px] text-slate-400 font-medium">
+                                            Agnes AI is compiling <strong className="text-purple-400">{scene.videoProgressKeyframes || "0%"}</strong> of the video stream.
+                                          </span>
+                                        </div>
+
+                                        {/* API Latency & Resource Allocation Indicator */}
+                                        <div className="grid grid-cols-2 gap-3 text-left">
+                                          <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
+                                            <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                                              <Clock className="w-2.5 h-2.5 text-purple-400" />
+                                              <span>回應時間 (Latency)</span>
+                                            </span>
+                                            <div className="flex flex-col gap-0.5 mt-1 font-mono text-[9px]">
+                                              <div className="flex justify-between items-center">
+                                                <span className="text-slate-500">Agnes API:</span>
+                                                <span className="text-purple-400 font-bold">{scene.videoApiLatencyKeyframes || "偵測中..."}</span>
+                                              </div>
+                                              {scene.videoDownloadLatencyKeyframes && (
+                                                <div className="flex justify-between items-center">
+                                                  <span className="text-slate-500">檔案下載:</span>
+                                                  <span className="text-indigo-400 font-bold">{scene.videoDownloadLatencyKeyframes}</span>
+                                                </div>
+                                              )}
+                                            </div>
+                                          </div>
+                                          <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
+                                            <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                                              <Info className="w-2.5 h-2.5 text-purple-400" />
+                                              <span>資源分配 (Resources)</span>
+                                            </span>
+                                            <div className="text-[8px] text-indigo-300 font-mono line-clamp-2 mt-1 leading-normal">
+                                              {scene.videoResourceAllocationKeyframes || "初始化算力資源..."}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* Screen 3: Console Logs Screen */}
+                                      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-2">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[10px] font-mono text-slate-400 font-semibold tracking-wider flex items-center gap-1">
+                                            <span>&gt; agnes_video.py console logs</span>
+                                          </span>
+                                          <div className="flex items-center gap-2">
+                                            <button
+                                              onClick={() => {
+                                                const logText = (scene.videoLogsKeyframes || []).join('\n') || "[SYSTEM] Initiating Agnes Video V2.0 call...";
+                                                navigator.clipboard.writeText(logText);
+                                                showToast("日誌已複製到剪貼簿！", "success");
+                                              }}
+                                              className="text-[9px] text-slate-400 hover:text-white bg-slate-950 hover:bg-slate-800 px-2 py-0.5 rounded border border-slate-800 transition"
+                                            >
+                                              Copy
+                                            </button>
+                                            <span className="inline-flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-900/20">
+                                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                                              <span>streaming...</span>
+                                            </span>
+                                          </div>
+                                        </div>
+
+                                        <div className="w-full bg-black/95 p-3 rounded-lg text-[9px] font-mono text-purple-400 text-left h-32 overflow-y-auto border border-purple-500/20 select-text leading-relaxed font-mono shadow-inner">
+                                          {scene.videoLogsKeyframes && scene.videoLogsKeyframes.length > 0 ? (
+                                            scene.videoLogsKeyframes.map((logLine, logIdx) => (
+                                              <div key={logIdx} className="break-all">{logLine}</div>
+                                            ))
+                                          ) : (
+                                            <>
+                                              <div className="text-purple-500/80">[SYSTEM] Initiating Agnes Video V2.0 call...</div>
+                                              <div className="text-purple-500/80">[SYSTEM] Requesting compute resource allocation...</div>
+                                              <div className="text-purple-500/80">[SYSTEM] Initializing cinematic stream compiler...</div>
+                                              <div className="text-slate-500 animate-pulse mt-1">&gt; Compiling audio-visual streams...</div>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Action Buttons */}
+                                      <div className="flex gap-2 w-full mt-2 mb-2">
+                                        <button
+                                          onClick={() => handleStopGenerateVideo(scene.id)}
+                                          className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
+                                        >
+                                          <StopCircle className="w-3.5 h-3.5" />
+                                          <span>🛑 停止影片生成</span>
+                                        </button>
+                                        <button
+                                          onClick={() => handleResetVideoTask()}
+                                          className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
+                                        >
+                                          <RefreshCw className="w-3.5 h-3.5" />
+                                          <span>取消/重置</span>
+                                        </button>
+                                      </div>
                                     </div>
                                   )}
 
