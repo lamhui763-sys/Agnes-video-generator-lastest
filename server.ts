@@ -1238,16 +1238,51 @@ app.post("/api/generate", async (req, res) => {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
-  if (activeTask.status === "running" || activeTask.status === "in_progress") {
-    const isStuck = activeTask.startTime && (Date.now() - activeTask.startTime > 10 * 60 * 1000);
-    if (force || isStuck) {
-      if (activeChildProcess) {
-        try { activeChildProcess.kill(); } catch(e) {}
-        activeChildProcess = null;
-      }
-      activeTask.status = "idle";
-      activeTask.logs = ["Task forcibly reset by user"];
-      console.log(`[Toonflow] Forcibly resetting stuck or overridden video task.`);
+  // Check queue status for user feedback
+  const queueStatus = videoQueue.getStatus();
+  console.log(`[VideoQueue] Current status: ${queueStatus.queued} queued, ${queueStatus.running} running`);
+
+  // If there are tasks in queue or one running, inform the user
+  if (queueStatus.queued > 0 || queueStatus.running > 0) {
+    return res.status(202).json({ 
+      message: "Video generation request queued. Previous requests are being processed to avoid rate limits.",
+      queuePosition: queueStatus.queued + 1,
+      queueStatus: queueStatus
+    });
+  }
+
+  // Prepare the task data
+  const taskId = `video-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const outputFilename = `agnes-video-${sceneType || "standard"}-scene-${typeof sceneIndex === 'number' ? sceneIndex + 1 : "unknown"}-${Date.now()}.mp4`;
+  const outputPath = path.join("assets", outputFilename);
+  
+  // Resolve the Agnes API key
+  const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
+  
+  // Add to queue and wait for completion
+  try {
+    const result = await videoQueue.enqueue({
+      id: taskId,
+      prompt: prompt,
+      outputPath: outputPath,
+      apikey: sanitizedAgnesKey,  // Pass the resolved API key
+    });
+
+    if (result.success) {
+      // Build the public URL for the generated video
+      const publicBaseUrl = getPublicBaseUrl(req);
+      const publicVideoUrl = `${publicBaseUrl}/assets/${outputFilename}`;
+      
+      console.log(`[VideoQueue] Video generated successfully: ${publicVideoUrl}`);
+      
+      return res.json({ 
+        message: "Video generation completed", 
+        task: { 
+          status: "completed", 
+          outputPath: publicVideoUrl,
+          localPath: `/assets/${outputFilename}`
+        } 
+      });
     } else {
       return res.status(400).json({ error: "A video generation is already in progress" });
     }
