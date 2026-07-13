@@ -111,6 +111,7 @@ class VideoGenerationQueue {
           ];
 
           console.log(`[VideoQueue] Spawning Python process with command: python3 ${args.join(' ')}`);
+          console.log(`[VideoQueue] API key length: ${task.apikey ? task.apikey.length : 0} chars, starts with: ${task.apikey ? task.apikey.substring(0, 8) + '...' : 'NONE'}`);
           
           const child = spawn('python3', args, {
             env: { 

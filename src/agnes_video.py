@@ -134,13 +134,18 @@ def create_video_task(base_url, api_key, payload, timeout):
     max_retries = 15
     for attempt in range(max_retries):
         try:
+            print(f"[SYSTEM] Calling Agnes API endpoint: {endpoint}", file=sys.stderr)
+            print(f"[SYSTEM] API key length: {len(api_key)}, starts with: {api_key[:8] if api_key else 'NONE'}", file=sys.stderr)
             return post_json(endpoint, api_key, payload, timeout)
         except SystemExit as exc:
             err_str = str(exc)
-            if "503" in err_str and "Service busy" in err_str:
+            print(f"[SYSTEM] API call failed with error: {err_str}", file=sys.stderr)
+            # 處理429速率限制
+            if "429" in err_str or "rate_limit" in err_str.lower():
                 if attempt < max_retries - 1:
-                    print(f"[SYSTEM] Agnes server is busy. Retrying in 10 seconds... (Attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                    time.sleep(10)
+                    backoff_time = min(10 * (2 ** attempt), 120)
+                    print(f"[SYSTEM] Rate limit detected. Waiting {backoff_time}s...", file=sys.stderr)
+                    time.sleep(backoff_time)
                 else:
                     raise
             else:
