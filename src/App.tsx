@@ -707,6 +707,19 @@ export default function App() {
     if (!projects || projects.length === 0) return;
 
     const timer = setTimeout(() => {
+      // Simple dirty check to avoid redundant writes
+      const savedProjects = localStorage.getItem("last_saved_projects");
+      if (savedProjects === JSON.stringify(projects)) {
+        return;
+      }
+      
+      // Cool-down for 10 minutes if we hit a quota error
+      const lastSaveAttempt = localStorage.getItem("last_save_attempt_time");
+      if (lastSaveAttempt && Date.now() - parseInt(lastSaveAttempt) < 600000) {
+        return;
+      }
+      localStorage.setItem("last_saved_projects", JSON.stringify(projects));
+
       const performSave = async (retryCount = 0) => {
         try {
           const uploadBase64 = async (url: string) => {
@@ -807,17 +820,25 @@ export default function App() {
           }
         } catch (e: any) {
           console.warn(`[Toonflow Autosave] Save attempt ${retryCount + 1} failed: ${e.message || e}`);
-          if (retryCount < 3) {
-            // Retry after 3 seconds with exponential backoff
-            const delay = Math.pow(2, retryCount) * 1500;
-            setTimeout(() => performSave(retryCount + 1), delay);
+          
+          // If quota is exhausted, disable autosave for a while
+          if (e.message && e.message.includes("RESOURCE_EXHAUSTED")) {
+            console.error("[Toonflow Autosave] Quota exhausted! Autosave disabled for 10 minutes.");
+            localStorage.setItem("last_save_attempt_time", Date.now().toString());
+            return;
+          }
+
+          if (retryCount < 1) { // Reduced retries
+            // Retry after 5 seconds
+            setTimeout(() => performSave(retryCount + 1), 5000);
           } else {
             console.error("Cloud Autosave: Failed to sync projects to secure proxy after retries", e);
           }
         }
       };
       performSave();
-    }, 2000);
+    }, 900000);
+
 
     return () => clearTimeout(timer);
   }, [projects, isSyncCompleted]);
@@ -2307,7 +2328,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // Agnes Video Generation for a specific scene card!
-  const handleGenerateVideo = async (sceneId: string) => {
+  const handleGenerateVideo = async (sceneId: string, force = false) => {
+    console.log("[DEBUG] handleGenerateVideo called for:", sceneId, "Force:", force);
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -2319,6 +2341,15 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     const isGenField = activeTab === "scenes_ext" ? "isGeneratingVideoExt" : (activeTab === "scenes_keyframes" ? "isGeneratingVideoKeyframes" : "isGeneratingVideo");
     const videoField = activeTab === "scenes_ext" ? "videoUrlExt" : (activeTab === "scenes_keyframes" ? "videoUrlKeyframes" : "videoUrl");
     const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
+    
+    // Check if generating already
+    const existingTargetScene = activeProject.scenes.find(s => s.id === sceneId);
+    if (!force && existingTargetScene && (existingTargetScene as any)[isGenField]) {
+      console.log("[DEBUG] Already generating for:", sceneId);
+      return;
+    }
+    
+    console.log("[DEBUG] Proceeding to generate video for:", sceneId);
     const progressField = activeTab === "scenes_ext" ? "videoProgressExt" : (activeTab === "scenes_keyframes" ? "videoProgressKeyframes" : "videoProgress");
     const logsField = activeTab === "scenes_ext" ? "videoLogsExt" : (activeTab === "scenes_keyframes" ? "videoLogsKeyframes" : "videoLogs");
     const errorField = activeTab === "scenes_ext" ? "videoErrorExt" : (activeTab === "scenes_keyframes" ? "videoErrorKeyframes" : "videoError");
@@ -2384,37 +2415,64 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
       const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
 
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: enhancedPrompt,
-          visualPrompt: targetScene.visualPrompt,
-          negativePrompt: targetScene.negativePrompt,
-          actionPrompt: targetScene.actionPrompt,
-          transitionPrompt: targetScene.transitionPrompt,
-          dialogue: targetScene.dialogue,
-          narration: targetScene.narration,
-          directorNotes: targetScene.directorNotes,
-          character: targetScene.character,
-          characterDescription: charDesc,
-          artStyle: characterObj?.artStyle || activeProject.artStyle,
-          imageUrl: startImageUrlForTransition || (targetScene as any)[imageField] || undefined,
-          endImageUrl: endImageUrl,
-          customApiKey: customApiKey || undefined,
-          durationSeconds: targetScene.durationSeconds,
-          agnesVideoMode: activeProject.agnesVideoMode || "quality",
-          sceneIndex: index,
-          sceneType: activeTab === "scenes_ext" ? "ext" : (activeTab === "scenes_keyframes" ? "keyframes" : "standard")
-        })
-      });
+      try {
+        const url = force ? "/api/generate?force=true" : "/api/generate";
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: enhancedPrompt,
+            visualPrompt: targetScene.visualPrompt,
+            negativePrompt: targetScene.negativePrompt,
+            actionPrompt: targetScene.actionPrompt,
+            transitionPrompt: targetScene.transitionPrompt,
+            dialogue: targetScene.dialogue,
+            narration: targetScene.narration,
+            directorNotes: targetScene.directorNotes,
+            character: targetScene.character,
+            characterDescription: charDesc,
+            artStyle: characterObj?.artStyle || activeProject.artStyle,
+            imageUrl: startImageUrlForTransition || (targetScene as any)[imageField] || undefined,
+            endImageUrl: endImageUrl,
+            customApiKey: customApiKey || undefined,
+            durationSeconds: targetScene.durationSeconds,
+            agnesVideoMode: activeProject.agnesVideoMode || "quality",
+            sceneIndex: index,
+            sceneType: activeTab === "scenes_ext" ? "ext" : (activeTab === "scenes_keyframes" ? "keyframes" : "standard")
+          })
+        });
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        let errData: any = {};
-        try { errData = JSON.parse(errText); } catch(e) {}
-        throw new Error(errData.error || "Failed to call Agnes server API");
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          let errData: any = {};
+          try { errData = JSON.parse(errText); } catch(e) {}
+          
+          if (errData.error === "A video generation is already in progress") {
+             if (confirm("伺服器端仍有生成任務正在進行中。是否強制重置並重新發起？")) {
+                 return handleGenerateVideo(sceneId, true);
+             }
+          }
+          
+          throw new Error(errData.error || "Failed to call Agnes server API");
+        }
+      } catch (e: any) {
+        console.error("[Toonflow Video Gen] Failed to initiate generation:", e);
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => {
+            if (s.id === sceneId) {
+              return { 
+                ...s, 
+                [isGenField]: false, 
+                [errorField]: `生成請求失敗: ${e.message || e}`,
+                [logsField]: [...(s[logsField] as string[] || []), `[ERROR] ${e.message || e}`]
+              };
+            }
+            return s;
+          })
+        }));
+        return;
       }
+
 
       // Start polling specifically for this scene
       let count = 0;
@@ -6781,17 +6839,29 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 )}
                                 <div className="flex gap-2">
                                   <button
-                                    onClick={() => handleGenerateVideo(scene.id)}
-                                    disabled={scene.isGeneratingVideo || !scene.imageUrl}
+                                    onClick={() => {
+                                      if (scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes) {
+                                        if (confirm("偵測到生成狀態卡住？點擊確定強制重置生成狀態。")) {
+                                          updateActiveProject(prev => ({
+                                            scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, isGeneratingVideo: false, isGeneratingVideoExt: false, isGeneratingVideoKeyframes: false } : s)
+                                          }));
+                                        }
+                                      } else {
+                                        handleGenerateVideo(scene.id);
+                                      }
+                                    }}
+                                    disabled={!scene.imageUrl}
                                     className={`flex-1 py-2.5 text-xs font-semibold rounded-lg border transition flex items-center justify-center gap-1.5 cursor-pointer ${
                                       !scene.imageUrl 
                                         ? "bg-slate-950 text-slate-600 border-slate-900 cursor-not-allowed opacity-55" 
-                                        : "bg-gradient-to-tr from-pink-600 to-indigo-600 text-white hover:opacity-95 border-transparent shadow"
+                                        : (scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes)
+                                          ? "bg-amber-900/50 text-amber-200 border-amber-800"
+                                          : "bg-gradient-to-tr from-pink-600 to-indigo-600 text-white hover:opacity-95 border-transparent shadow"
                                     }`}
-                                    title={!scene.imageUrl ? "請先完成分鏡繪圖再生成影片" : "調用影片模型生成 5秒 影片"}
+                                    title={!scene.imageUrl ? "請先完成分鏡繪圖再生成影片" : (scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes ? "生成卡住？點擊重置" : "調用影片模型生成 5秒 影片")}
                                   >
                                     <Video className="w-4 h-4" />
-                                    <span>🎬 一鍵 AI 影片</span>
+                                    <span>{scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes ? "⚠️ 生成中 (重置)" : "🎬 一鍵 AI 影片"}</span>
                                   </button>
 
                                   <label

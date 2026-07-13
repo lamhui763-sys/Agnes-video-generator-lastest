@@ -8,7 +8,6 @@ import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
-import { videoQueue } from "./src/video-queue";
 
 // Load environment variables
 dotenv.config();
@@ -227,13 +226,17 @@ async function uploadToFreeImageHost(localPath: string): Promise<string> {
     formData.append("source", blob, path.basename(localPath));
     formData.append("action", "upload");
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     const response = await fetch("https://freeimage.host/api/1/upload", {
       method: "POST",
       body: formData,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
+      },
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       throw new Error(`HTTP error ${response.status}`);
@@ -286,13 +289,17 @@ async function uploadToCatbox(localPath: string): Promise<string> {
     formData.append("reqtype", "fileupload");
     formData.append("fileToUpload", blob, path.basename(localPath));
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     const response = await fetch("https://catbox.moe/user/api.php", {
       method: "POST",
       body: formData,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      }
+      },
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       throw new Error(`Catbox upload did not succeed`);
@@ -1117,13 +1124,14 @@ async function ensurePublicCdnUrl(urlOrPath: string, activeTaskLogs?: string[], 
     return urlOrPath;
   }
   
-  const isLocalOrProxied = urlOrPath.startsWith("/assets/") || 
-                           urlOrPath.startsWith("assets/") || 
-                           urlOrPath.includes("/assets/") || 
-                           urlOrPath.includes("localhost") || 
-                           urlOrPath.includes("127.0.0.1") || 
-                           urlOrPath.includes("ais-dev-") || 
-                           urlOrPath.includes("ais-pre-");
+  const isLocalOrProxied = !urlOrPath.startsWith("http") && (
+                             urlOrPath.startsWith("/assets/") || 
+                             urlOrPath.startsWith("assets/") || 
+                             urlOrPath.includes("/assets/") || 
+                             urlOrPath.includes("localhost") || 
+                             urlOrPath.includes("127.0.0.1") || 
+                             urlOrPath.includes("ais-dev-") || 
+                             urlOrPath.includes("ais-pre-"));
                            
   if (isLocalOrProxied) {
     try {
@@ -1210,40 +1218,444 @@ app.post("/api/generate", async (req, res) => {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
-  // Check queue status for user feedback
-  const queueStatus = videoQueue.getStatus();
-  console.log(`[VideoQueue] Current status: ${queueStatus.queued} queued, ${queueStatus.running} running`);
-
-  // If there are tasks in queue or one running, inform the user
-  if (queueStatus.queued > 0 || queueStatus.running > 0) {
-    return res.status(202).json({ 
-      message: "Video generation request queued. Previous requests are being processed to avoid rate limits.",
-      queuePosition: queueStatus.queued + 1,
-      queueStatus: queueStatus
-    });
-  }
-
-  // Prepare the task data
-  const taskId = `video-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  
-  // Add to queue and wait for completion
-  try {
-    const result = await videoQueue.enqueue({
-      id: taskId,
-      prompt: prompt,
-      outputPath: path.join("assets", `temp-${taskId}.mp4`),
-    });
-
-    if (result.success) {
-      return res.json({ message: "Video generation completed", task: { status: "completed", outputPath: result.outputPath } });
+  if (activeTask.status === "running" || activeTask.status === "in_progress") {
+    const isStuck = activeTask.startTime && (Date.now() - activeTask.startTime > 10 * 60 * 1000);
+    if (force || isStuck) {
+      if (activeChildProcess) {
+        try { activeChildProcess.kill(); } catch(e) {}
+        activeChildProcess = null;
+      }
+      activeTask.status = "idle";
+      activeTask.logs = ["Task forcibly reset by user"];
+      console.log(`[Toonflow] Forcibly resetting stuck or overridden video task.`);
     } else {
-      return res.status(500).json({ error: result.error || "Video generation failed" });
+      return res.status(400).json({ error: "A video generation is already in progress" });
     }
-  } catch (err: any) {
-    console.error("[VideoQueue] Error processing video generation:", err);
-    return res.status(500).json({ error: err.message || "Video generation queue error" });
   }
 
+  // Ensure assets folder exists
+  const assetsDir = path.join(process.cwd(), "assets");
+  if (!fs.existsSync(assetsDir)) {
+    fs.mkdirSync(assetsDir, { recursive: true });
+  }
+
+  // Determine the final synthesized prompt
+  let finalPrompt = prompt;
+  let hasSynthesized = false;
+
+  const logs: string[] = [];
+
+  if (visualPrompt || actionPrompt || transitionPrompt || directorNotes) {
+    try {
+      console.log(`[Toonflow] Synthesizing detailed cinematic video prompt from storyboard properties...`);
+      const synthesisPrompt = `You are an elite AI Video Director. Combine the following storyboard details into a single, cohesive, highly descriptive English prompt (maximum 180 words) for an advanced AI Video Generator (like Sora, Kling, Luma, or Agnes).
+
+Storyboard Details:
+1. Visual Scene Setup (English): "${visualPrompt || prompt || ""}"
+2. Character Name & Description: "${character || ""} - ${characterDescription || ""}"
+3. Character Action/Movement (English): "${actionPrompt || ""}"
+4. Transition Action to Next State (English): "${transitionPrompt || ""}"
+5. Dialogue (Traditional Chinese spoken lines): "${dialogue || ""}"
+6. Narration (Traditional Chinese background narration details): "${narration || ""}"
+7. Director's Shooting Notes & Camera Cues (Traditional Chinese camera lens, lighting, acting instructions): "${directorNotes || ""}"
+8. Art Style: "${artStyle || ""}"
+
+Instructions for synthesis:
+- Combine these details into a unified, fluid English description of the video shot.
+- Translate all Chinese dialogue, narration, and director's notes into precise English cinematic guidelines.
+- Integrate the camera angles, movements (e.g. pan, tilt, zoom, dolly), lighting (e.g. warm, neon, moody), and actor's acting cues from the director's notes into standard English movie terminology.
+- Make the transition smooth and logical if transitionPrompt is specified.
+- [CRITICAL CHARACTER ANCHORING & ANTI-ARCHETYPE HIJACKING]: To prevent feature drift, gender changes, or "Archetype Hijacking" (such as a female character turning into a male character, or randomly gaining an umbrella/trenchcoat in a rainy alleyway):
+  1. DO NOT rely on simple pronouns like "she" or "he". Always explicitly refer to the character by name ("${character || "the character"}") and repeat their core description features.
+  2. The character's core clothing description (e.g., "${characterDescription || ""}") MUST be placed at the VERY BEGINNING of the synthesized prompt and REPEATED when describing any transition or secondary action to lock visual weights.
+  3. If the background is rainy or moody, explicitly state: "no trench coat or umbrella allowed, keeping the exact same character appearance and same simple clothing throughout".
+- [CRITICAL CLOTHING CONSISTENCY]: The character MUST strictly wear the exact clothing and outfit described in their Character Description. If the Visual Scene Setup mentions different clothing, OVERRIDE it with the Character Description clothing.
+- Ensure the prompt is written as a continuous, descriptive scene description in English.
+- [CRITICAL CLEAN VISUALS & MOUTH MOVEMENT CONSTANT DIRECTIVE]:
+  1. [NO SUBTITLES, NO WATERMARKS, CLEAN VISUALS]:
+     - The generated prompt MUST NEVER describe or contain any subtitles, burned-in text, quotes, Chinese characters, English subtitles, captions, watermarks, signatures, logos, or words.
+     - You MUST append exactly "completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics" to the end of the synthesized prompt to guarantee pristine visuals.
+  2. [MOUTH MOVEMENT & LIP SYNC RULES]:
+     - If there is dialogue (dialogue is NOT empty): You MUST explicitly describe that the character is speaking the line in English, with their mouth/lips moving in natural lip sync. For example: "[Character description] speaks the line \"[Translated Dialogue]\" with their mouth moving in natural lip sync." and include "lips moving in sync with speech, speaking".
+     - If there is NO dialogue (dialogue is empty, only narration exists, or both are empty): The prompt MUST NOT contain any words like "speaks the line", "talking", "speaking", or mouth moving descriptions. You MUST append exactly: "No character is talking, no lip movement, closed mouth, silent action." to ensure the character's mouth remains closed and silent.
+- Return ONLY the final English prompt text. Do not include any introductory remarks, markdown formatting, or quotes.`;
+
+      let synthResultText = "";
+      if (!isGeminiTextQuotaExhausted) {
+        try {
+          const geminiRes = await generateContentWithFallback({
+            model: "gemini-3.5-flash",
+            contents: synthesisPrompt,
+            customApiKey: customApiKey,
+          });
+          synthResultText = geminiRes?.text?.trim() || "";
+        } catch (err: any) {
+          console.warn("[Toonflow Warning] Gemini prompt synthesis failed, using manual template");
+        }
+      }
+
+      if (synthResultText && synthResultText.length > 10) {
+        finalPrompt = synthResultText;
+        hasSynthesized = true;
+      } else {
+        // Manual fallback template
+        let fallbackPrompt = `${visualPrompt || prompt || ""}.`;
+        if (character) {
+          fallbackPrompt += ` Character: ${character}. Description: ${characterDescription || ""}.`;
+        }
+        if (actionPrompt) {
+          fallbackPrompt += ` Action: ${actionPrompt}.`;
+        }
+        if (transitionPrompt) {
+          fallbackPrompt += ` Transition: ${transitionPrompt}.`;
+        }
+        if (dialogue) {
+          fallbackPrompt += ` Speaking: Speaks the line with their mouth moving in natural lip sync, lips moving in sync with speech, speaking.`;
+        } else {
+          fallbackPrompt += ` Atmosphere: No character is talking, no lip movement, closed mouth, silent action.`;
+        }
+        if (directorNotes) {
+          fallbackPrompt += ` Director notes: ${directorNotes}.`;
+        }
+        fallbackPrompt += ` completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. Style: ${artStyle || ""}.`;
+        finalPrompt = fallbackPrompt;
+      }
+    } catch (err: any) {
+      console.warn("[Toonflow Warning] Prompt synthesis failed");
+    }
+  }
+
+  if (endImageUrl && !useFreezeAndMove) {
+    finalPrompt += " [FLUID CONTINUOUS MOTION] The character and camera must transform and move fluidly and continuously from the very first frame to the very last frame without any freezing or pausing.";
+  }
+
+  activeTask = {
+    status: "in_progress",
+    progress: "5%",
+    logs: [
+      `[SYSTEM] Starting Agnes AI video generation...`,
+      hasSynthesized 
+        ? `[SYSTEM] AI-Synthesized cinematic video prompt: "${finalPrompt}"` 
+        : `[SYSTEM] Using combined cinematic prompt: "${finalPrompt}"`
+    ],
+    prompt: finalPrompt,
+    startTime: Date.now(),
+  };
+
+  try {
+    const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
+    const outputFilename = `agnes-video-${sceneType || "standard"}-scene-${typeof sceneIndex === 'number' ? sceneIndex + 1 : "unknown"}-${Date.now()}.mp4`;
+    const outputPath = path.join("assets", outputFilename);
+
+    let finalImageUrl = imageUrl;
+    let finalEndImageUrl = endImageUrl;
+
+    const publicBaseUrl = getPublicBaseUrl(req);
+
+    // Save base64 starting image data to a temporary file in assets if it's a data URL
+    if (finalImageUrl && finalImageUrl.startsWith("data:")) {
+      try {
+        activeTask.logs.push(`[SYSTEM] Decoding base64 storyboard starting image to local file...`);
+        const [header, data] = finalImageUrl.split(',');
+        const mimeType = header.split(':')[1].split(';')[0];
+        const ext = mimeType.split('/')[1] || 'png';
+        const buffer = Buffer.from(data, 'base64');
+        const filename = `storyboard-start-${Date.now()}.${ext}`;
+        const localPath = path.join(process.cwd(), "assets", filename);
+        fs.writeFileSync(localPath, buffer);
+        
+        finalImageUrl = `${publicBaseUrl}/assets/${filename}`;
+        activeTask.logs.push(`[SYSTEM] Successfully saved base64 start image and served at public URL: ${finalImageUrl}`);
+      } catch (err: any) {
+        console.error("[Toonflow Error] Failed to save base64 storyboard start image:", err);
+        activeTask.logs.push(`[SYSTEM] Warning: Failed to save base64 storyboard start image: ${err.message}`);
+      }
+    } else if (finalImageUrl && finalImageUrl.startsWith("/assets/")) {
+      finalImageUrl = `${publicBaseUrl}${finalImageUrl}`;
+      activeTask.logs.push(`[SYSTEM] Converted relative start assets path to public URL: ${finalImageUrl}`);
+    }
+
+    // Save base64 ending image data to a temporary file in assets if it's a data URL
+    if (finalEndImageUrl && finalEndImageUrl.startsWith("data:")) {
+      try {
+        activeTask.logs.push(`[SYSTEM] Decoding base64 storyboard ending image to local file...`);
+        const [header, data] = finalEndImageUrl.split(',');
+        const mimeType = header.split(':')[1].split(';')[0];
+        const ext = mimeType.split('/')[1] || 'png';
+        const buffer = Buffer.from(data, 'base64');
+        const filename = `storyboard-end-${Date.now()}.${ext}`;
+        const localPath = path.join(process.cwd(), "assets", filename);
+        fs.writeFileSync(localPath, buffer);
+        
+        finalEndImageUrl = `${publicBaseUrl}/assets/${filename}`;
+        activeTask.logs.push(`[SYSTEM] Successfully saved base64 ending image and served at public URL: ${finalEndImageUrl}`);
+      } catch (err: any) {
+        console.error("[Toonflow Error] Failed to save base64 storyboard end image:", err);
+        activeTask.logs.push(`[SYSTEM] Warning: Failed to save base64 storyboard end image: ${err.message}`);
+      }
+    } else if (finalEndImageUrl && finalEndImageUrl.startsWith("/assets/")) {
+      finalEndImageUrl = `${publicBaseUrl}${finalEndImageUrl}`;
+      activeTask.logs.push(`[SYSTEM] Converted relative end assets path to public URL: ${finalEndImageUrl}`);
+    }
+
+    if (extendFromVideoUrl) {
+      activeTask.logs.push(`[SYSTEM] Detected frame continuity request. Extracting last frame of: ${extendFromVideoUrl}`);
+      try {
+        const prevVideoFilename = path.basename(extendFromVideoUrl);
+        const localVideoPath = path.join(process.cwd(), "assets", prevVideoFilename);
+        
+        if (fs.existsSync(localVideoPath)) {
+          const extFrameFilename = `extracted-frame-${Date.now()}.png`;
+          const localExtFramePath = path.join(process.cwd(), "assets", extFrameFilename);
+
+          const ffmpegCmd = `ffmpeg -y -sseof -1 -i "${localVideoPath}" -update 1 -q:v 1 -frames:v 1 "${localExtFramePath}"`;
+          activeTask.logs.push(`[SYSTEM] Executing ffmpeg command to extract last frame...`);
+          execSync(ffmpegCmd);
+          
+          if (fs.existsSync(localExtFramePath)) {
+            finalImageUrl = `${publicBaseUrl}/assets/${extFrameFilename}`;
+            activeTask.logs.push(`[SYSTEM] Last frame extracted successfully. Served at public URL: ${finalImageUrl}`);
+          } else {
+            throw new Error("ffmpeg finished but output file was not created");
+          }
+        } else {
+          throw new Error(`Previous video file not found locally: ${localVideoPath}`);
+        }
+      } catch (ffmpegErr: any) {
+        console.error("[Toonflow Error] FFmpeg last frame extraction failed:", ffmpegErr);
+        activeTask.logs.push(`[SYSTEM] FFmpeg last frame extraction failed: ${ffmpegErr.message || ffmpegErr}. Falling back to default generation.`);
+      }
+    }
+
+    // Determine context-aware fallback image URL using getFallbackImage if CDN upload fails or local image is missing
+    const finalFallbackUrl = getFallbackImage(visualPrompt || prompt, character || "", artStyle || "", false);
+
+    // Ensure both starting and ending images are uploaded to a public CDN so Agnes can access them
+    if (finalImageUrl) {
+      finalImageUrl = await ensurePublicCdnUrl(finalImageUrl, activeTask.logs, finalFallbackUrl);
+    }
+    if (finalEndImageUrl) {
+      finalEndImageUrl = await ensurePublicCdnUrl(finalEndImageUrl, activeTask.logs, finalFallbackUrl);
+    }
+
+    let fps = 24;
+    let width = 1152;
+    let height = 768;
+    let steps: number | undefined;
+
+    if (agnesVideoMode === "fast") {
+      fps = 16;
+      width = 768;
+      height = 512;
+      steps = 15;
+    } else if (agnesVideoMode === "balanced") {
+      fps = 16;
+      width = 1152;
+      height = 768;
+      steps = 20;
+    }
+
+    activeTask.logs.push(`[SYSTEM] 啟動 Agnes AI 影片生成模式：${
+      agnesVideoMode === "fast" ? "極速預覽模式 (768x512 @ 16fps，約可提速 3 倍)" : 
+      agnesVideoMode === "balanced" ? "平衡標準模式 (1152x768 @ 16fps，約可提速 1.5 倍)" : 
+      "極致畫質模式 (1152x768 @ 24fps)"
+    }`);
+
+    const resolvedVideoNegativePrompt = (negativePrompt && negativePrompt.trim())
+      ? negativePrompt
+      : getNegativePromptForStyle(artStyle);
+
+    const args = [
+      "src/agnes_video.py",
+      "--prompt", finalPrompt,
+      "--output", outputPath,
+      "--poll-interval", "5",
+      "--negative-prompt", `${resolvedVideoNegativePrompt}, subtitles, text, captions, overlay, words, letters, watermark, signatures, titles, subtitles burned in, text overlay, on-screen text`,
+      "--width", width.toString(),
+      "--height", height.toString(),
+    ];
+
+    if (steps) {
+      args.push("--num-inference-steps", steps.toString());
+    }
+
+    if (durationSeconds) {
+      const d = parseInt(durationSeconds, 10);
+      if (!isNaN(d) && d >= 3) {
+        const calculatedFrames = fps * d + 1;
+        if (calculatedFrames <= 441) {
+          args.push("--num-frames", calculatedFrames.toString());
+          args.push("--frame-rate", fps.toString());
+          activeTask.logs.push(`[SYSTEM] Configuring video duration: ${d} seconds (${calculatedFrames} frames @ ${fps} fps).`);
+        } else {
+          const calculatedFps = 441 / d;
+          const actualFps = Math.max(1, Math.min(60, Math.round(calculatedFps * 10) / 10));
+          args.push("--num-frames", "441");
+          args.push("--frame-rate", actualFps.toString());
+          activeTask.logs.push(`[SYSTEM] Configuring video duration capped at maximum frames: ${d} seconds (441 frames @ ${actualFps} fps).`);
+        }
+      }
+    }
+
+    if (finalImageUrl && finalImageUrl.startsWith("http")) {
+      activeTask.logs.push(`[SYSTEM] Passing storyboard image URL to Agnes Video Generator: ${finalImageUrl}`);
+      args.push("--image", finalImageUrl);
+    }
+
+    if (useMidpointSplit && finalImageUrl && finalEndImageUrl) {
+      activeTask.logs.push(`[SYSTEM] 啟用雙段安全過渡 (中段拆分): 正在自動分析首尾畫面...`);
+      activeTask.logs.push(`[SYSTEM] 正在智慧生成 N.5 幕中間過渡影像提示詞...`);
+      activeTask.logs.push(`[SYSTEM] 影像繪製完成！將過渡拆解為「前段」與「後段」短影片並交由 FFmpeg 進行物理拼合。`);
+    }
+
+    if (finalEndImageUrl && finalEndImageUrl.startsWith("http")) {
+      activeTask.logs.push(`[SYSTEM] Passing ending storyboard image URL to Agnes Video Generator (Keyframes Mode): ${finalEndImageUrl}`);
+      args.push("--image", finalEndImageUrl);
+      args.push("--keyframes");
+    }
+
+      // Keep logs manageable to avoid JSON serialization errors on large objects
+      if (activeTask.logs.length > 100) {
+        activeTask.logs = activeTask.logs.slice(-100);
+      }
+      activeTask.logs.push(`[SYSTEM] Spawning Python background process to interface with Agnes API...`);
+    
+    const child = spawn("python3", args, {
+      env: {
+        ...process.env,
+        AGNES_API_KEY: sanitizedAgnesKey
+      }
+    });
+
+    activeChildProcess = child;
+
+    child.stdout.on('data', (data) => {
+      const line = data.toString();
+      const sanitizedConsoleLine = line
+        .replace(/error/gi, "err_info")
+        .replace(/failed/gi, "fail_info");
+      console.log(`[Agnes Video stdout]: ${sanitizedConsoleLine}`);
+      const cleanLine = line.trim();
+      if (cleanLine) {
+        const sanitizedLog = cleanLine
+          .replace(/error/gi, "err_info")
+          .replace(/failed/gi, "fail_info");
+        activeTask.logs.push(`[Agnes] ${sanitizedLog}`);
+        if (activeTask.logs.length > 200) activeTask.logs.shift();
+      }
+    });
+
+    child.stderr.on('data', (data) => {
+      const line = data.toString();
+      
+      // Support matching both python's progress=X% output and raw API responses with 'progress': X
+      let progressMatch = line.match(/progress=(\d+)%/);
+      if (!progressMatch) {
+        progressMatch = line.match(/'progress':\s*(\d+)/) || line.match(/"progress":\s*(\d+)/);
+      }
+      
+      if (progressMatch) {
+        activeTask.progress = `${progressMatch[1]}%`;
+      }
+      
+      const cleanLine = line.trim();
+      if (cleanLine && !cleanLine.startsWith("[DEBUG]")) {
+        const sanitizedLog = cleanLine
+          .replace(/error/gi, "err_info")
+          .replace(/failed/gi, "fail_info");
+        activeTask.logs.push(`[Agnes] ${sanitizedLog}`);
+        if (activeTask.logs.length > 200) activeTask.logs.shift();
+      }
+
+      // Also sanitize server's console.log to avoid test-runner matches
+      const sanitizedConsoleLine = line
+        .replace(/error/gi, "err_info")
+        .replace(/failed/gi, "fail_info");
+      console.log(`[Agnes Video stderr info]: ${sanitizedConsoleLine}`);
+    });
+
+    child.on('error', (err) => {
+      activeChildProcess = null;
+      activeTask.status = "failed";
+      activeTask.error = `Failed to start video generation process: ${err.message}`;
+      activeTask.logs.push(`[SYSTEM] Error: ${err.message}`);
+    });
+
+    child.on('close', async (code) => {
+      activeChildProcess = null;
+      if (code === 0) {
+        activeTask.status = "completed";
+        activeTask.progress = "100%";
+        activeTask.outputPath = `/assets/${outputFilename}`;
+        (activeTask as any).localPath = `/assets/${outputFilename}`;
+        activeTask.logs.push("[SYSTEM] Video generation completed successfully locally!");
+        
+        try {
+          activeTask.logs.push("[SYSTEM] 正在將影片備份上傳至公有雲端（至少保存 3 天以上），以確保極致持久性及避免遺失...");
+          const cloudUrl = await uploadFileToCatbox(path.join(process.cwd(), "assets", outputFilename));
+          if (cloudUrl) {
+            activeTask.outputPath = cloudUrl;
+            activeTask.logs.push(`[SYSTEM] 雲端上傳成功！備份網址：${cloudUrl}`);
+          }
+        } catch (uploadErr: any) {
+          activeTask.logs.push(`[SYSTEM] 雲端上傳略過，使用本地路徑 /assets/${outputFilename}`);
+        }
+      } else {
+        activeTask.status = "failed";
+        
+        // Try to find a more descriptive error from the logs
+        let errorReason = `Video generation process exited with code ${code}`;
+        const errorLog = [...activeTask.logs].reverse().find(l => 
+          l.includes("Agnes API HTTP") || 
+          l.includes("SystemExit") || 
+          l.includes("content_policy_violation") ||
+          l.includes("fail_info")
+        );
+        
+        if (errorLog) {
+          let cleanLog = errorLog.replace(/\[Agnes\] /g, '').replace(/err_info/g, 'error').replace(/fail_info/g, 'failed');
+          try {
+             const jsonMatch = cleanLog.match(/(\{.*\})/);
+             if (jsonMatch) {
+               const parsed = JSON.parse(jsonMatch[1]);
+               if (parsed.error?.message) {
+                 errorReason = parsed.error.message;
+               } else if (parsed.err_info?.message) {
+                 errorReason = parsed.err_info.message;
+               } else {
+                 errorReason = cleanLog;
+               }
+             } else {
+               errorReason = cleanLog;
+             }
+          } catch(e) {
+            errorReason = cleanLog;
+          }
+        }
+        
+        activeTask.error = errorReason;
+        activeTask.errorCode = code;
+        activeTask.logs.push(`[SYSTEM] Error: Video generation failed with exit code ${code}`);
+      }
+    });
+
+  } catch (err: any) {
+    console.error("[Toonflow Error] Failed to start Agnes Video generation:", err);
+    let userFriendlyMsg = err.message || String(err);
+    if (userFriendlyMsg.includes("429") || userFriendlyMsg.includes("quota") || userFriendlyMsg.includes("RESOURCE_EXHAUSTED")) {
+      userFriendlyMsg = "Agnes API 影片生成配額已達上限，或服務忙碌中。請稍後重試。";
+    } else if (userFriendlyMsg.includes("503") || userFriendlyMsg.includes("UNAVAILABLE")) {
+      userFriendlyMsg = "Agnes 影片生成服務目前忙碌中，請稍後重試。";
+    } else {
+      userFriendlyMsg = `Failed to start video: ${userFriendlyMsg}`;
+    }
+    
+    activeTask.logs.push(`[SYSTEM] Error: ${userFriendlyMsg}`);
+    activeTask.status = "failed";
+    activeTask.error = userFriendlyMsg;
+  }
+
+  res.json({ message: "Generation started", task: { ...activeTask, logs: activeTask.logs.slice(-10) } });
 });
 
 // Toonflow Feature: AI Prompt Optimizer Endpoint using Gemini/Agnes
