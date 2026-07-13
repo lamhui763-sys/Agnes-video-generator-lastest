@@ -1284,7 +1284,11 @@ app.post("/api/generate", async (req, res) => {
         } 
       });
     } else {
-      return res.status(400).json({ error: "A video generation is already in progress" });
+      console.error(`[VideoQueue] Video generation failed: ${result.error}`);
+      return res.status(500).json({ 
+        error: "Video generation failed", 
+        details: result.error || "Unknown error" 
+      });
     }
   } catch (error) {
     console.error(`[VideoQueue] Error generating video:`, error);
