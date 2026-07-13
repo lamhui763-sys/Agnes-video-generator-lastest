@@ -737,13 +737,13 @@ async function generateContentWithFallback(options: {
         
         if (shouldRetry && attempts < maxAttempts) {
           const backoffTime = attempts * 1000;
-          console.log(`[Toonflow Warning] Gemini model ${model} failed on attempt ${attempts} with a retryable error. Retrying in ${backoffTime}ms... Msg:`, errMsg);
+          console.log(`[Toonflow Info] Gemini model ${model} is busy (attempt ${attempts}/${maxAttempts}), retrying in ${backoffTime}ms. Status:`, errMsg);
           await new Promise(resolve => setTimeout(resolve, backoffTime));
         } else {
           if (isQuotaError) {
-            console.log(`[Toonflow Warning] Gemini model ${model} is currently rate-limited or out of quota (429/RESOURCE_EXHAUSTED). Continuing fallback list...`);
+            console.log(`[Toonflow Info] Gemini model ${model} is rate-limited. Trying alternative model...`);
           } else {
-            console.log(`[Toonflow Warning] Gemini model ${model} failed on last attempt:`, errMsg);
+            console.log(`[Toonflow Info] Gemini model ${model} completed attempt loop. Status:`, errMsg);
           }
           break; // Exit the attempt loop for this model, fallback to next model
         }
@@ -926,9 +926,10 @@ app.get("/api/download", async (req, res) => {
   // If it's a remote URL, proxy it to the client with API key auth for Veo
   try {
     const headers: any = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Connection": "close"
     };
-    if (videoUrl.includes("googleapis.com")) {
+    if (videoUrl.includes("generativelanguage.googleapis.com")) {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
@@ -989,9 +990,10 @@ app.get("/api/video-proxy", async (req, res) => {
 
   try {
     const headers: any = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Connection": "close"
     };
-    if (videoUrl.includes("googleapis.com")) {
+    if (videoUrl.includes("generativelanguage.googleapis.com")) {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
@@ -1238,64 +1240,19 @@ app.post("/api/generate", async (req, res) => {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
-  // Check queue status for user feedback
-  const queueStatus = videoQueue.getStatus();
-  console.log(`[VideoQueue] Current status: ${queueStatus.queued} queued, ${queueStatus.running} running`);
-
-  // If there are tasks in queue or one running, inform the user
-  if (queueStatus.queued > 0 || queueStatus.running > 0) {
-    return res.status(202).json({ 
-      message: "Video generation request queued. Previous requests are being processed to avoid rate limits.",
-      queuePosition: queueStatus.queued + 1,
-      queueStatus: queueStatus
-    });
-  }
-
-  // Prepare the task data
-  const taskId = `video-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  const outputFilename = `agnes-video-${sceneType || "standard"}-scene-${typeof sceneIndex === 'number' ? sceneIndex + 1 : "unknown"}-${Date.now()}.mp4`;
-  const outputPath = path.join("assets", outputFilename);
-  
-  // Resolve the Agnes API key
-  const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
-  
-  // Add to queue and wait for completion
-  try {
-    const result = await videoQueue.enqueue({
-      id: taskId,
-      prompt: prompt,
-      outputPath: outputPath,
-      apikey: sanitizedAgnesKey,  // Pass the resolved API key
-    });
-
-    if (result.success) {
-      // Build the public URL for the generated video
-      const publicBaseUrl = getPublicBaseUrl(req);
-      const publicVideoUrl = `${publicBaseUrl}/assets/${outputFilename}`;
-      
-      console.log(`[VideoQueue] Video generated successfully: ${publicVideoUrl}`);
-      
-      return res.json({ 
-        message: "Video generation completed", 
-        task: { 
-          status: "completed", 
-          outputPath: publicVideoUrl,
-          localPath: `/assets/${outputFilename}`
-        } 
-      });
+  if (activeTask.status === "running" || activeTask.status === "in_progress") {
+    const isStuck = activeTask.startTime && (Date.now() - activeTask.startTime > 10 * 60 * 1000);
+    if (force || isStuck) {
+      if (activeChildProcess) {
+        try { activeChildProcess.kill(); } catch(e) {}
+        activeChildProcess = null;
+      }
+      activeTask.status = "idle";
+      activeTask.logs = ["Task forcibly reset by user"];
+      console.log(`[Toonflow] Forcibly resetting stuck or overridden video task.`);
     } else {
-      console.error(`[VideoQueue] Video generation failed: ${result.error}`);
-      return res.status(500).json({ 
-        error: "Video generation failed", 
-        details: result.error || "Unknown error" 
-      });
+      return res.status(400).json({ error: "A video generation is already in progress" });
     }
-  } catch (error) {
-    console.error(`[VideoQueue] Error generating video:`, error);
-    return res.status(500).json({ 
-      error: "Video generation failed", 
-      details: error instanceof Error ? error.message : "Unknown error" 
-    });
   }
 
   // Ensure assets folder exists
