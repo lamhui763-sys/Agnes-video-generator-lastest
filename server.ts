@@ -1286,6 +1286,12 @@ app.post("/api/generate", async (req, res) => {
     } else {
       return res.status(400).json({ error: "A video generation is already in progress" });
     }
+  } catch (error) {
+    console.error(`[VideoQueue] Error generating video:`, error);
+    return res.status(500).json({ 
+      error: "Video generation failed", 
+      details: error instanceof Error ? error.message : "Unknown error" 
+    });
   }
 
   // Ensure assets folder exists
