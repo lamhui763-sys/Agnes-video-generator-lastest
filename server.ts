@@ -995,16 +995,36 @@ app.get("/api/video-proxy", async (req, res) => {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
-    const fetchRes = await fetch(videoUrl, { headers });
-    if (!fetchRes.ok) {
-      return res.status(fetchRes.status).send(`Failed to fetch video: ${fetchRes.statusText}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
+    let buffer: Buffer;
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        const fetchRes = await fetch(videoUrl, { headers, signal: controller.signal });
+        if (!fetchRes.ok) {
+          throw new Error(`Failed to fetch video: ${fetchRes.statusText}`);
+        }
+        const contentType = fetchRes.headers.get("content-type") || "video/mp4";
+        res.setHeader("Content-Type", contentType);
+
+        const arrayBuffer = await fetchRes.arrayBuffer();
+        buffer = Buffer.from(arrayBuffer);
+        clearTimeout(timeoutId);
+        break; // Success
+      } catch (error) {
+        if (retries === 1) {
+          clearTimeout(timeoutId);
+          console.error("Video proxy error after retries:", error);
+          return res.status(502).send("Upstream video service closed connection or failed");
+        }
+        retries--;
+        console.warn(`Video proxy fetch failed, retrying... (${retries} retries left)`);
+        // Add a small delay before retrying
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
     }
-
-    const contentType = fetchRes.headers.get("content-type") || "video/mp4";
-    res.setHeader("Content-Type", contentType);
-
-    const arrayBuffer = await fetchRes.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
 
     const range = req.headers.range;
     if (range) {
@@ -1653,6 +1673,7 @@ Instructions for synthesis:
     activeTask.logs.push(`[SYSTEM] Error: ${userFriendlyMsg}`);
     activeTask.status = "failed";
     activeTask.error = userFriendlyMsg;
+    activeChildProcess = null; // Important: ensure process is marked null
   }
 
   res.json({ message: "Generation started", task: { ...activeTask, logs: activeTask.logs.slice(-10) } });

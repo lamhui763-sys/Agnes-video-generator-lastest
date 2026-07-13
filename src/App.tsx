@@ -516,6 +516,8 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!activeProjectId) return;
       
+      const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+
       const isCtrlOrCmd = e.ctrlKey || e.metaKey;
       if (isCtrlOrCmd) {
         if (e.key === "z" || e.key === "Z") {
@@ -529,6 +531,12 @@ export default function App() {
         } else if (e.key === "y" || e.key === "Y") {
           e.preventDefault();
           redoRef.current();
+        }
+      } else if (!isInput) {
+        if (e.key === "s" || e.key === "S") {
+          setActiveTab("scenes");
+        } else if (e.key === "c" || e.key === "C") {
+          setActiveTab("characters");
         }
       }
     };

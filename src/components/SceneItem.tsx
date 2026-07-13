@@ -20,6 +20,7 @@ interface SceneItemProps {
   handleImageDragOver: (e: React.DragEvent) => void;
   handleImageDrop: (e: React.DragEvent, sceneId: string, field: keyof Scene) => void;
   handleUploadSceneImage: (e: React.ChangeEvent<HTMLInputElement>, sceneId: string, field: keyof Scene) => void;
+  handleGenerateVideo: (sceneId: string) => void;
   activeProjectId: string;
   setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
   showToast: (message: string, type: 'success' | 'error') => void;
@@ -42,10 +43,17 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
   handleImageDragOver,
   handleImageDrop,
   handleUploadSceneImage,
+  handleGenerateVideo,
   activeProjectId,
   setProjects,
   showToast
 }) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleGenerateVideo(scene.id);
+    }
+  };
   return (
     <div 
       key={scene.id}
@@ -104,6 +112,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               value={scene.character}
               onChange={(e) => handleUpdateSceneField(scene.id, "character", e.target.value)}
               placeholder="例如：主角"
+              onKeyDown={handleKeyDown}
             />
             {activeProjectCharacters && activeProjectCharacters.length > 0 && (
               <div className="mt-1 flex flex-wrap gap-1">
@@ -149,6 +158,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               value={scene.dialogue || ""}
               onChange={(e) => handleUpdateSceneField(scene.id, "dialogue", e.target.value)}
               placeholder='例如：「我有個秘密要告訴你。」（嘴唇會對應說話，無對話請留空）'
+              onKeyDown={handleKeyDown}
             />
           </div>
           <div className="space-y-1">
@@ -160,6 +170,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               value={scene.narration || ""}
               onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
               placeholder="例如：夜色漸深，窗外的雨滴答作響，他心中滿是焦慮...（嘴唇不會說話）"
+              onKeyDown={handleKeyDown}
             />
           </div>
           <div className="space-y-1">
@@ -171,6 +182,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               value={scene.audioCue || ""}
               onChange={(e) => handleUpdateSceneField(scene.id, "audioCue", e.target.value)}
               placeholder="例如：窗外淅淅瀝瀝的下雨聲，或者是雨停後的寂靜無雨聲。"
+              onKeyDown={handleKeyDown}
             />
           </div>
         </div>
@@ -204,6 +216,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
             className="w-full bg-slate-950 border border-slate-850 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[80px]"
             value={scene.visualPrompt || ""}
             onChange={(e) => handleUpdateSceneField(scene.id, "visualPrompt", e.target.value)}
+            onKeyDown={handleKeyDown}
           />
         </div>
         {/* Action Prompt */}
@@ -215,6 +228,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
             className="w-full bg-slate-950 border border-slate-850 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[50px]"
             value={scene.actionPrompt || ""}
             onChange={(e) => handleUpdateSceneField(scene.id, "actionPrompt", e.target.value)}
+            onKeyDown={handleKeyDown}
           />
         </div>
 
@@ -227,6 +241,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
             className="w-full bg-slate-950 border border-slate-850 rounded-lg p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[40px]"
             value={scene.transitionPrompt || ""}
             onChange={(e) => handleUpdateSceneField(scene.id, "transitionPrompt", e.target.value)}
+            onKeyDown={handleKeyDown}
           />
         </div>
 
