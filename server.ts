@@ -986,39 +986,72 @@ app.get("/api/download", async (req, res) => {
   // If it's a remote URL, proxy it to the client with API key auth for Veo
   try {
     const headers: any = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Connection": "keep-alive"
     };
     if (videoUrl.includes("generativelanguage.googleapis.com")) {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
-    let fetchRes;
-    try {
-      console.log(`[Download API] Trying native fetch for: ${videoUrl}`);
-      fetchRes = await fetch(videoUrl, { headers });
-    } catch (fetchErr: any) {
-      console.warn(`[Download API] Native fetch failed: ${fetchErr?.message || fetchErr}. Falling back to fetchWithNodeHttps.`);
-      const fallbackHeaders = { ...headers, "Connection": "close" };
-      fetchRes = await fetchWithNodeHttps(videoUrl, { headers: fallbackHeaders });
-    }
+    let redirectCount = 0;
+    const maxRedirects = 5;
 
-    if (!fetchRes.ok) {
-      return res.status(fetchRes.status).send(`Failed to fetch video: ${fetchRes.statusText}`);
-    }
-    
-    const contentType = fetchRes.headers.get("content-type") || "";
-    if (contentType.includes("text/html")) {
-      return res.status(404).send("File has expired or is no longer available on the cloud server.");
-    }
-    
-    // Set appropriate headers for download
-    res.setHeader("Content-Disposition", `attachment; filename="toonflow-video-${Date.now()}.mp4"`);
-    res.setHeader("Content-Type", "video/mp4");
-    
-    // Download completely into memory and send to client
-    const arrayBuffer = await fetchRes.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    res.send(buffer);
+    const streamDownload = (currentUrl: string) => {
+      const parsedUrl = new URL(currentUrl);
+      const requester = parsedUrl.protocol === "https:" ? require("https") : require("http");
+
+      const requestOptions = {
+        method: "GET",
+        headers,
+        rejectUnauthorized: false
+      };
+
+      const proxyReq = requester.request(currentUrl, requestOptions, (proxyRes: any) => {
+        const statusCode = proxyRes.statusCode || 200;
+        
+        if ([301, 302, 303, 307, 308].includes(statusCode) && proxyRes.headers.location) {
+          if (redirectCount >= maxRedirects) {
+            if (!res.headersSent) res.status(502).send("Too many redirects");
+            return;
+          }
+          redirectCount++;
+          const nextUrl = new URL(proxyRes.headers.location, currentUrl).toString();
+          return streamDownload(nextUrl);
+        }
+
+        const contentType = proxyRes.headers['content-type'] || "";
+        if (contentType.includes("text/html")) {
+          return res.status(404).send("File has expired or is no longer available on the cloud server.");
+        }
+
+        res.status(statusCode);
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (value && key.toLowerCase() !== 'connection') {
+            res.setHeader(key, value as string | string[]);
+          }
+        }
+        res.setHeader("Content-Disposition", `attachment; filename="toonflow-video-${Date.now()}.mp4"`);
+        res.setHeader("Content-Type", "video/mp4");
+
+        proxyRes.pipe(res);
+      });
+
+      proxyReq.on('error', (e: any) => {
+        console.error("Download proxy error:", e);
+        if (!res.headersSent) {
+          res.status(500).send("Proxy error");
+        }
+      });
+
+      req.on('close', () => {
+        proxyReq.destroy();
+      });
+
+      proxyReq.end();
+    };
+
+    streamDownload(videoUrl);
+
   } catch (error) {
     console.error("Download proxy error:", error);
     res.status(500).send("Internal Server Error while fetching video");
@@ -1156,71 +1189,69 @@ app.get("/api/video-proxy", async (req, res) => {
 
   try {
     const headers: any = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Connection": "keep-alive"
     };
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range;
+    }
     if (videoUrl.includes("generativelanguage.googleapis.com")) {
       headers['x-goog-api-key'] = process.env.GEMINI_API_KEY || '';
     }
 
-    let buffer: Buffer;
-    let retries = 3;
-    while (retries > 0) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout per attempt
-      try {
-        console.log(`[Video Proxy] Fetching URL: ${videoUrl} (Attempt ${4 - retries}/3)...`);
-        let fetchRes;
-        try {
-          console.log(`[Video Proxy] Trying native fetch for: ${videoUrl}`);
-          fetchRes = await fetch(videoUrl, { headers, signal: controller.signal });
-        } catch (fetchErr: any) {
-          console.warn(`[Video Proxy] Native fetch failed: ${fetchErr?.message || fetchErr}. Falling back to fetchWithNodeHttps.`);
-          const fallbackHeaders = { ...headers, "Connection": "close" };
-          fetchRes = await fetchWithNodeHttps(videoUrl, { headers: fallbackHeaders, signal: controller.signal });
+    let redirectCount = 0;
+    const maxRedirects = 5;
+
+    const streamVideo = (currentUrl: string) => {
+      const parsedUrl = new URL(currentUrl);
+      const requester = parsedUrl.protocol === "https:" ? require("https") : require("http");
+
+      const requestOptions = {
+        method: "GET",
+        headers,
+        rejectUnauthorized: false
+      };
+
+      const proxyReq = requester.request(currentUrl, requestOptions, (proxyRes: any) => {
+        const statusCode = proxyRes.statusCode || 200;
+        
+        if ([301, 302, 303, 307, 308].includes(statusCode) && proxyRes.headers.location) {
+          if (redirectCount >= maxRedirects) {
+            if (!res.headersSent) res.status(502).send("Too many redirects");
+            return;
+          }
+          redirectCount++;
+          const nextUrl = new URL(proxyRes.headers.location, currentUrl).toString();
+          return streamVideo(nextUrl);
         }
 
-        if (!fetchRes.ok) {
-          throw new Error(`Failed to fetch video: HTTP ${fetchRes.status} ${fetchRes.statusText}`);
+        res.status(statusCode);
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (value && key.toLowerCase() !== 'connection') {
+            res.setHeader(key, value as string | string[]);
+          }
         }
-        const contentType = fetchRes.headers.get("content-type") || "video/mp4";
-        res.setHeader("Content-Type", contentType);
+        res.setHeader("Content-Type", proxyRes.headers['content-type'] || "video/mp4");
 
-        const arrayBuffer = await fetchRes.arrayBuffer();
-        buffer = Buffer.from(arrayBuffer);
-        clearTimeout(timeoutId);
-        break; // Success
-      } catch (error: any) {
-        clearTimeout(timeoutId);
-        if (retries === 1) {
-          console.error("Video proxy error after retries:", error);
-          return res.status(502).send(`Upstream video service connection failed: ${error?.message || error}`);
+        proxyRes.pipe(res);
+      });
+
+      proxyReq.on('error', (e: any) => {
+        console.error("Stream proxy error:", e);
+        if (!res.headersSent) {
+          res.status(500).send("Proxy error");
         }
-        retries--;
-        console.warn(`Video proxy fetch failed: ${error?.message || error}. Retrying... (${retries} retries left)`);
-        // Add a small delay before retrying
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
+      });
 
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const partialstart = parts[0];
-      const partialend = parts[1];
+      req.on('close', () => {
+        proxyReq.destroy();
+      });
 
-      const start = parseInt(partialstart, 10);
-      const end = partialend ? parseInt(partialend, 10) : buffer.length - 1;
-      const chunksize = (end - start) + 1;
+      proxyReq.end();
+    };
 
-      res.status(206);
-      res.setHeader("Content-Range", `bytes ${start}-${end}/${buffer.length}`);
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Content-Length", chunksize);
-      res.send(buffer.slice(start, end + 1));
-    } else {
-      res.setHeader("Content-Length", buffer.length);
-      res.send(buffer);
-    }
+    streamVideo(videoUrl);
+
   } catch (error) {
     console.error("Video proxy error:", error);
     res.status(500).send("Internal Server Error while proxying video stream");
