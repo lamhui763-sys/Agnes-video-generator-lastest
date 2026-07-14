@@ -9,25 +9,19 @@ import {
   Mail, 
   Lock, 
   AlertTriangle, 
-  HelpCircle, 
   CheckCircle,
   Eye,
   EyeOff,
   ArrowRight,
   Globe
 } from "lucide-react";
-import { auth } from "../lib/firebase";
-import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword,
-  updateProfile
-} from "firebase/auth";
 
 interface AuthWrapperProps {
   children: React.ReactNode;
   currentUser: any;
   isAuthLoading: boolean;
   onSignIn: () => void;
+  onCustomSignIn: (user: any) => void;
 }
 
 export default function AuthWrapper({
@@ -35,6 +29,7 @@ export default function AuthWrapper({
   currentUser,
   isAuthLoading,
   onSignIn,
+  onCustomSignIn,
 }: AuthWrapperProps) {
   const [authMethod, setAuthMethod] = useState<"google" | "email">("google");
   const [emailMode, setEmailMode] = useState<"login" | "register">("login");
@@ -74,29 +69,34 @@ export default function AuthWrapper({
     setLocalLoading(true);
 
     try {
-      if (emailMode === "register") {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(userCredential.user, {
-          displayName: displayName.trim()
-        });
-        setSuccessMsg("帳號註冊並登入成功！");
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-        setSuccessMsg("登入成功！");
+      const endpoint = emailMode === "register" ? "/api/custom-auth/register" : "/api/custom-auth/login";
+      const payload = emailMode === "register" 
+        ? { email, password, displayName } 
+        : { email, password };
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "驗證失敗，請重新確認");
       }
+
+      setSuccessMsg(emailMode === "register" ? "註冊並登入成功！" : "登入成功！");
+      
+      // Trigger login in App
+      setTimeout(() => {
+        onCustomSignIn(data);
+      }, 500);
+
     } catch (err: any) {
-      console.error("Email auth error:", err);
-      let friendlyError = err.message;
-      if (err.code === "auth/email-already-in-use") {
-        friendlyError = "該電子郵件已被註冊，請直接登入";
-      } else if (err.code === "auth/invalid-email") {
-        friendlyError = "無效的電子郵件格式";
-      } else if (err.code === "auth/weak-password") {
-        friendlyError = "密碼強度太弱，請至少輸入 6 位";
-      } else if (err.code === "auth/user-not-found" || err.code === "auth/wrong-password" || err.code === "auth/invalid-credential") {
-        friendlyError = "電子郵件或密碼錯誤，請重新確認";
-      }
-      setErrorMsg(friendlyError);
+      console.error("Email custom auth error:", err);
+      setErrorMsg(err.message || "伺服器驗證失敗，請稍後再試");
     } finally {
       setLocalLoading(false);
     }

@@ -338,9 +338,23 @@ export default function App() {
 
   // Monitor auth state change
   useEffect(() => {
+    const localCustomUser = localStorage.getItem("toonflow_custom_user");
+    if (localCustomUser) {
+      try {
+        const user = JSON.parse(localCustomUser);
+        setCurrentUser(user);
+        setIsAuthLoading(false);
+        return;
+      } catch (e) {
+        console.error("Failed to parse custom user:", e);
+      }
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-      setIsAuthLoading(false);
+      if (!localStorage.getItem("toonflow_custom_user")) {
+        setCurrentUser(user);
+        setIsAuthLoading(false);
+      }
     });
     return () => unsubscribe();
   }, []);
@@ -352,15 +366,35 @@ export default function App() {
       showToast("登入成功，已同步您的雲端專案！", "success");
     } catch (err: any) {
       console.error("Google login failed:", err);
-      showToast(`登入失敗: ${err.message}`, "error");
       setIsAuthLoading(false);
+      
+      const errorCode = err?.code || "";
+      const errorMsg = err?.message || "";
+      
+      if (errorCode === "auth/popup-closed-by-user" || errorMsg.includes("popup-closed-by-user")) {
+        showToast("登入視窗已被關閉。如果您是在預覽框架內，請改用「信箱密碼登入」，或點擊右上角開啟新分頁後再使用 Google 登入。", "info");
+      } else if (errorCode === "auth/cancelled-popup-request" || errorMsg.includes("cancelled-popup-request")) {
+        showToast("已取消先前的登入請求。", "info");
+      } else if (errorCode === "auth/unauthorized-domain" || errorMsg.includes("unauthorized-domain")) {
+        showToast("此網域尚未在 Firebase 授權。請使用「信箱密碼登入」或至 Firebase 控制台新增此網域授權。", "error");
+      } else {
+        showToast(`登入失敗: ${err.message || "未知錯誤"}`, "error");
+      }
     }
+  };
+
+  const handleCustomSignIn = (user: any) => {
+    localStorage.setItem("toonflow_custom_user", JSON.stringify(user));
+    setCurrentUser(user);
+    showToast(`歡迎回來，${user.displayName || user.email}！`, "success");
   };
 
   const handleSignOut = async () => {
     try {
       setIsAuthLoading(true);
+      localStorage.removeItem("toonflow_custom_user");
       await signOut(auth);
+      setCurrentUser(null);
       showToast("已成功登出，專案已切換為訪客本地儲存模式", "info");
     } catch (err: any) {
       console.error("Logout failed:", err);
@@ -5126,7 +5160,12 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         )}
       </AnimatePresence>
 
-      <AuthWrapper currentUser={currentUser} isAuthLoading={isAuthLoading} onSignIn={handleSignIn}>
+      <AuthWrapper 
+        currentUser={currentUser} 
+        isAuthLoading={isAuthLoading} 
+        onSignIn={handleSignIn}
+        onCustomSignIn={handleCustomSignIn}
+      >
         {/* Immersive background glow orbs */}
         <div className="fixed inset-0 pointer-events-none overflow-hidden opacity-30 z-0">
         <div className="absolute -top-40 -left-40 w-[500px] h-[500px] rounded-full bg-indigo-600 blur-3xl animate-pulse" style={{ animationDuration: "12s" }} />

@@ -4099,6 +4099,97 @@ Respond to the user in supportive, professional Traditional Chinese.`;
 // Guarantee initial call
 initServerFirebase();
 
+// Custom backend-driven authentication APIs
+app.post("/api/custom-auth/register", async (req, res) => {
+  const { email, password, displayName } = req.body;
+  if (!email || !password || !displayName) {
+    return res.status(400).json({ error: "請填寫所有欄位" });
+  }
+
+  try {
+    if (!firestoreDb) {
+      await initServerFirebase();
+    }
+    if (!firestoreDb) {
+      return res.status(500).json({ error: "伺服器資料庫未初始化" });
+    }
+
+    const { doc, getDoc, setDoc } = await import("firebase/firestore");
+    const emailKey = email.trim().toLowerCase();
+    const userRef = doc(firestoreDb, "users", emailKey);
+    const userSnap = await getDoc(userRef);
+
+    if (userSnap.exists()) {
+      return res.status(400).json({ error: "此電子郵件已被註冊" });
+    }
+
+    const crypto = await import("crypto");
+    const passwordHash = crypto.createHash("sha256").update(password).digest("hex");
+    const uid = "custom_" + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+    const userData = {
+      email: emailKey,
+      passwordHash,
+      displayName: displayName.trim(),
+      uid,
+      createdAt: new Date().toISOString()
+    };
+
+    await setDoc(userRef, userData);
+
+    return res.json({
+      uid,
+      email: emailKey,
+      displayName: userData.displayName
+    });
+  } catch (err: any) {
+    console.error("[Toonflow Auth] Register error:", err);
+    return res.status(500).json({ error: err.message || "註冊失敗，請稍後再試" });
+  }
+});
+
+app.post("/api/custom-auth/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "請輸入電子郵件與密碼" });
+  }
+
+  try {
+    if (!firestoreDb) {
+      await initServerFirebase();
+    }
+    if (!firestoreDb) {
+      return res.status(500).json({ error: "伺服器資料庫未初始化" });
+    }
+
+    const { doc, getDoc } = await import("firebase/firestore");
+    const emailKey = email.trim().toLowerCase();
+    const userRef = doc(firestoreDb, "users", emailKey);
+    const userSnap = await getDoc(userRef);
+
+    if (!userSnap.exists()) {
+      return res.status(400).json({ error: "電子郵件或密碼錯誤" });
+    }
+
+    const userData = userSnap.data();
+    const crypto = await import("crypto");
+    const incomingHash = crypto.createHash("sha256").update(password).digest("hex");
+
+    if (incomingHash !== userData.passwordHash) {
+      return res.status(400).json({ error: "電子郵件或密碼錯誤" });
+    }
+
+    return res.json({
+      uid: userData.uid,
+      email: userData.email,
+      displayName: userData.displayName
+    });
+  } catch (err: any) {
+    console.error("[Toonflow Auth] Login error:", err);
+    return res.status(500).json({ error: err.message || "登入失敗，請稍後再試" });
+  }
+});
+
 // Proxy API: load-projects
 app.get("/api/load-projects", async (req, res) => {
   const userId = req.query.userId as string;
