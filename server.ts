@@ -4191,6 +4191,7 @@ app.post("/api/custom-auth/login", async (req, res) => {
 });
 
 // Proxy API: load-projects
+// Proxy API: load-projects
 app.get("/api/load-projects", async (req, res) => {
   const userId = req.query.userId as string;
   const email = (req.query.email as string) || "";
@@ -4202,7 +4203,7 @@ app.get("/api/load-projects", async (req, res) => {
       console.warn("[Toonflow Firebase] Firestore DB is not initialized. Falling back to empty projects list.");
       return res.json({ projects: [] });
     }
-    const { doc, getDoc, setDoc } = await import("firebase/firestore");
+    const { doc, getDoc, setDoc, collection, getDocs } = await import("firebase/firestore");
 
     // Default to the shared collection if no userId is provided
     const targetDocId = userId ? userId : "all_projects";
@@ -4214,36 +4215,88 @@ app.get("/api/load-projects", async (req, res) => {
       handleFirestoreError(dbErr, OperationType.GET, `projects/${targetDocId}`);
     }
 
+    const isOwner = email.trim().toLowerCase() === "makaikin2000.mk@gmail.com";
+
+    if (userId && isOwner) {
+      console.log(`[Toonflow Firebase] Migrating and merging all projects for owner: ${email}`);
+      
+      let currentProjects: any[] = [];
+      if (docSnap && docSnap.exists()) {
+        const data = docSnap.data();
+        currentProjects = data?.projects || [];
+      }
+
+      // Map to hold merged projects by id
+      const projectsMap = new Map<string, any>();
+      
+      // Helper to add projects to the map, preferring the latest version
+      const addProjectsToMap = (projectsList: any[]) => {
+        if (!Array.isArray(projectsList)) return;
+        for (const p of projectsList) {
+          if (!p || !p.id) continue;
+          if (projectsMap.has(p.id)) {
+            const existing = projectsMap.get(p.id);
+            // Deduplicate by taking the latest createdAt
+            const existingTime = existing.createdAt ? new Date(existing.createdAt).getTime() : 0;
+            const newTime = p.createdAt ? new Date(p.createdAt).getTime() : 0;
+            if (newTime > existingTime) {
+              projectsMap.set(p.id, p);
+            }
+          } else {
+            projectsMap.set(p.id, p);
+          }
+        }
+      };
+
+      // 1. Add current user projects first
+      addProjectsToMap(currentProjects);
+
+      // 2. Fetch legacy 'all_projects' document and merge
+      try {
+        const legacyRef = doc(firestoreDb, "projects", "all_projects");
+        const legacySnap = await getDoc(legacyRef);
+        if (legacySnap.exists()) {
+          const legacyData = legacySnap.data();
+          addProjectsToMap(legacyData?.projects || []);
+        }
+      } catch (err) {
+        console.warn("[Toonflow Firebase] Failed to fetch all_projects for merge:", err);
+      }
+
+      // 3. Scan other documents in the 'projects' collection to merge old Google account data (or other test accounts)
+      try {
+        const projectsCol = collection(firestoreDb, "projects");
+        const querySnapshot = await getDocs(projectsCol);
+        querySnapshot.forEach((snap) => {
+          if (snap.id !== "all_projects" && snap.id !== userId) {
+            const snapData = snap.data();
+            addProjectsToMap(snapData?.projects || []);
+          }
+        });
+      } catch (err) {
+        console.warn("[Toonflow Firebase] Failed to scan projects collection for merge:", err);
+      }
+
+      const mergedProjectsList = Array.from(projectsMap.values());
+
+      // If we found new projects that were migrated, persist them to the user's specific document!
+      if (mergedProjectsList.length > currentProjects.length) {
+        console.log(`[Toonflow Firebase] Migration completed. Merged ${mergedProjectsList.length} total unique projects (was ${currentProjects.length}). Saving to /projects/${userId}...`);
+        try {
+          await setDoc(docRef, { projects: mergedProjectsList });
+        } catch (saveErr) {
+          console.error("[Toonflow Firebase] Failed to save merged projects:", saveErr);
+        }
+      }
+
+      return res.json({ projects: mergedProjectsList });
+    }
+
+    // Default flow for non-owners or when userId is empty
     if (docSnap && docSnap.exists()) {
       const data = docSnap.data();
       return res.json({ projects: data?.projects || [] });
     } else {
-      // If a specific user logged in, but their document does not exist yet,
-      // let's try to load from the legacy 'all_projects' document to preserve their data
-      // ONLY if this is the owner's email account!
-      const isOwner = email.trim().toLowerCase() === "makaikin2000.mk@gmail.com";
-      if (userId && isOwner) {
-        console.log(`[Toonflow Firebase] User ${userId} (${email}) is the primary owner logging in for the first time. Checking legacy 'all_projects' data to preserve account projects...`);
-        const legacyRef = doc(firestoreDb, "projects", "all_projects");
-        let legacySnap;
-        try {
-          legacySnap = await getDoc(legacyRef);
-        } catch (err) {
-          console.warn("[Toonflow Firebase] Failed to check legacy data:", err);
-        }
-
-        if (legacySnap && legacySnap.exists()) {
-          const legacyData = legacySnap.data();
-          const legacyProjects = legacyData?.projects || [];
-          console.log(`[Toonflow Firebase] Found ${legacyProjects.length} legacy projects. Migrating and saving to user-specific document /projects/${userId}...`);
-          try {
-            await setDoc(docRef, { projects: legacyProjects });
-          } catch (saveErr) {
-            console.error("[Toonflow Firebase] Failed to copy legacy projects for user:", saveErr);
-          }
-          return res.json({ projects: legacyProjects });
-        }
-      }
       return res.json({ projects: [] });
     }
   } catch (err: any) {

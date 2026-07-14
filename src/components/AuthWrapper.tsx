@@ -31,7 +31,7 @@ export default function AuthWrapper({
   onSignIn,
   onCustomSignIn,
 }: AuthWrapperProps) {
-  const [authMethod, setAuthMethod] = useState<"google" | "email">("google");
+  const [authMethod, setAuthMethod] = useState<"google" | "email">("email");
   const [emailMode, setEmailMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -174,34 +174,6 @@ export default function AuthWrapper({
             </p>
           </div>
 
-          {/* Quick Tabs to toggle between Google Sign-in & Email/Password */}
-          <div className="grid grid-cols-2 p-1 bg-slate-950 border border-slate-800 rounded-xl mb-6">
-            <button
-              type="button"
-              onClick={() => handleMethodChange("google")}
-              className={`py-2 px-3 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                authMethod === "google"
-                  ? "bg-gradient-to-r from-pink-600/20 to-indigo-600/20 text-white border border-indigo-500/30"
-                  : "text-slate-400 hover:text-slate-200 border border-transparent"
-              }`}
-            >
-              <User className="w-3.5 h-3.5" />
-              <span>Google 快速登入</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMethodChange("email")}
-              className={`py-2 px-3 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                authMethod === "email"
-                  ? "bg-gradient-to-r from-pink-600/20 to-indigo-600/20 text-white border border-indigo-500/30"
-                  : "text-slate-400 hover:text-slate-200 border border-transparent"
-              }`}
-            >
-              <Mail className="w-3.5 h-3.5" />
-              <span>信箱密碼登入</span>
-            </button>
-          </div>
-
           {/* Notification Messages */}
           <AnimatePresence mode="wait">
             {errorMsg && (
@@ -229,66 +201,7 @@ export default function AuthWrapper({
             )}
           </AnimatePresence>
 
-          {/* Tab 1: Google Login */}
-          {authMethod === "google" && (
-            <div className="space-y-6">
-              {/* Quick Features Highlight List */}
-              <div className="space-y-3">
-                <div className="flex items-start gap-3 p-3 bg-slate-950/40 border border-slate-850/50 rounded-xl">
-                  <div className="p-1.5 bg-pink-500/10 rounded-lg shrink-0">
-                    <Cpu className="w-4 h-4 text-pink-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-200">一鍵 AI 拆解分鏡</h4>
-                    <p className="text-[10px] text-slate-400">自動分析小說段落、識別人物對白、生成視覺英文 Prompt</p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3 p-3 bg-slate-950/40 border border-slate-850/50 rounded-xl">
-                  <div className="p-1.5 bg-indigo-500/10 rounded-lg shrink-0">
-                    <Video className="w-4 h-4 text-indigo-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-200">角色一致性與 HTML5 錄製</h4>
-                    <p className="text-[10px] text-slate-400">儲存專屬角色屬性，一鍵錄製高清寬畫幅 WebM 影片與字幕</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-2">
-                <button
-                  type="button"
-                  onClick={onSignIn}
-                  className="w-full py-3.5 px-4 bg-gradient-to-r from-pink-600 via-purple-600 to-indigo-600 hover:from-pink-500 hover:to-indigo-500 text-white font-bold rounded-xl text-sm transition-all duration-300 flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/30 active:scale-95 cursor-pointer relative group overflow-hidden"
-                >
-                  <div className="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                  <User className="w-4 h-4" />
-                  <span>使用 Google 帳號快速登入</span>
-                </button>
-
-                {/* Helpful Warning on Railway Unauthorized Domain */}
-                <div className="p-3 bg-indigo-950/20 border border-indigo-500/20 rounded-xl text-[11px] text-indigo-300 space-y-1.5">
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <Globe className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>在 Railway / 自訂網域上部署？</span>
-                  </div>
-                  <p className="leading-relaxed opacity-85">
-                    如果您在 Railway 遇到 Google 登入錯誤 (<code className="text-pink-300">unauthorized-domain</code>)，這是因為 Firebase 安全限制不允許未授權網域。
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowGuide(!showGuide)}
-                    className="text-pink-400 hover:text-pink-300 font-bold underline flex items-center gap-1 cursor-pointer mt-1"
-                  >
-                    <span>查看解決方法 或 改用「信箱密碼登入」 ⚡</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Tab 2: Email & Password Auth (Works perfectly everywhere, no domain restriction!) */}
+          {/* Email & Password Auth (Works perfectly everywhere, no domain restriction!) */}
           {authMethod === "email" && (
             <form onSubmit={handleEmailAuth} className="space-y-4">
               <div className="flex items-center justify-between">
