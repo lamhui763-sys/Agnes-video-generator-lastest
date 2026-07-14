@@ -58,6 +58,24 @@ export interface Scene {
   aiReviewCritique?: string;
   isReviewing?: boolean;
   hasAutoRegeneratedReview?: boolean;
+
+  // Grok 7-step Storyboard Workflow States
+  workflowStep?: number; // 1 to 7
+  step1PrevShotAdvice?: string; // Carried over from previous shot's step 7 advice
+  step2OptimizedPrompt?: string; // AI optimized visual prompt
+  step2OptimizedNegative?: string; // AI optimized negative prompt
+  isOptimizingStep2?: boolean; // Generating optimized prompt status
+  step4ImageReviewScore?: number; // 0 - 100
+  step4ImageReviewText?: string; // AI storyboard image evaluation text
+  step4Passed?: boolean; // Whether checked passed
+  isReviewingStep4?: boolean; // Reviewing step 4 status
+  step5Mode?: "continuous" | "transition"; // Smart continuity mode
+  step6VideoReviewScore?: number; // 0 - 100
+  step6VideoReviewText?: string; // AI video review text
+  step6Passed?: boolean; // Whether checked passed
+  isReviewingStep6?: boolean; // Reviewing step 6 status
+  step7AdviceForNext?: string; // Advice generated for the next shot
+  isGeneratingStep7?: boolean; // Generating advice status
 }
 
 export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character' | 'visualPrompt'> = {
@@ -100,6 +118,24 @@ export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character
   directorNotes: "",
   aiReviewStatus: "passed",
   isReviewing: false,
+
+  // Grok 7-step Storyboard Workflow Defaults
+  workflowStep: 1,
+  step1PrevShotAdvice: "",
+  step2OptimizedPrompt: "",
+  step2OptimizedNegative: "",
+  isOptimizingStep2: false,
+  step4ImageReviewScore: 0,
+  step4ImageReviewText: "",
+  step4Passed: false,
+  isReviewingStep4: false,
+  step5Mode: "continuous",
+  step6VideoReviewScore: 0,
+  step6VideoReviewText: "",
+  step6Passed: false,
+  isReviewingStep6: false,
+  step7AdviceForNext: "",
+  isGeneratingStep7: false,
 };
 
 export interface Character {

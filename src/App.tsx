@@ -952,8 +952,9 @@ export default function App() {
             };
           });
 
-          // Scan and replace all base64 images in prunedProjects
-          const cleanProjects = await Promise.all(prunedProjects.map(async p => {
+          // Scan and replace all base64 images in prunedProjects sequentially to avoid choking the network
+          const cleanProjects = [];
+          for (const p of prunedProjects) {
             const cleanProj = { ...p };
             
             // Trim novelText if too long to prevent Firestore 1MB limits
@@ -963,39 +964,57 @@ export default function App() {
             
             // Characters
             if (Array.isArray(cleanProj.characters)) {
-              cleanProj.characters = await Promise.all(cleanProj.characters.map(async c => {
+              const cleanedChars = [];
+              for (const c of cleanProj.characters) {
                 const cleanedChar = { ...c };
                 cleanedChar.avatarUrl = await uploadBase64(cleanedChar.avatarUrl || "");
                 cleanedChar.uploadedAvatarUrl = await uploadBase64(cleanedChar.uploadedAvatarUrl || "");
+                
                 if (Array.isArray(cleanedChar.avatarUrls)) {
-                  cleanedChar.avatarUrls = await Promise.all(cleanedChar.avatarUrls.map(url => uploadBase64(url)));
+                  const cleanedUrls = [];
+                  for (const url of cleanedChar.avatarUrls) {
+                    cleanedUrls.push(await uploadBase64(url));
+                  }
+                  cleanedChar.avatarUrls = cleanedUrls;
                 }
+                
                 if (Array.isArray(cleanedChar.uploadedAvatarUrls)) {
-                  cleanedChar.uploadedAvatarUrls = await Promise.all(cleanedChar.uploadedAvatarUrls.map(url => uploadBase64(url)));
+                  const cleanedUploadedUrls = [];
+                  for (const url of cleanedChar.uploadedAvatarUrls) {
+                    cleanedUploadedUrls.push(await uploadBase64(url));
+                  }
+                  cleanedChar.uploadedAvatarUrls = cleanedUploadedUrls;
                 }
-                return cleanedChar;
-              }));
+                
+                cleanedChars.push(cleanedChar);
+              }
+              cleanProj.characters = cleanedChars;
             }
             
             // Scenes
             const cleanSceneImages = async (scenesList: any[]) => {
               if (!Array.isArray(scenesList)) return [];
-              return await Promise.all(scenesList.map(async s => {
-                if (!s) return s;
+              const cleanedScenes = [];
+              for (const s of scenesList) {
+                if (!s) {
+                  cleanedScenes.push(s);
+                  continue;
+                }
                 const cleanedScene = { ...s };
                 cleanedScene.imageUrl = await uploadBase64(cleanedScene.imageUrl || "");
                 cleanedScene.imageUrlExt = await uploadBase64(cleanedScene.imageUrlExt || "");
                 cleanedScene.imageUrlKeyframes = await uploadBase64(cleanedScene.imageUrlKeyframes || "");
-                return cleanedScene;
-              }));
+                cleanedScenes.push(cleanedScene);
+              }
+              return cleanedScenes;
             };
             
             cleanProj.scenes = await cleanSceneImages(cleanProj.scenes);
             cleanProj.scenesExt = await cleanSceneImages(cleanProj.scenesExt);
             cleanProj.scenesFirstLast = await cleanSceneImages(cleanProj.scenesFirstLast);
             
-            return cleanProj;
-          }));
+            cleanProjects.push(cleanProj);
+          }
 
           const savePayload: any = { projects: cleanProjects };
           if (currentUser) {
@@ -2821,6 +2840,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     } catch(e) {}
     if (!freshActiveProject) return;
 
+    const targetScene = freshActiveProject.scenes.find(s => s.id === sceneId);
+    if (!targetScene) return;
+
     let endImageUrl: string | undefined = undefined;
     if (sceneId.startsWith("scene_transition_")) {
       if (index < freshActiveProject.scenes.length - 1) {
@@ -2841,12 +2863,11 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           return;
         }
       }
+      // Use this scene's own storyboard image as the target end image (last frame) for the transition
+      endImageUrl = targetScene.imageUrl || targetScene.imageUrlExt || targetScene.imageUrlKeyframes || undefined;
     }
 
     // Update specific scene video state to generating
-    const targetScene = freshActiveProject.scenes.find(s => s.id === sceneId);
-    if (!targetScene) return;
-
     updateActiveProject((prev) => ({
       scenes: prev.scenes.map(s => {
         if (s.id === sceneId) {
@@ -2880,7 +2901,16 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
 
       // If index > 0, we pass the previous scene's videoUrlExt as extendFromVideoUrl
-      const prevVideoUrl = (index > 0) ? freshActiveProject.scenes[index - 1].videoUrlExt : undefined;
+      const prevScene = (index > 0) ? freshActiveProject.scenes[index - 1] : undefined;
+      const prevVideoUrl = prevScene ? prevScene.videoUrlExt : undefined;
+      const prevScenePayload = prevScene ? {
+        title: prevScene.title,
+        visualPrompt: prevScene.visualPrompt,
+        actionPrompt: prevScene.actionPrompt,
+        dialogue: prevScene.dialogue,
+        narration: prevScene.narration,
+        directorNotes: prevScene.directorNotes
+      } : undefined;
 
       const res = await fetch("/api/generate", {
          method: "POST",
@@ -2903,7 +2933,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
            durationSeconds: targetScene.durationSeconds,
            agnesVideoMode: freshActiveProject.agnesVideoMode || "quality",
            sceneIndex: index,
-           sceneType: "ext"
+           sceneType: "ext",
+           prevScene: prevScenePayload
          })
       });
 
@@ -6877,9 +6908,15 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 handleImageDragOver={handleImageDragOver}
                                 handleImageDrop={handleImageDrop}
                                 handleUploadSceneImage={handleUploadSceneImage}
+                                handleGenerateVideo={handleGenerateVideo}
+                                handleGenerateImage={handleGenerateImage}
+                                scenes={activeProject.scenes}
                                 activeProjectId={activeProject.id}
                                 setProjects={setProjects}
                                 showToast={showToast}
+                                isFullAutoProducing={isFullAutoProducing}
+                                fullAutoProgress={fullAutoProgress}
+                                onFullAutoProduce={handleFullAutoVideoProduction}
                               />
                               {scene.videoUrl && (
                                   <div className="space-y-1.5 mt-2">
