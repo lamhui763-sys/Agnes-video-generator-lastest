@@ -54,7 +54,9 @@ import { motion, AnimatePresence } from "motion/react";
 import { Scene, Character, Project, TaskState, DEFAULT_SCENE } from "./types";
 import VideoGallery from "./components/VideoGallery";
 import SceneItem from "./components/SceneItem";
+import AuthWrapper from "./components/AuthWrapper";
 import { STYLE_PRESETS } from "./data";
+import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./lib/firebase";
 
 function getProjectSignature(project: Project | null): string {
   if (!project) return "";
@@ -329,6 +331,44 @@ export default function App() {
   // Navigation & Project selection states
   const [projects, setProjects] = useState<Project[]>([]);
   const [isSyncCompleted, setIsSyncCompleted] = useState<boolean>(false);
+  
+  // Auth state
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+
+  // Monitor auth state change
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setIsAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleSignIn = async () => {
+    try {
+      setIsAuthLoading(true);
+      await signInWithPopup(auth, googleProvider);
+      showToast("登入成功，已同步您的雲端專案！", "success");
+    } catch (err: any) {
+      console.error("Google login failed:", err);
+      showToast(`登入失敗: ${err.message}`, "error");
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      setIsAuthLoading(true);
+      await signOut(auth);
+      showToast("已成功登出，專案已切換為訪客本地儲存模式", "info");
+    } catch (err: any) {
+      console.error("Logout failed:", err);
+      showToast("登出失敗，請重試", "error");
+      setIsAuthLoading(false);
+    }
+  };
+
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const activeProject = projects.find(p => p.id === activeProjectId) || null;
   const [activeTab, setActiveTab] = useState<"novel" | "characters" | "scenes" | "scenes_ext" | "gallery">("scenes");
@@ -777,16 +817,21 @@ export default function App() {
     }
   }, []);
 
-  // Sync projects from secure server-side proxy on mount and handle normalization securely
+  // Sync projects from secure server-side proxy on mount/auth-ready and handle normalization securely
   useEffect(() => {
+    if (isAuthLoading) return;
+
     const fetchProjects = async (retries = 3) => {
       try {
-        const res = await fetch("/api/load-projects");
+        const url = currentUser 
+          ? `/api/load-projects?userId=${currentUser.uid}&email=${encodeURIComponent(currentUser.email || "")}` 
+          : "/api/load-projects";
+        const res = await fetch(url);
         if (!res.ok) {
           throw new Error(`Proxy status: ${res.status}`);
         }
         const data = await res.json();
-        if (data && Array.isArray(data.projects) && data.projects.length > 0) {
+        if (data && Array.isArray(data.projects)) {
           const normalized = normalizeProjectsList(data.projects);
           setProjects(normalized);
           try {
@@ -807,7 +852,7 @@ export default function App() {
       }
     };
     fetchProjects();
-  }, []);
+  }, [currentUser, isAuthLoading]);
 
   // Debounced secure cloud autosave to prevent data loss or mismatch
   useEffect(() => {
@@ -918,10 +963,15 @@ export default function App() {
             return cleanProj;
           }));
 
+          const savePayload: any = { projects: cleanProjects };
+          if (currentUser) {
+            savePayload.userId = currentUser.uid;
+          }
+
           const res = await fetch("/api/save-projects", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ projects: cleanProjects })
+            body: JSON.stringify(savePayload)
           });
           if (!res.ok) {
             throw new Error(`Server returned status ${res.status}`);
@@ -949,7 +999,7 @@ export default function App() {
 
 
     return () => clearTimeout(timer);
-  }, [projects, isSyncCompleted]);
+  }, [projects, isSyncCompleted, currentUser]);
 
   // Save projects to localStorage and to Firestore securely via the server-side proxy whenever they change
   const saveProjects = (updatedProjects: Project[]) => {
@@ -2559,15 +2609,17 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           try { errData = JSON.parse(errText); } catch(e) {}
           
           if (errData.error === "A video generation is already in progress") {
-             if (confirm("伺服器端仍有生成任務正在進行中。是否強制重置並重新發起？")) {
-                 return handleGenerateVideo(sceneId, true);
-             }
+             throw new Error("A video generation is already in progress");
           }
           
           throw new Error(errData.error || (errText && errText.length < 200 ? errText : "Failed to call Agnes server API"));
         }
       } catch (e: any) {
-        console.error("[Toonflow Video Gen] Failed to initiate generation:", e);
+        if (e.message && e.message.includes("A video generation is already in progress")) {
+          showToast("伺服器端仍有影片生成任務正在進行中。請稍候，或至頁面最底部的重置區強制清除狀態。", "info");
+        } else {
+          console.error("[Toonflow Video Gen] Failed to initiate generation:", e);
+        }
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => {
             if (s.id === sceneId) {
@@ -2943,7 +2995,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       }, 3000);
       videoIntervalsRef.current[sceneId] = intervalId;
 
-    } catch (err: any) {
+      } catch (err: any) {
+      if (err.message && err.message.includes("A video generation is already in progress")) {
+        showToast("伺服器端仍有影片生成任務正在進行中。請稍候，或至頁面最底部的重置區強制清除狀態。", "info");
+      }
       updateActiveProject((prev) => ({
         scenes: prev.scenes.map(s => {
           if (s.id === sceneId) {
@@ -5071,8 +5126,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         )}
       </AnimatePresence>
 
-      {/* Immersive background glow orbs */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden opacity-30 z-0">
+      <AuthWrapper currentUser={currentUser} isAuthLoading={isAuthLoading} onSignIn={handleSignIn}>
+        {/* Immersive background glow orbs */}
+        <div className="fixed inset-0 pointer-events-none overflow-hidden opacity-30 z-0">
         <div className="absolute -top-40 -left-40 w-[500px] h-[500px] rounded-full bg-indigo-600 blur-3xl animate-pulse" style={{ animationDuration: "12s" }} />
         <div className="absolute top-1/2 right-10 w-[450px] h-[450px] rounded-full bg-pink-600 blur-3xl animate-pulse" style={{ animationDuration: "18s" }} />
         <div className="absolute bottom-10 left-1/3 w-[400px] h-[400px] rounded-full bg-cyan-600 blur-3xl animate-pulse" style={{ animationDuration: "15s" }} />
@@ -5144,11 +5200,46 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             </div>
           )}
 
-          <div className="flex items-center space-x-1.5 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg text-xs">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-slate-300 font-medium font-mono text-[11px]">guest_local_user</span>
-            <span className="bg-pink-500/10 text-pink-400 text-[9px] px-1.5 py-0.5 rounded border border-pink-500/20 font-bold uppercase">Local Mode</span>
-          </div>
+          {isAuthLoading ? (
+            <div className="flex items-center space-x-1.5 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg text-xs text-slate-400">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>載入中...</span>
+            </div>
+          ) : currentUser ? (
+            <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-1.5 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg text-xs">
+                {currentUser.photoURL ? (
+                  <img src={currentUser.photoURL} alt="avatar" className="w-4 h-4 rounded-full" referrerPolicy="no-referrer" />
+                ) : (
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                )}
+                <span className="text-slate-300 font-medium text-[11px] max-w-[120px] truncate" title={currentUser.email || ""}>
+                  {currentUser.displayName || currentUser.email?.split("@")[0] || "已登入"}
+                </span>
+                <span className="bg-cyan-500/10 text-cyan-400 text-[9px] px-1.5 py-0.5 rounded border border-cyan-500/20 font-bold uppercase">雲端同步</span>
+              </div>
+              <button
+                onClick={handleSignOut}
+                className="text-xs text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 px-2.5 py-1.5 rounded-lg transition cursor-pointer"
+              >
+                登出
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={handleSignIn}
+                className="text-xs font-bold text-white bg-gradient-to-r from-pink-600 to-indigo-600 hover:from-pink-500 hover:to-indigo-500 px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 shadow-lg shadow-indigo-600/20 active:scale-95 cursor-pointer"
+              >
+                <User className="w-3.5 h-3.5" />
+                <span>Google 登入同步</span>
+              </button>
+              <div className="hidden lg:flex items-center space-x-1 bg-slate-900/60 border border-slate-800/80 px-2 py-1.5 rounded-lg text-[10px] text-slate-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+                <span>訪客單機模式</span>
+              </div>
+            </div>
+          )}
 
           <button
             onClick={() => setIsSettingsOpen(true)}
@@ -9606,6 +9697,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       <footer className="border-t border-slate-900 bg-slate-950/80 backdrop-blur-md text-center py-6 text-xs text-slate-500 mt-auto relative z-10">
         <p>Built with Agnes Video V2.0 Integration & Gemini AI Engine. Toonflow Platform © 2026.</p>
       </footer>
+      </AuthWrapper>
     </div>
   );
 }

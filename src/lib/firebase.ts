@@ -1,6 +1,7 @@
 
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDoc, updateDoc } from "firebase/firestore";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 
 const firebaseConfig = {
   projectId: "gen-lang-client-0742616574",
@@ -14,3 +15,6 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.databaseId);
+export const auth = getAuth(app);
+export const googleProvider = new GoogleAuthProvider();
+export { signInWithPopup, signOut, onAuthStateChanged };

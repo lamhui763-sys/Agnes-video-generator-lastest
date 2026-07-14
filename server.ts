@@ -997,8 +997,12 @@ app.get("/api/download", async (req, res) => {
     const maxRedirects = 5;
 
     const streamDownload = (currentUrl: string) => {
+      if (!currentUrl.startsWith("http")) {
+        if (!res.headersSent) res.status(404).send("File not found");
+        return;
+      }
       const parsedUrl = new URL(currentUrl);
-      const requester = parsedUrl.protocol === "https:" ? require("https") : require("http");
+      const requester = parsedUrl.protocol === "https:" ? https : http;
 
       const requestOptions = {
         method: "GET",
@@ -1037,6 +1041,7 @@ app.get("/api/download", async (req, res) => {
       });
 
       proxyReq.on('error', (e: any) => {
+        if (e.message === 'socket hang up' || e.code === 'ECONNRESET') return;
         console.error("Download proxy error:", e);
         if (!res.headersSent) {
           res.status(500).send("Proxy error");
@@ -1203,8 +1208,12 @@ app.get("/api/video-proxy", async (req, res) => {
     const maxRedirects = 5;
 
     const streamVideo = (currentUrl: string) => {
+      if (!currentUrl.startsWith("http")) {
+        if (!res.headersSent) res.status(404).send("File not found");
+        return;
+      }
       const parsedUrl = new URL(currentUrl);
-      const requester = parsedUrl.protocol === "https:" ? require("https") : require("http");
+      const requester = parsedUrl.protocol === "https:" ? https : http;
 
       const requestOptions = {
         method: "GET",
@@ -1237,6 +1246,7 @@ app.get("/api/video-proxy", async (req, res) => {
       });
 
       proxyReq.on('error', (e: any) => {
+        if (e.message === 'socket hang up' || e.code === 'ECONNRESET') return;
         console.error("Stream proxy error:", e);
         if (!res.headersSent) {
           res.status(500).send("Proxy error");
@@ -3156,7 +3166,7 @@ app.post("/api/stitch-videos", async (req, res) => {
           } catch (downloadErr: any) {
             sendLog(`⚠️ 下載失敗，使用替代素材...`);
             const fallbackCmd = `ffmpeg -y -f lavfi -i color=c=black:s=1280x720:d=3 -f lavfi -i anullsrc=cl=mono:r=44100 -c:v libx264 -tune stillimage -pix_fmt yuv420p -c:a aac -shortest "${localPath}"`;
-            require('child_process').execSync(fallbackCmd);
+            execSync(fallbackCmd);
             localPaths.push(localPath);
             tempFilesToCleanup.push(localPath);
           }
@@ -3179,9 +3189,9 @@ app.post("/api/stitch-videos", async (req, res) => {
        let hasAudio = false;
        let duration = 5.0;
        try {
-         const probe = require('child_process').execSync(`ffprobe -i "${localPaths[i]}" -show_streams -select_streams a -loglevel error`).toString();
+         const probe = execSync(`ffprobe -i "${localPaths[i]}" -show_streams -select_streams a -loglevel error`).toString();
          hasAudio = probe.trim().length > 0;
-         const probeDur = require('child_process').execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${localPaths[i]}"`).toString();
+         const probeDur = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${localPaths[i]}"`).toString();
          duration = parseFloat(probeDur.trim()) || 5.0;
        } catch (e) {}
        if (hasAudio) filterComplex += `[${i}:a]aresample=44100[a${i}]; `;
@@ -4091,6 +4101,8 @@ initServerFirebase();
 
 // Proxy API: load-projects
 app.get("/api/load-projects", async (req, res) => {
+  const userId = req.query.userId as string;
+  const email = (req.query.email as string) || "";
   try {
     if (!firestoreDb) {
       await initServerFirebase();
@@ -4099,18 +4111,48 @@ app.get("/api/load-projects", async (req, res) => {
       console.warn("[Toonflow Firebase] Firestore DB is not initialized. Falling back to empty projects list.");
       return res.json({ projects: [] });
     }
-    const { doc, getDoc } = await import("firebase/firestore");
-    const docRef = doc(firestoreDb, "projects", "all_projects");
+    const { doc, getDoc, setDoc } = await import("firebase/firestore");
+
+    // Default to the shared collection if no userId is provided
+    const targetDocId = userId ? userId : "all_projects";
+    const docRef = doc(firestoreDb, "projects", targetDocId);
     let docSnap;
     try {
       docSnap = await getDoc(docRef);
     } catch (dbErr) {
-      handleFirestoreError(dbErr, OperationType.GET, "projects/all_projects");
+      handleFirestoreError(dbErr, OperationType.GET, `projects/${targetDocId}`);
     }
+
     if (docSnap && docSnap.exists()) {
       const data = docSnap.data();
       return res.json({ projects: data?.projects || [] });
     } else {
+      // If a specific user logged in, but their document does not exist yet,
+      // let's try to load from the legacy 'all_projects' document to preserve their data
+      // ONLY if this is the owner's email account!
+      const isOwner = email.trim().toLowerCase() === "makaikin2000.mk@gmail.com";
+      if (userId && isOwner) {
+        console.log(`[Toonflow Firebase] User ${userId} (${email}) is the primary owner logging in for the first time. Checking legacy 'all_projects' data to preserve account projects...`);
+        const legacyRef = doc(firestoreDb, "projects", "all_projects");
+        let legacySnap;
+        try {
+          legacySnap = await getDoc(legacyRef);
+        } catch (err) {
+          console.warn("[Toonflow Firebase] Failed to check legacy data:", err);
+        }
+
+        if (legacySnap && legacySnap.exists()) {
+          const legacyData = legacySnap.data();
+          const legacyProjects = legacyData?.projects || [];
+          console.log(`[Toonflow Firebase] Found ${legacyProjects.length} legacy projects. Migrating and saving to user-specific document /projects/${userId}...`);
+          try {
+            await setDoc(docRef, { projects: legacyProjects });
+          } catch (saveErr) {
+            console.error("[Toonflow Firebase] Failed to copy legacy projects for user:", saveErr);
+          }
+          return res.json({ projects: legacyProjects });
+        }
+      }
       return res.json({ projects: [] });
     }
   } catch (err: any) {
@@ -4119,35 +4161,35 @@ app.get("/api/load-projects", async (req, res) => {
   }
 });
 
-let pendingProjectsData: any = null;
-let isFirestoreSaving = false;
+let pendingSaves: { [userId: string]: any } = {};
+let activeSaveUsers = new Set<string>();
 
-async function executeFirestoreSave() {
-  if (isFirestoreSaving) {
-    return; // Already saving, the active loop will save the new pendingProjectsData.
+async function executeFirestoreSaveForUser(userId: string) {
+  if (activeSaveUsers.has(userId)) {
+    return; // Already saving for this user
   }
-  isFirestoreSaving = true;
-  while (pendingProjectsData !== null) {
-    const dataToSave = pendingProjectsData;
-    pendingProjectsData = null; // Clear so we can capture newer saves that arrive during our await
+  activeSaveUsers.add(userId);
+  while (pendingSaves[userId] !== undefined) {
+    const dataToSave = pendingSaves[userId];
+    delete pendingSaves[userId]; // Clear so we can capture newer saves that arrive
     try {
       const { doc, setDoc } = await import("firebase/firestore");
-      const docRef = doc(firestoreDb, "projects", "all_projects");
-      console.log("[Toonflow Firebase] Coalescing write: committing projects to Firestore...");
+      const docRef = doc(firestoreDb, "projects", userId);
+      console.log(`[Toonflow Firebase] Coalescing write: committing projects to Firestore for ${userId}...`);
       await setDoc(docRef, { projects: dataToSave });
-      console.log("[Toonflow Firebase] Coalescing write committed successfully.");
+      console.log(`[Toonflow Firebase] Coalescing write committed successfully for ${userId}.`);
     } catch (dbErr: any) {
-      console.error("[Toonflow Firebase] Error writing to Firestore during coalesced save:", dbErr);
+      console.error(`[Toonflow Firebase] Error writing to Firestore during coalesced save for ${userId}:`, dbErr);
     }
     // Rate limit writes to 1 write per second (Firestore limits writes to a single document to 1/sec)
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  isFirestoreSaving = false;
+  activeSaveUsers.delete(userId);
 }
 
 // Proxy API: save-projects
 app.post("/api/save-projects", async (req, res) => {
-  const { projects } = req.body;
+  const { projects, userId } = req.body;
   if (!projects || !Array.isArray(projects)) {
     return res.status(400).json({ error: "No projects array provided in body" });
   }
@@ -4159,10 +4201,12 @@ app.post("/api/save-projects", async (req, res) => {
       return res.status(500).json({ error: "Firestore DB not initialized on server" });
     }
     
+    const targetDocId = userId ? userId : "all_projects";
+    
     // Buffer the latest projects and schedule a background coalesced commit
-    pendingProjectsData = projects;
-    executeFirestoreSave().catch(err => {
-      console.error("[Toonflow Firebase] Background save task failed:", err);
+    pendingSaves[targetDocId] = projects;
+    executeFirestoreSaveForUser(targetDocId).catch(err => {
+      console.error(`[Toonflow Firebase] Background save task failed for ${targetDocId}:`, err);
     });
     
     res.json({ success: true });
@@ -4171,6 +4215,7 @@ app.post("/api/save-projects", async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to save projects" });
   }
 });
+
 
 // Serve assets folder statically
 app.use("/assets", express.static(path.join(process.cwd(), "assets")));
