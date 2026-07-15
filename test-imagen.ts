@@ -3,7 +3,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 async function run() {
   try {
     const response = await ai.models.generateImages({
-      model: "gemini-2.5-flash-image",
+      model: "gemini-3.1-flash-image",
       prompt: "a cat",
       config: {
         numberOfImages: 1,

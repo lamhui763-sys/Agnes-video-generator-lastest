@@ -695,19 +695,13 @@ async function generateContentWithFallback(options: {
   
   if (isImage) {
     fallbacks = [
-      "gemini-2.5-flash", // modern default which handles standard requests
-      "gemini-2.0-flash",
-      "gemini-3.1-flash-image",
-      "gemini-3.1-flash-lite-image"
+      "gemini-3.1-flash-lite-image",
+      "gemini-3.1-flash-image"
     ];
   } else {
     fallbacks = [
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-1.5-flash",
-      "gemini-1.5-pro",
-      "gemini-3.1-flash-lite",
       "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
       "gemini-3.1-pro-preview",
       "gemini-flash-latest"
     ];
@@ -2384,8 +2378,8 @@ async function generateText(prompt: string, engine: 'gemini' | 'agnes' | 'mistra
       const data: any = await response.json();
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
-      console.log(`[Toonflow Info] Agnes AI text generation bypassed, falling back to Gemini. Reason: ${err.message || err}`);
-      return await generateText(prompt, 'gemini', geminiModel, customApiKey);
+      console.error(`[Toonflow Error] Agnes AI text generation failed. Reason: ${err.message || err}`);
+      throw err; // Fail explicitly instead of silent fallback
     }
   } else if (engine === 'mistral') {
     try {
@@ -3397,12 +3391,13 @@ app.post("/api/generate-image", async (req, res) => {
     return res.status(400).json({ error: "Visual prompt is required" });
   }
 
+  let activeEngine = engine;
   let finalPrompt = prompt;
   const hasChinese = /[\u4e00-\u9fa5]/.test(prompt);
   if (hasChinese || prompt.trim().length < 15) {
     let optimized = false;
-    // 1. If Gemini quota is not exhausted, try Gemini first for prompt translation/optimization (extremely fast and robust)
-    if (!isGeminiTextQuotaExhausted) {
+    // 1. If Gemini quota is not exhausted and user didn't strictly request Agnes, try Gemini first for prompt translation/optimization (extremely fast and robust)
+    if (!isGeminiTextQuotaExhausted && activeEngine !== 'agnes') {
       try {
         console.log(`[Toonflow] Prompt contains Chinese or is very short. Translating/Optimizing using Gemini: "${prompt}"`);
         const geminiRes = await generateContentWithFallback({
@@ -3551,8 +3546,6 @@ app.post("/api/generate-image", async (req, res) => {
   }
 
   try {
-    let activeEngine = engine;
-    
     // The user explicitly requested to always use Agnes AI first for image generation.
     // We do not automatically override to Gemini even if character reference images are provided.
     // This respects the chosen activeEngine (which defaults to 'agnes') first.
@@ -3636,7 +3629,14 @@ app.post("/api/generate-image", async (req, res) => {
         if (errMsg.includes("content_policy_violation") || errMsg.includes("Content policy violation")) {
           return res.status(400).json({ error: "內容違反政策 (Content policy violation) - 請修改您的提示詞" });
         }
-        console.warn(`[Toonflow Warning] agnes AI Image generation failed or timed out. Falling back to Gemini image generation...`);
+        console.warn(`[Toonflow Warning] agnes AI Image generation failed or timed out: ${errMsg}`);
+        
+        // Strict Agnes mode: do not fall back to Gemini if the user strictly requested Agnes,
+        // to avoid consuming Gemini quota or falling back when they only want Agnes.
+        if (activeEngine === 'agnes') {
+          return res.status(500).json({ error: `Agnes AI 繪圖生成失敗：${errMsg}。請稍後再試。` });
+        }
+
         let geminiImageUrl = null;
         if (!isGeminiImageQuotaExhausted) {
           const aspectRatio = isAvatar ? "1:1" : "16:9";
