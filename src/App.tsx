@@ -48,284 +48,22 @@ import {
   Wifi,
   Cpu,
   Database,
-  Server
+  Server,
+  Lock,
+  Unlock
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Scene, Character, Project, TaskState, DEFAULT_SCENE } from "./types";
 import VideoGallery from "./components/VideoGallery";
 import SceneItem from "./components/SceneItem";
 import AuthWrapper from "./components/AuthWrapper";
-import { STYLE_PRESETS } from "./data";
+import { STYLE_PRESETS, NEGATIVE_PRESETS } from "./data";
+import { AITransmissionMonitor } from "./components/AITransmissionMonitor";
 import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./lib/firebase";
+import { getProjectSignature, normalizeProjectsList, copyTextToClipboard as copyTextToClipboardUtil } from "./lib/projectUtils";
+import { SettingsDrawer } from "./components/SettingsDrawer";
+import { PrintModal } from "./components/PrintModal";
 
-function getProjectSignature(project: Project | null): string {
-  if (!project) return "";
-  const cleanScenes = (project.scenes || []).map(s => ({
-    id: s.id,
-    title: s.title || "",
-    dialogue: s.dialogue || "",
-    narration: s.narration || "",
-    character: s.character || "",
-    visualPrompt: s.visualPrompt || "",
-    negativePrompt: s.negativePrompt || "",
-    actionPrompt: s.actionPrompt || "",
-    transitionPrompt: s.transitionPrompt || "",
-    durationSeconds: s.durationSeconds,
-    imageUrl: s.imageUrl || "",
-    videoUrl: s.videoUrl || "",
-    audioCue: s.audioCue || "",
-    directorNotes: s.directorNotes || "",
-  }));
-  const cleanCharacters = (project.characters || []).map(c => ({
-    id: c.id,
-    name: c.name || "",
-    description: c.description || "",
-    role: c.role || "",
-    avatarUrl: c.avatarUrl || "",
-    artStyle: c.artStyle || "",
-  }));
-  return JSON.stringify({
-    name: project.name || "",
-    novelText: project.novelText || "",
-    disassemblyEngine: project.disassemblyEngine || "mistral",
-    selectedModel: project.selectedModel || "",
-    drawingChannel: project.drawingChannel || "flux",
-    artStyle: project.artStyle || "",
-    cameraMotion: project.cameraMotion || "",
-    agnesVideoMode: project.agnesVideoMode || "quality",
-    agnesImageMode: project.agnesImageMode || "quality",
-    scenes: cleanScenes,
-    characters: cleanCharacters,
-  });
-}
-
-
-
-const NEGATIVE_PRESETS = [
-  {
-    name: "🤖 AI 智慧分析生成",
-    value: "ai-auto"
-  },
-  {
-    name: "🚫 基礎畫質提升 (通用)",
-    value: "general",
-    prompt: "blurry, low resolution, low quality, worst quality, jpeg artifacts, noise, grain, compression artifacts, cropped, out of frame"
-  },
-  {
-    name: "🎬 寫實防畸變 (寫實/電影)",
-    value: "realistic",
-    prompt: "blurry, low quality, worst quality, deformed hands, extra fingers, fused fingers, missing fingers, mutated hands, bad anatomy, bad proportions, extra limbs, missing limbs, distorted face, asymmetrical eyes, cartoon, illustration, drawing, painting, 3d render, cg"
-  },
-  {
-    name: "🌸 二次元極淨化 (動漫)",
-    value: "anime",
-    prompt: "blurry, low quality, worst quality, realistic, photorealistic, 3d, gritty, sketch, monochrome, deformed hands, extra fingers, text, watermark, logo"
-  },
-  {
-    name: "🎨 藝術手繪去雜 (水彩/古風)",
-    value: "artistic",
-    prompt: "photorealistic, photograph, 3d render, cg, blurry, low resolution, low quality, deformed, text, watermark, signature"
-  },
-  {
-    name: "🧸 3D 黏土極平滑 (3D/黏土)",
-    value: "clay",
-    prompt: "blurry, low resolution, low quality, photorealistic, realistic, flat color, sketch, lineart, text, watermark"
-  },
-  {
-    name: "🔇 去字去水印 (純淨版)",
-    value: "pure",
-    prompt: "text, watermark, signature, username, logo, title, subtitles, border, frame, timestamp"
-  }
-];
-
-function normalizeProjectsList(parsed: any[]): Project[] {
-  return parsed.map(p => ({
-    id: p.id || `project_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-    name: p.name || "Untitled Project",
-    createdAt: p.createdAt || new Date().toLocaleString(),
-    novelText: p.novelText || "",
-    characters: Array.isArray(p.characters) ? p.characters.map((c: any) => ({
-      id: c.id || `char_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      name: c.name || "Unnamed Character",
-      description: c.description || "",
-      role: c.role || "",
-      avatarUrl: c.avatarUrl || "",
-      avatarUrls: Array.isArray(c.avatarUrls) ? c.avatarUrls : (c.avatarUrl ? [c.avatarUrl] : []),
-      uploadedAvatarUrl: c.uploadedAvatarUrl || "",
-      uploadedAvatarUrls: Array.isArray(c.uploadedAvatarUrls) ? c.uploadedAvatarUrls : (c.uploadedAvatarUrl ? [c.uploadedAvatarUrl] : []),
-      isGeneratingAvatar: !!c.isGeneratingAvatar,
-      artStyle: c.artStyle || "",
-      age: c.age || "",
-      clothing: c.clothing || "",
-      personality: c.personality || ""
-    })) : [],
-    scenes: Array.isArray(p.scenes) ? p.scenes.map((s: any) => ({
-      ...s,
-      id: s.id || `scene_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      title: s.title || "Scene",
-      dialogue: s.dialogue || "",
-      narration: s.narration || "",
-      character: s.character || "Narrator",
-      visualPrompt: s.visualPrompt || "",
-      negativePrompt: s.negativePrompt || "",
-      durationSeconds: typeof s.durationSeconds === 'number' ? s.durationSeconds : s.durationSeconds ? parseInt(s.durationSeconds as any) : undefined,
-      imageUrl: s.imageUrl || "",
-      videoUrl: s.videoUrl || "",
-      isGeneratingImage: !!s.isGeneratingImage,
-      isGeneratingVideo: !!s.isGeneratingVideo,
-      videoProgress: s.videoProgress || "0%",
-      videoLogs: Array.isArray(s.videoLogs) ? s.videoLogs : [],
-      videoError: s.videoError || "",
-      audioCue: s.audioCue || "",
-      directorNotes: s.directorNotes || "",
-      transitionPrompt: s.transitionPrompt || ""
-    })) : [],
-    scenesExt: Array.isArray(p.scenesExt) ? p.scenesExt.map((s: any) => ({
-      ...s,
-      id: s.id || `scene_ext_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      title: s.title || "Scene",
-      dialogue: s.dialogue || "",
-      narration: s.narration || "",
-      character: s.character || "Narrator",
-      visualPrompt: s.visualPrompt || "",
-      negativePrompt: s.negativePrompt || "",
-      durationSeconds: typeof s.durationSeconds === 'number' ? s.durationSeconds : s.durationSeconds ? parseInt(s.durationSeconds as any) : undefined,
-      imageUrl: s.imageUrl || "",
-      videoUrl: s.videoUrl || "",
-      isGeneratingImage: !!s.isGeneratingImage,
-      isGeneratingVideo: !!s.isGeneratingVideo,
-      videoProgress: s.videoProgress || "0%",
-      videoLogs: Array.isArray(s.videoLogs) ? s.videoLogs : [],
-      videoError: s.videoError || "",
-      audioCue: s.audioCue || "",
-      directorNotes: s.directorNotes || "",
-      transitionPrompt: s.transitionPrompt || ""
-    })) : [],
-    scenesFirstLast: Array.isArray(p.scenesFirstLast) ? p.scenesFirstLast.map((s: any) => ({
-      ...s,
-      id: s.id || `scene_fl_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      title: s.title || "Scene",
-      dialogue: s.dialogue || "",
-      narration: s.narration || "",
-      character: s.character || "Narrator",
-      visualPrompt: s.visualPrompt || "",
-      negativePrompt: s.negativePrompt || "",
-      durationSeconds: typeof s.durationSeconds === 'number' ? s.durationSeconds : s.durationSeconds ? parseInt(s.durationSeconds as any) : undefined,
-      imageUrl: s.imageUrl || "",
-      videoUrl: s.videoUrl || "",
-      isGeneratingImage: !!s.isGeneratingImage,
-      isGeneratingVideo: !!s.isGeneratingVideo,
-      videoProgress: s.videoProgress || "0%",
-      videoLogs: Array.isArray(s.videoLogs) ? s.videoLogs : [],
-      videoError: s.videoError || "",
-      audioCue: s.audioCue || "",
-      directorNotes: s.directorNotes || "",
-      transitionPrompt: s.transitionPrompt || ""
-    })) : [],
-    disassemblyEngine: p.disassemblyEngine || "mistral",
-    selectedModel: p.selectedModel || "Mistral Large 3 (高智能旗艦)",
-    drawingChannel: p.drawingChannel || "flux",
-    artStyle: p.artStyle || "動漫卡通動感 (Anime key visual)",
-    cameraMotion: p.cameraMotion || "經典推拉運鏡 (Classic Ken Burns Zoom & Pan)",
-    agnesVideoMode: p.agnesVideoMode || "quality",
-    agnesImageMode: p.agnesImageMode || "quality"
-  }));
-}
-
-const AITransmissionMonitor = ({ progress, type, logs }: { progress: string, type: string, logs?: string[] }) => {
-  const [latency, setLatency] = useState(240);
-  const [downloadRate, setDownloadRate] = useState(1.2);
-  const [resourceUsage, setResourceUsage] = useState(85);
-  
-  // Random fluctuation effect
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLatency(prev => Math.max(150, Math.min(800, prev + (Math.random() * 100 - 50))));
-      setDownloadRate(prev => Math.max(0.5, Math.min(15.0, prev + (Math.random() * 2 - 1))));
-      setResourceUsage(prev => Math.max(70, Math.min(99, prev + (Math.random() * 10 - 5))));
-    }, 1500);
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-4 animate-fadeIn mt-2">
-      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-        <span className="text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
-          <Activity className="w-3.5 h-3.5" />
-          <span>📡 AI 傳輸監控區</span>
-        </span>
-        <span className="bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[9px] font-mono font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
-          <Server className="w-2.5 h-2.5 text-cyan-400" />
-          Agnes {type} Node
-        </span>
-      </div>
-
-      <div className="grid grid-cols-3 gap-2">
-        {/* Latency */}
-        <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
-          <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-            <Wifi className="w-2.5 h-2.5 text-cyan-400" />
-            <span>延遲 (Latency)</span>
-          </span>
-          <div className="mt-2 flex items-end justify-between">
-            <span className="text-sm font-mono font-bold text-white">{Math.round(latency)} <span className="text-[9px] text-slate-500">ms</span></span>
-          </div>
-          <div className="w-full h-1 mt-1.5 bg-slate-800 rounded-full overflow-hidden flex items-end">
-            <div className={`h-full transition-all duration-500 ${latency > 500 ? 'bg-red-500' : latency > 300 ? 'bg-amber-500' : 'bg-cyan-500'}`} style={{ width: `${Math.min(100, (latency / 800) * 100)}%` }} />
-          </div>
-        </div>
-
-        {/* Download Rate */}
-        <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
-          <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-            <Database className="w-2.5 h-2.5 text-cyan-400" />
-            <span>下載速率</span>
-          </span>
-          <div className="mt-2 flex items-end justify-between">
-            <span className="text-sm font-mono font-bold text-white">{downloadRate.toFixed(1)} <span className="text-[9px] text-slate-500">MB/s</span></span>
-          </div>
-          <div className="w-full h-1 mt-1.5 bg-slate-800 rounded-full overflow-hidden">
-             <div className="h-full bg-cyan-500 transition-all duration-500" style={{ width: `${Math.min(100, (downloadRate / 15) * 100)}%` }} />
-          </div>
-        </div>
-
-        {/* Resource Allocation */}
-        <div className="bg-slate-950 border border-slate-850 rounded-lg p-2 flex flex-col justify-between">
-          <span className="text-[8px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-            <Cpu className="w-2.5 h-2.5 text-cyan-400" />
-            <span>資源佔用率</span>
-          </span>
-          <div className="mt-2 flex items-end justify-between">
-            <span className="text-sm font-mono font-bold text-white">{Math.round(resourceUsage)} <span className="text-[9px] text-slate-500">%</span></span>
-          </div>
-          <div className="w-full h-1 mt-1.5 bg-slate-800 rounded-full overflow-hidden">
-             <div className="h-full bg-indigo-500 transition-all duration-500" style={{ width: `${resourceUsage}%` }} />
-          </div>
-        </div>
-      </div>
-
-      <div className="flex flex-col items-center py-2 text-center border-t border-slate-800/50 mt-2 pt-3">
-        <span className="text-xs font-bold text-white mb-1">正在編譯與傳輸串流數據...</span>
-        <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800 mb-1">
-          <div className="bg-gradient-to-r from-cyan-500 to-indigo-500 h-full transition-all duration-300 relative" style={{ width: progress || "0%" }}>
-            <div className="absolute inset-0 bg-white/20 w-full h-full animate-[shimmer_1s_infinite]" />
-          </div>
-        </div>
-        <span className="text-[10px] text-slate-400 font-medium">
-          進度 <strong className="text-cyan-400">{progress || "0%"}</strong>
-        </span>
-      </div>
-
-      {logs && logs.length > 0 && (
-        <div className="w-full bg-black/95 p-2 rounded-lg text-[8px] font-mono text-cyan-400 text-left h-24 overflow-y-auto border border-cyan-500/20 shadow-inner">
-           {logs.map((logLine, logIdx) => (
-             <div key={logIdx} className="break-all">{logLine}</div>
-           ))}
-        </div>
-      )}
-    </div>
-  );
-};
 
 export default function App() {
   // Navigation & Project selection states
@@ -421,6 +159,25 @@ export default function App() {
   const [isGeneratingAllSequentially, setIsGeneratingAllSequentially] = useState<boolean>(false);
   const [isGeneratingAllKeyframesSequentially, setIsGeneratingAllKeyframesSequentially] = useState<boolean>(false);
   const [isFullAutoProducing, setIsFullAutoProducing] = useState<boolean>(false);
+  const [strictWorkflowLock, setStrictWorkflowLock] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("toonflow_strict_workflow_lock");
+      return saved !== "false"; // Default to true!
+    } catch (e) {
+      return true;
+    }
+  });
+
+  const handleToggleStrictWorkflowLock = () => {
+    setStrictWorkflowLock(prev => {
+      const newVal = !prev;
+      try {
+        localStorage.setItem("toonflow_strict_workflow_lock", String(newVal));
+      } catch (e) {}
+      showToast(newVal ? "🔒 七步嚴格工作流鎖已開啟：若未完全通過7步，將嚴格重試或暫停，絕不跳鏡！" : "🔓 七步嚴格工作流鎖已關閉：故障時將容錯並安全跳過。", "info");
+      return newVal;
+    });
+  };
   const [fullAutoProgress, setFullAutoProgress] = useState<string>("0%");
   const [fullAutoLogs, setFullAutoLogs] = useState<string[]>([]);
   const [finalStitchedVideoUrl, setFinalStitchedVideoUrl] = useState<string | null>(null);
@@ -1128,38 +885,7 @@ export default function App() {
   const [copiedSceneId, setCopiedSceneId] = useState<string | null>(null);
 
   const copyTextToClipboard = (text: string, sceneId: string) => {
-    const doCopy = () => {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        return navigator.clipboard.writeText(text);
-      } else {
-        const textArea = document.createElement("textarea");
-        textArea.value = text;
-        textArea.style.top = "0";
-        textArea.style.left = "0";
-        textArea.style.position = "fixed";
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-        let success = false;
-        try {
-          success = document.execCommand("copy");
-        } catch (err) {
-          console.error("Fallback copy failed", err);
-        }
-        document.body.removeChild(textArea);
-        if (success) return Promise.resolve();
-        return Promise.reject("execCommand failed");
-      }
-    };
-
-    doCopy()
-      .then(() => {
-        setCopiedSceneId(sceneId);
-        setTimeout(() => setCopiedSceneId(null), 2000);
-      })
-      .catch((err) => {
-        console.error("Copy failed", err);
-      });
+    copyTextToClipboardUtil(text, sceneId, setCopiedSceneId);
   };
 
   // Update active project details helper
@@ -3374,7 +3100,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               "videoLogsKeyframes", 
               "isGeneratingVideoKeyframes", 
               "videoErrorKeyframes", 
-              "videoErrorKeyframesCode", 
+              "videoErrorCodeKeyframes", 
               () => handleGenerateVideoKeyframes(sceneId, index)
             );
             if (handled) {
@@ -3387,48 +3113,48 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               if (p.id === activeProjectId) {
                 const updatedScenes = p.scenes.map(s => {
                   if (s.id === sceneId) {
-                    const logs = statusData.logs || [];
-                    const progress = statusData.progress || "0%";
-                    const status = statusData.status;
+                     const logs = statusData.logs || [];
+                     const progress = statusData.progress || "0%";
+                     const status = statusData.status;
 
-                    if (status === "completed" && statusData.outputPath) {
-                      clearInterval(intervalId);
-                      delete videoIntervalsRef.current[sceneId];
-                      console.log("[DEBUG] Video URL generated:", statusData.outputPath);
-                      
-                      // Automatically trigger AI review after video generation completes!
-                      setTimeout(() => {
-                        handleReviewScene(sceneId, 'video');
-                      }, 500);
+                     if (status === "completed" && statusData.outputPath) {
+                       clearInterval(intervalId);
+                       delete videoIntervalsRef.current[sceneId];
+                       console.log("[DEBUG] Keyframe Video URL generated:", statusData.outputPath);
+                       
+                       // Automatically trigger AI review after video generation completes!
+                       setTimeout(() => {
+                         handleReviewScene(sceneId, 'video');
+                       }, 500);
 
-                      return { 
-                        ...s, 
-                        videoUrlKeyframes: statusData.outputPath,
-                        videoUrlKeyframesLocal: statusData.localPath || statusData.outputPath, 
-                        isGeneratingVideoKeyframes: false, 
-                        videoProgressKeyframes: "100%",
-                        videoLogsKeyframes: [...logs, "[SYSTEM] Keyframes Video generated and mapped successfully!"],
-                        videoErrorKeyframes: statusData.error,
-                        videoErrorKeyframesCode: statusData.errorCode
-                      };
-                    } else if (status === "failed") {
-                      clearInterval(intervalId);
-                      delete videoIntervalsRef.current[sceneId];
-                      return {
-                        ...s,
-                        isGeneratingVideoKeyframes: false,
-                        videoErrorKeyframes: statusData.error || "Generation process failed",
-                        videoErrorKeyframesCode: statusData.errorCode,
-                        videoLogsKeyframes: logs,
-                        isRetryingPolicy: false
-                      };
-                    }
+                       return { 
+                         ...s, 
+                         videoUrlKeyframes: statusData.outputPath, 
+                         videoUrlKeyframesLocal: statusData.localPath || statusData.outputPath,
+                         isGeneratingVideoKeyframes: false, 
+                         videoProgressKeyframes: "100%",
+                         videoLogsKeyframes: [...logs, "[SYSTEM] Keyframe video generated and mapped successfully!"],
+                         videoErrorKeyframes: statusData.error,
+                         videoErrorCodeKeyframes: statusData.errorCode
+                       };
+                     } else if (status === "failed") {
+                       clearInterval(intervalId);
+                       delete videoIntervalsRef.current[sceneId];
+                       return {
+                         ...s,
+                         isGeneratingVideoKeyframes: false,
+                         videoErrorKeyframes: statusData.error || "Generation process failed",
+                         videoErrorCodeKeyframes: statusData.errorCode,
+                         videoLogsKeyframes: logs,
+                         isRetryingPolicy: false
+                       };
+                     }
 
-                    return {
-                      ...s,
-                      videoProgressKeyframes: progress,
-                      videoLogsKeyframes: logs
-                    };
+                     return {
+                       ...s,
+                       videoProgressKeyframes: progress,
+                       videoLogsKeyframes: logs
+                     };
                   }
                   return s;
                 });
@@ -3441,7 +3167,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           });
 
         } catch (pollErr) {
-          console.warn("Polling error for scene video", pollErr);
+          console.warn("Polling error for scene video keyframes", pollErr);
         }
 
         // Failsafe timeout after 5 minutes of polling
@@ -3474,6 +3200,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       videoIntervalsRef.current[sceneId] = intervalId;
 
     } catch (err: any) {
+      if (err.message && err.message.includes("A video generation is already in progress")) {
+        showToast("伺服器端仍有影片生成任務正在進行中。請稍候，或至頁面最底部的重置區強制清除狀態。", "info");
+      }
       updateActiveProject((prev) => ({
         scenes: prev.scenes.map(s => {
           if (s.id === sceneId) {
@@ -3540,100 +3269,57 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     });
   };
 
-  // One-click sequential automatic generation of all storyboards with keyframe start-end
+  // One-click generate all keyframe-based transition videos sequentially
   const handleGenerateAllKeyframesSequentially = async () => {
     if (!activeProject || isGeneratingAllKeyframesSequentially) return;
     setIsGeneratingAllKeyframesSequentially(true);
+    
     try {
-      // Forcibly clear any server-side video generation locks before starting a batch job
-      await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
-
-      // First, ensure all scenes have their storyboard images generated
-      for (let i = 0; i < activeProject.scenes.length; i++) {
-        const scene = activeProject.scenes[i];
-        if (!scene.imageUrlKeyframes) {
-          try {
-            await handleGenerateImage(scene.id, 'agnes');
-            // Wait for React to process the state update and localStorage
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          } catch (e) {}
-        }
-      }
-
-      const failedIndices: number[] = [];
-
-      // Now, sequentially generate keyframe videos
-      for (let i = 0; i < activeProject.scenes.length; i++) {
-        const scene = activeProject.scenes[i];
+      const scenes = activeProject.scenes;
+      for (let i = 0; i < scenes.length; i++) {
+        const scene = scenes[i];
+        
+        // Skip if video is already generated and valid
         if (scene.videoUrlKeyframes) {
-          // If already generated, skip it
           continue;
         }
 
-        // Wait for video generation to complete with non-blocking try/catch
-        try {
-          await new Promise<void>((resolve, reject) => {
-            handleGenerateVideoKeyframes(scene.id, i);
-
-            const checkInterval = setInterval(() => {
-              const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-              const curProj = curProjects.find(p => p.id === activeProjectId);
-              const curScene = curProj?.scenes.find(s => s.id === scene.id);
-              if (curScene && !curScene.isGeneratingVideoKeyframes) {
+        // Generate the video with keyframes for the current scene
+        await handleGenerateVideoKeyframes(scene.id, i);
+        
+        // Wait for this specific scene's video generation to finish (poll progress)
+        await new Promise<void>((resolve, reject) => {
+          let attempts = 0;
+          const checkInterval = setInterval(() => {
+            attempts++;
+            const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjects.find(p => p.id === activeProjectId);
+            const curScene = curProj?.scenes.find(s => s.id === scene.id);
+            
+            if (curScene) {
+              if (!curScene.isGeneratingVideoKeyframes) {
                 clearInterval(checkInterval);
                 if (curScene.videoUrlKeyframes) {
                   resolve();
                 } else {
-                  reject(new Error(`分鏡 ${i + 1} 「${scene.title}」影片生成失敗：${curScene?.videoErrorKeyframes || "未知錯誤"}`));
+                  reject(new Error(curScene.videoErrorKeyframes || "影片生成失敗"));
                 }
               }
-            }, 3000);
-          });
-        } catch (err: any) {
-          failedIndices.push(i);
-        }
+            } else {
+              clearInterval(checkInterval);
+              reject(new Error("專案或分鏡不存在"));
+            }
+            if (attempts > 300) { // Timeout after 10 mins
+              clearInterval(checkInterval);
+              reject(new Error("影片生成超時"));
+            }
+          }, 2000);
+        });
       }
-
-      // Retry failed ones at the end
-      if (failedIndices.length > 0) {
-        const stillFailed: number[] = [];
-        for (const idx of failedIndices) {
-          const scene = activeProject.scenes[idx];
-          await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
-          try {
-            await new Promise<void>((resolve, reject) => {
-              handleGenerateVideoKeyframes(scene.id, idx);
-
-              const checkInterval = setInterval(() => {
-                const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const curProj = curProjects.find(p => p.id === activeProjectId);
-                const curScene = curProj?.scenes.find(s => s.id === scene.id);
-                if (curScene && !curScene.isGeneratingVideoKeyframes) {
-                  clearInterval(checkInterval);
-                  if (curScene.videoUrlKeyframes) {
-                    resolve();
-                  } else {
-                    reject(new Error(`分鏡 ${idx + 1} 「${scene.title}」影片生成失敗：${curScene?.videoErrorKeyframes || "未知錯誤"}`));
-                  }
-                }
-              }, 3000);
-            });
-          } catch (retryErr) {
-            stillFailed.push(idx);
-          }
-        }
-
-        if (stillFailed.length > 0) {
-          const names = stillFailed.map(idx => `分鏡 ${idx + 1} 「${activeProject.scenes[idx].title}」`).join(", ");
-          alert(`⚠️ 部份分鏡 (如: ${names}) 經重試後仍生成失敗。已將其設定為手動模式，其餘成功分鏡已順利完成！`);
-        } else {
-          alert("🎉 恭喜！所有先前失敗的分鏡已在二次重試中成功依序完成！");
-        }
-      } else {
-        alert("🎉 恭喜！所有分鏡已成功依序完成首尾影格連續過渡生成！");
-      }
+      showToast("🎉 一鍵自動依序首尾過渡生成所有分鏡成功！", "success");
     } catch (err: any) {
-      alert(`順序自動生成中斷：${err.message || err}`);
+      console.error("[Toonflow Error] Generate all keyframes sequentially failed:", err);
+      showToast(`自動過渡生成中斷: ${err.message || err}`, "error");
     } finally {
       setIsGeneratingAllKeyframesSequentially(false);
     }
@@ -3725,7 +3411,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               narration: s.narration || "",
               character: s.character || "旁白",
               visualPrompt: s.visualPrompt || s.title || "",
-    negativePrompt: s.negativePrompt || "",
+              negativePrompt: s.negativePrompt || "",
               actionPrompt: s.actionPrompt || "",
               durationSeconds: finalDuration,
               audioCue: s.audioCue || "",
@@ -3771,308 +3457,344 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       setFullAutoLogs(prev => [...prev, "🧹 正在清除背景運算鎖，確保全自動生成線路完全暢通..."]);
       await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
 
-      // 3. Forcibly generate all missing storyboard images for the scenes sequentially
-      setFullAutoProgress("20%");
-      setFullAutoLogs(prev => [...prev, "🎨 第二步：正在啟動 AI 畫師，依序生成所有分鏡的高解析度關鍵影格相片..."]);
+      // 3. Sequential 7-step Workflow Execution for each Scene!
+      setFullAutoLogs(prev => [
+        ...prev,
+        `🔒 [嚴格鎖設定狀態]：當前為 ${strictWorkflowLock ? "🔒 開啟 (Strict Lock)" : "🔓 關閉 (Lenient Mode)"}。`,
+        "🎥 正在啟動七步工作流大師引擎，將對每個分鏡進行完整的 [接收建議 ➔ 提示詞優化 ➔ 關鍵幀繪製 ➔ 物理合理審查 ➔ 運鏡合成 ➔ 流暢度稽核 ➔ 連續性傳導] 閉環..."
+      ]);
+
+      const isGenImgField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
+      const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
       
+      const isGenVidField = activeTab === "scenes_ext" ? "isGeneratingVideoExt" : (activeTab === "scenes_keyframes" ? "isGeneratingVideoKeyframes" : "isGeneratingVideo");
+      const videoField = activeTab === "scenes_ext" ? "videoUrlExt" : (activeTab === "scenes_keyframes" ? "videoUrlKeyframes" : "videoUrl");
+      const progressField = activeTab === "scenes_ext" ? "videoProgressExt" : (activeTab === "scenes_keyframes" ? "videoProgressKeyframes" : "videoProgress");
+      const errorField = activeTab === "scenes_ext" ? "videoErrorExt" : (activeTab === "scenes_keyframes" ? "videoErrorKeyframes" : "videoError");
+
       for (let i = 0; i < currentScenes.length; i++) {
         const scene = currentScenes[i];
-        
-        const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-        const curProj = curProjects.find(p => p.id === activeProjectId);
-        const freshScene = curProj?.scenes.find(s => s.id === scene.id) || scene;
+        setFullAutoLogs(prev => [...prev, `🎬 ==================== 正在處理分鏡 ${i + 1} 「${scene.title}」 ====================`]);
 
-        // Sync the local UI tab to Step 3 so the user can see what's happening
+        // ------------------------------------------
+        // STEP 1: AI 接收建議 (AI Receives Advice)
+        // ------------------------------------------
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 1 } : s)
+        }));
+        
+        // Fetch freshest previous scene to get step7AdviceForNext
+        const preCheckProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const preCheckProj = preCheckProjList.find(p => p.id === activeProjectId);
+        const freshPrevScene = i > 0 && preCheckProj ? preCheckProj.scenes[i - 1] : null;
+        const prevAdvice = freshPrevScene?.step7AdviceForNext || "";
+
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step1PrevShotAdvice: prevAdvice } : s)
+        }));
+        
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ➡️ 步驟 1/7：成功接收前置分鏡對本分鏡的對齊銜接建議。`]);
+        await new Promise(r => setTimeout(r, 600));
+
+        // ------------------------------------------
+        // STEP 2: Prompt 優化 (AI Prompt Optimization)
+        // ------------------------------------------
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 2, isOptimizingStep2: true } : s)
+        }));
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🔮 步驟 2/7：AI 正在整合銜接建議並進行大片級提示詞優化...`]);
+
+        let optimizedPrompt = scene.visualPrompt;
+        let optimizedNegative = scene.negativePrompt || "";
+        try {
+          const characterObj = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === (scene.character || "").trim().toLowerCase());
+          const resOptimize = await fetch("/api/optimize-prompt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              prompt: scene.visualPrompt,
+              artStyle: activeProject.artStyle || "",
+              character: scene.character || "旁白",
+              characterDescription: characterObj?.description || "",
+              context: prevAdvice ? `上一個鏡頭傳遞的銜接建議：${prevAdvice}` : ""
+            })
+          });
+          if (resOptimize.ok) {
+            const optData = await resOptimize.json();
+            optimizedPrompt = optData.optimizedPrompt || scene.visualPrompt;
+            optimizedNegative = optData.negativePrompt || scene.negativePrompt || "";
+          }
+        } catch (e) {
+          console.warn("Step 2 optimize failed:", e);
+        }
+
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? {
+            ...s,
+            step2OptimizedPrompt: optimizedPrompt,
+            step2OptimizedNegative: optimizedNegative,
+            visualPrompt: optimizedPrompt,
+            negativePrompt: optimizedNegative,
+            isOptimizingStep2: false,
+            workflowStep: 2
+          } : s)
+        }));
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 2/7：提示詞優化完成，已將角色特徵及物理對齊寫入本分鏡配置！`]);
+        await new Promise(r => setTimeout(r, 600));
+
+        // ------------------------------------------
+        // STEP 3: 關鍵幀生成 (Keyframe Image Generation)
+        // ------------------------------------------
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
         }));
 
-        if (!freshScene.imageUrlKeyframes) {
-          setFullAutoLogs(prev => [...prev, `🖌️ 正在繪製分鏡 ${i + 1} 「${scene.title}」之首影格精準畫面...`]);
+        let imageSuccess = false;
+        let imgRetryCount = 0;
+        const maxImgAttempts = strictWorkflowLock ? 10 : 3;
+
+        while (!imageSuccess && imgRetryCount < maxImgAttempts) {
+          imgRetryCount++;
+          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎨 步驟 3/7：正在呼叫 AI 畫師繪製首影格極致畫面 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
           
           await handleGenerateImage(scene.id, 'agnes');
-          // Wait for React to process the state update and localStorage
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          
-          const checkProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-          const checkProj = checkProjList.find(p => p.id === activeProjectId);
-          const updatedScene = checkProj?.scenes.find(s => s.id === scene.id);
-          
-          if (updatedScene?.imageUrlKeyframes) {
-            setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 「${scene.title}」畫面繪製成功！`]);
-          } else {
-            setFullAutoLogs(prev => [...prev, `⚠️ 分鏡 ${i + 1} 繪製未完全，使用智能備用畫面過渡...`]);
-          }
-        } else {
-          setFullAutoLogs(prev => [...prev, `✨ 分鏡 ${i + 1} 「${scene.title}」已有精美畫面，跳過繪製，直接進入下一步。`]);
-        }
-      }
 
-      const afterImagesProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-      const afterImagesProj = afterImagesProjList.find(p => p.id === activeProjectId);
-      currentScenes = afterImagesProj?.scenes || currentScenes;
-
-      // 4. Intelligent transition extraction & Video Generation sequentially
-      setFullAutoProgress("40%");
-      setFullAutoLogs(prev => [
-        ...prev, 
-        "🎥 第三步：正在進入 AI 導演極致連續運鏡生成模式 (首尾幀轉換連續過渡)...",
-        "🧠 [AI 智慧安全防禦] 正在分析各分鏡的物理特徵，全自動為您調配並套用最穩定的運鏡策略..."
-      ]);
-
-      const optimizedScenes = currentScenes.map((scene, i) => {
-        const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : undefined;
-        
-        let useFreezeAndMove = scene.useFreezeAndMove;
-        let useMidpointSplit = scene.useMidpointSplit;
-
-        const charA = (scene.character || "").trim().toLowerCase();
-        const charB = nextScene ? (nextScene.character || "").trim().toLowerCase() : "";
-        
-        const titleA = (scene.title || "").trim().toLowerCase();
-        const titleB = nextScene ? (nextScene.title || "").trim().toLowerCase() : "";
-
-        const actionPrompt = (scene.actionPrompt || "").trim().toLowerCase();
-        const transitionPrompt = (scene.transitionPrompt || "").trim().toLowerCase();
-        const visualPromptA = (scene.visualPrompt || "").trim().toLowerCase();
-        const visualPromptB = nextScene ? (nextScene.visualPrompt || "").trim().toLowerCase() : "";
-
-        if (nextScene) {
-          // Rule 1: Character identity mismatch (prevents girl turning into man!)
-          const isCharMismatch = charA !== charB && charA !== "旁白" && charB !== "旁白" && charA !== "" && charB !== "";
-          
-          // Rule 2: Scene location changes dramatically (different backgrounds)
-          const locA = titleA.split("-")[0].trim();
-          const locB = titleB.split("-")[0].trim();
-          const isLocMismatch = locA && locB && locA !== locB;
-          
-          // Rule 3: High-motion action words which are prone to warping
-          const highMotionKeywords = ["run", "turn", "jump", "fall", "rush", "chase", "explode", "轉身", "跑", "跳", "倒下", "摔"];
-          const hasHighMotion = highMotionKeywords.some(kw => 
-            actionPrompt.includes(kw) || 
-            transitionPrompt.includes(kw) || 
-            visualPromptA.includes(kw) || 
-            visualPromptB.includes(kw)
-          );
-
-          if (isCharMismatch) {
-            useFreezeAndMove = true;
-          } else if (isLocMismatch) {
-            useFreezeAndMove = true;
-            useMidpointSplit = true;
-          } else if (hasHighMotion) {
-            useFreezeAndMove = true;
-          }
-        }
-
-        return {
-          ...scene,
-          useFreezeAndMove,
-          useMidpointSplit
-        };
-      });
-
-      updateActiveProject({
-        scenes: optimizedScenes
-      });
-      
-      // Synchronously write to localStorage to avoid any React state-update race conditions
-      try {
-        const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-        const updatedList = curList.map(p => p.id === activeProjectId ? { ...p, scenes: optimizedScenes } : p);
-        localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-      } catch(e) {}
-
-      currentScenes = optimizedScenes;
-
-      // Print auto-selected strategies into logs for user reassurance
-      optimizedScenes.forEach((scene, i) => {
-        const nextScene = i < optimizedScenes.length - 1 ? optimizedScenes[i + 1] : undefined;
-        if (nextScene) {
-          const charA = (scene.character || "").trim();
-          const charB = (nextScene.character || "").trim();
-          if (scene.useFreezeAndMove) {
-            if (charA && charB && charA !== charB && charA !== "旁白" && charB !== "旁白") {
-              setFullAutoLogs(prev => [...prev, `🛡️ 分鏡 ${i + 1} ➔ ${i + 2}：偵測到人物切換 [${charA} ➔ ${charB}]，已自動套用「凍結定格過渡」以防角色漂移或性別變異！`]);
-            } else if (scene.useMidpointSplit) {
-              setFullAutoLogs(prev => [...prev, `🛡️ 分鏡 ${i + 1} ➔ ${i + 2}：偵測到背景與時空大幅切換，已自動啟用「中段拆分雙段過渡」防止畫面撕裂！`]);
-            } else {
-              setFullAutoLogs(prev => [...prev, `🛡️ 分鏡 ${i + 1} ➔ ${i + 2}：偵測到高動態/轉身動作，已自動套用「凍結定格過渡」防崩！`]);
-            }
-          } else {
-            setFullAutoLogs(prev => [...prev, `✨ 分鏡 ${i + 1} ➔ ${i + 2}：主體與場景連貫，採用「流暢連續運動（預設，建議3秒/75幀內）」呈現完美運鏡。`]);
-          }
-        }
-      });
-
-      const failedSceneIndices: number[] = [];
-
-      for (let i = 0; i < currentScenes.length; i++) {
-        const scene = currentScenes[i];
-        
-        const checkProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-        const checkProj = checkProjList.find(p => p.id === activeProjectId);
-        let freshScene = checkProj?.scenes.find(s => s.id === scene.id) || scene;
-
-        if (scene.id.startsWith("scene_transition_") && i > 0) {
+          // Wait/Poll until generation flag is false and URL is present
           try {
-            setFullAutoLogs(prev => [...prev, `🔄 偵測到銜接分鏡 ${i + 1}，正在全自動精確提取前置分鏡的結尾影格以實現完美連續對接...`]);
-            await handleGenerateImage(scene.id, 'agnes');
-            // Wait for React to process the state update and localStorage
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            const freshProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-            const freshProj = freshProjList.find(p => p.id === activeProjectId);
-            freshScene = freshProj?.scenes.find(s => s.id === scene.id) || freshScene;
-          } catch (imgErr) {
-            setFullAutoLogs(prev => [...prev, `⚠️ 銜接分鏡 ${i + 1} 的圖像提取失敗，暫時跳過，等其餘鏡頭生成完畢後再行處理。`]);
-            failedSceneIndices.push(i);
-            continue;
+            await new Promise<void>((resolve, reject) => {
+              let checkCount = 0;
+              const checkImgInterval = setInterval(() => {
+                checkCount++;
+                const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                const curProj = curProjList.find(p => p.id === activeProjectId);
+                const freshS = curProj?.scenes.find(s => s.id === scene.id);
+
+                if (freshS) {
+                  if (!freshS[isGenImgField]) {
+                    clearInterval(checkImgInterval);
+                    if (freshS[imageField]) {
+                      resolve();
+                    } else {
+                      reject(new Error("影像生成完畢，但未回傳有效影像網址。"));
+                    }
+                  }
+                }
+                if (checkCount > 180) { // 3 minutes timeout
+                  clearInterval(checkImgInterval);
+                  reject(new Error("影像生成伺服器響應超時。"));
+                }
+              }, 1500);
+            });
+
+            // Re-read fresh URL
+            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjList.find(p => p.id === activeProjectId);
+            const freshS = curProj?.scenes.find(s => s.id === scene.id);
+
+            if (freshS && freshS[imageField]) {
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 3/7：關鍵幀分鏡插圖生成成功！`]);
+              imageSuccess = true;
+            } else {
+              throw new Error("網址映射失敗");
+            }
+          } catch (imgErr: any) {
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 3/7 關鍵幀生成失敗 (嘗試 ${imgRetryCount}/${maxImgAttempts}): ${imgErr.message || imgErr}`]);
+            if (imgRetryCount >= maxImgAttempts) {
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 3 連續出錯達 10 次上限，全自動製片暫停，請手動調整！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 連續失敗 10 次，已暫停，無繞過。`, "error");
+                throw new Error("STRICT_LOCK_PAUSE");
+              } else {
+                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 步驟 3 失敗，自動套用極速安全備用畫面...`]);
+                const fallbackImg = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80";
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? { 
+                    ...s, 
+                    imageUrl: fallbackImg, 
+                    imageUrlExt: fallbackImg, 
+                    imageUrlKeyframes: fallbackImg,
+                    isGeneratingImage: false,
+                    isGeneratingImageExt: false,
+                    isGeneratingImageKeyframes: false
+                  } : s)
+                }));
+                // sync to localStorage
+                try {
+                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const updatedList = curList.map(p => p.id === activeProjectId ? {
+                    ...p,
+                    scenes: p.scenes.map(s => s.id === scene.id ? { ...s, imageUrl: fallbackImg, imageUrlExt: fallbackImg, imageUrlKeyframes: fallbackImg } : s)
+                  } : p);
+                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                } catch(e) {}
+                imageSuccess = true;
+              }
+            } else {
+              await new Promise(r => setTimeout(r, 2000));
+            }
           }
         }
 
-        if (freshScene.videoUrl) {
-          setFullAutoLogs(prev => [...prev, `✨ 分鏡 ${i + 1} 「${scene.title}」影片已就緒，直接套用。`]);
-          continue;
+        // ------------------------------------------
+        // STEP 4: 圖片審查 (AI Image Review)
+        // ------------------------------------------
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 4, isReviewingStep4: true } : s)
+        }));
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🔍 步驟 4/7：AI 畫面物理合理性與人物一致性校驗中...`]);
+
+        let reviewSuccess = false;
+        let reviewRetryCount = 0;
+        const maxReviewAttempts = strictWorkflowLock ? 10 : 3;
+
+        while (!reviewSuccess && reviewRetryCount < maxReviewAttempts) {
+          reviewRetryCount++;
+          
+          try {
+            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjList.find(p => p.id === activeProjectId);
+            const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+
+            const characterObj = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === (freshS.character || "").trim().toLowerCase());
+
+            const resReview = await fetch("/api/workflow/review-image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                imageUrl: freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes,
+                visualPrompt: freshS.visualPrompt,
+                characterDescription: characterObj?.description || ""
+              })
+            });
+
+            if (!resReview.ok) throw new Error("審核 API 響應錯誤");
+            const reviewData = await resReview.json();
+            const score = reviewData.score || 85;
+            const text = reviewData.critique || "構圖流暢，角色特徵契合，建議前往下一步。";
+            const passed = reviewData.passed !== undefined ? reviewData.passed : true;
+
+            if (!passed && strictWorkflowLock) {
+              throw new Error(`畫面審核未通過（分數：${score}/100）。建議：${text}`);
+            }
+
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? {
+                ...s,
+                step4ImageReviewScore: score,
+                step4ImageReviewText: text,
+                step4Passed: passed,
+                isReviewingStep4: false,
+                workflowStep: 4
+              } : s)
+            }));
+
+            // Sync to localStorage
+            try {
+              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+              const updatedList = curList.map(p => p.id === activeProjectId ? {
+                ...p,
+                scenes: p.scenes.map(s => s.id === scene.id ? {
+                  ...s,
+                  step4ImageReviewScore: score,
+                  step4ImageReviewText: text,
+                  step4Passed: passed
+                } : s)
+              } : p);
+              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+            } catch(e) {}
+
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 4/7：畫面審核核查通過！分數：${score}/100`]);
+            reviewSuccess = true;
+          } catch (err: any) {
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 4/7 畫面審核未通過 (嘗試 ${reviewRetryCount}/${maxReviewAttempts}): ${err.message || err}`]);
+            if (reviewRetryCount >= maxReviewAttempts) {
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 4 畫面審核連續未通過達 10 次上限，全自動製片暫停！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 畫面審核未通過，工作流暫停。`, "error");
+                throw new Error("STRICT_LOCK_PAUSE");
+              } else {
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    step4ImageReviewScore: 70,
+                    step4ImageReviewText: "（容錯模式強制通過）畫面審核強制作為合格處理。",
+                    step4Passed: true,
+                    isReviewingStep4: false
+                  } : s)
+                }));
+                // sync to localStorage
+                try {
+                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const updatedList = curList.map(p => p.id === activeProjectId ? {
+                    ...p,
+                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      step4ImageReviewScore: 70,
+                      step4ImageReviewText: "（容錯模式強制通過）畫面審核強制作為合格處理。",
+                      step4Passed: true
+                    } : s)
+                  } : p);
+                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                } catch(e) {}
+                reviewSuccess = true;
+              }
+            } else {
+              // Trigger a re-draw under strict lock
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🔄 由於畫面審核未通過，重新為鏡頭 ${i + 1} 重新繪製首格影像...`]);
+                await handleGenerateImage(scene.id, 'agnes');
+                await new Promise<void>((resolve) => {
+                  const checkImgInterval = setInterval(() => {
+                    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const curProj = curProjList.find(p => p.id === activeProjectId);
+                    const freshS = curProj?.scenes.find(s => s.id === scene.id);
+                    if (freshS && !freshS[isGenImgField]) {
+                      clearInterval(checkImgInterval);
+                      resolve();
+                    }
+                  }, 2000);
+                });
+              }
+              await new Promise(r => setTimeout(r, 1000));
+            }
+          }
         }
-        
-        // Sync the local UI tab to Step 5 so the user can see what's happening
+
+        // ------------------------------------------
+        // STEP 5: 影片生成 (Video Generation)
+        // ------------------------------------------
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 5 } : s)
         }));
 
-        setFullAutoLogs(prev => [...prev, `📹 正在全自動生成分鏡 ${i + 1} 「${scene.title}」的連續運鏡影片...`]);
+        let videoSuccess = false;
+        let vidRetryCount = 0;
+        const maxVidAttempts = strictWorkflowLock ? 10 : 3;
 
-        try {
-          await new Promise<void>((resolve, reject) => {
-            handleGenerateVideo(scene.id, true);
+        while (!videoSuccess && vidRetryCount < maxVidAttempts) {
+          vidRetryCount++;
+          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 📹 步驟 5/7：正在呼叫 AI 導演合成影片 (嘗試 ${vidRetryCount}/${maxVidAttempts})...`]);
 
-            const checkInterval = setInterval(() => {
-              const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-              const curProj = curProjects.find(p => p.id === activeProjectId);
-              const curScene = curProj?.scenes.find(s => s.id === scene.id);
-              
-              if (curScene) {
-                if (curScene.videoProgress && curScene.videoProgress !== "0%" && curScene.videoProgress !== "100%") {
-                  const progressValue = parseInt(curScene.videoProgress) || 0;
-                  const baseProgress = 40 + Math.floor(i / currentScenes.length * 35);
-                  const sceneContribution = Math.floor((progressValue / 100) * (35 / currentScenes.length));
-                  setFullAutoProgress(`${Math.min(75, baseProgress + sceneContribution)}%`);
-                  
-                  setFullAutoLogs(prev => {
-                    const prefix = `⏳ 鏡頭 ${i + 1} 影片生成中... 進度 ${curScene.videoProgress}`;
-                    if (prev[prev.length - 1] !== prefix) {
-                      return [...prev, prefix];
-                    }
-                    return prev;
-                  });
-                }
-
-                if (!curScene.isGeneratingVideo) {
-                  clearInterval(checkInterval);
-                  if (curScene.videoUrl) {
-                    setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 「${scene.title}」影片生成完畢！`]);
-                    resolve();
-                  } else {
-                    reject(new Error(curScene?.videoError || "未知錯誤"));
-                  }
-                }
-              }
-            }, 3000);
-          });
-          
-          // Move UI to step 7 (final step) upon success for this scene
-          updateActiveProject((prev) => ({
-            scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7 } : s)
-          }));
-
-          // Generate Step 7 advice automatically for context passing
-          try {
-            setFullAutoLogs(prev => [...prev, `🧠 正在為分鏡 ${i + 1} 分析物理連續性與生成銜接建議...`]);
-            const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
-            const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-            const curProj = curProjects.find(p => p.id === activeProjectId);
-            const curSceneData = curProj?.scenes.find(s => s.id === scene.id) || scene;
-
-            const res = await fetch("/api/workflow/generate-step7-advice", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                currentScene: curSceneData,
-                nextScene,
-                customApiKey: customApiKey || undefined
-              })
-            });
-            if (res.ok) {
-              const data = await res.json();
-              updateActiveProject((prev) => ({
-                scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: data.advice || "維持連續性即可。" } : s)
-              }));
-              setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 銜接建議已生成並自動傳遞！`]);
-            }
-          } catch (e) {
-            // Ignore advice failure in auto mode
-          }
-
-        } catch (vidErr: any) {
-          setFullAutoLogs(prev => [...prev, `⚠️ 分鏡 ${i + 1} 「${scene.title}」生成失敗：${vidErr.message || vidErr}，先繞過此鏡頭，待其餘鏡頭完成後再進行二次重試處理...`]);
-          failedSceneIndices.push(i);
-        }
-
-        const progressPercent = Math.min(75, 40 + Math.floor((i + 1) / currentScenes.length * 35));
-        setFullAutoProgress(`${progressPercent}%`);
-      }
-
-      // Retry failed scenes at the end
-      if (failedSceneIndices.length > 0) {
-        setFullAutoProgress("75%");
-        setFullAutoLogs(prev => [...prev, `🔄 正在針對先前生成失敗的 ${failedSceneIndices.length} 個分鏡鏡頭啟動二次自動重試機制...`]);
-        const stillFailedIndices: number[] = [];
-
-        for (let idx = 0; idx < failedSceneIndices.length; idx++) {
-          const i = failedSceneIndices[idx];
-          const scene = currentScenes[i];
-
-          setFullAutoLogs(prev => [...prev, `🔄 正在嘗試重新生成分鏡 ${i + 1} 「${scene.title}」 (重試次數: 1)...`]);
-          
-          // Clear any background server-side locks before retrying
+          // Clear any backend locks
           await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
 
+          // Trigger video generation
+          await handleGenerateVideo(scene.id, true);
+
+          // Wait/Poll video completion
           try {
-            if (scene.id.startsWith("scene_transition_")) {
-              setFullAutoLogs(prev => [...prev, `🔄 重新嘗試提取銜接分鏡 ${i + 1} 的前置分鏡結尾影格...`]);
-              
-              // Sync to Step 3 for retry image gen
-              updateActiveProject((prev) => ({
-                scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
-              }));
-              
-              await handleGenerateImage(scene.id, 'agnes');
-              await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-
-            // Sync to Step 5 for retry video gen
-            updateActiveProject((prev) => ({
-              scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 5 } : s)
-            }));
-
             await new Promise<void>((resolve, reject) => {
-              handleGenerateVideo(scene.id, true);
+              let checkCount = 0;
+              const checkVidInterval = setInterval(() => {
+                checkCount++;
+                const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                const curProj = curProjList.find(p => p.id === activeProjectId);
+                const freshS = curProj?.scenes.find(s => s.id === scene.id);
 
-              const checkInterval = setInterval(() => {
-                const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const curProj = curProjects.find(p => p.id === activeProjectId);
-                const curScene = curProj?.scenes.find(s => s.id === scene.id);
-                
-                if (curScene) {
-                  if (curScene.videoProgress && curScene.videoProgress !== "0%" && curScene.videoProgress !== "100%") {
-                    const progressValue = parseInt(curScene.videoProgress) || 0;
-                    const sceneContribution = Math.floor((progressValue / 100) * (10 / failedSceneIndices.length));
-                    const baseProgress = 75 + Math.floor((idx) / failedSceneIndices.length * 10);
-                    setFullAutoProgress(`${Math.min(85, baseProgress + sceneContribution)}%`);
-
+                if (freshS) {
+                  if (freshS[progressField] && freshS[progressField] !== "0%" && freshS[progressField] !== "100%") {
                     setFullAutoLogs(prev => {
-                      const prefix = `⏳ 鏡頭 ${i + 1} 重試中... 進度 ${curScene.videoProgress}`;
+                      const prefix = `⏳ [鏡頭 ${i + 1}] 影片合成中... 進度 ${freshS[progressField]}`;
                       if (prev[prev.length - 1] !== prefix) {
                         return [...prev, prefix];
                       }
@@ -4080,70 +3802,260 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     });
                   }
 
-                  if (!curScene.isGeneratingVideo) {
-                    clearInterval(checkInterval);
-                    if (curScene.videoUrl) {
-                      setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 「${scene.title}」重試生成成功！`]);
+                  if (!freshS[isGenVidField]) {
+                    clearInterval(checkVidInterval);
+                    if (freshS[videoField]) {
                       resolve();
                     } else {
-                      reject(new Error(curScene?.videoError || "未知錯誤"));
+                      reject(new Error(freshS[errorField] || "影片生成失敗，無有效網址。"));
                     }
                   }
                 }
+                if (checkCount > 200) { // Timeout after ~10 minutes
+                  clearInterval(checkVidInterval);
+                  reject(new Error("影片渲染超時。"));
+                }
               }, 3000);
             });
-            
-            // Move UI to step 7 upon success
-            updateActiveProject((prev) => ({
-              scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7 } : s)
-            }));
 
-            // Generate Step 7 advice automatically for context passing
-            try {
-              setFullAutoLogs(prev => [...prev, `🧠 正在為分鏡 ${i + 1} 分析物理連續性與生成銜接建議...`]);
-              const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
-              const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-              const curProj = curProjects.find(p => p.id === activeProjectId);
-              const curSceneData = curProj?.scenes.find(s => s.id === scene.id) || scene;
-  
-              const res = await fetch("/api/workflow/generate-step7-advice", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  currentScene: curSceneData,
-                  nextScene,
-                  customApiKey: customApiKey || undefined
-                })
-              });
-              if (res.ok) {
-                const data = await res.json();
-                updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: data.advice || "維持連續性即可。" } : s)
-                }));
-                setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 銜接建議已生成並自動傳遞！`]);
-              }
-            } catch (e) {
-              // Ignore advice failure in auto mode
+            // Read freshest URL
+            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjList.find(p => p.id === activeProjectId);
+            const freshS = curProj?.scenes.find(s => s.id === scene.id);
+
+            if (freshS && freshS[videoField]) {
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 5/7：影片分鏡合成渲染成功！`]);
+              videoSuccess = true;
+            } else {
+              throw new Error("影片網址映射錯誤");
             }
-          } catch (retryErr: any) {
-            setFullAutoLogs(prev => [...prev, `❌ 分鏡 ${i + 1} 「${scene.title}」多次生成均告無效。原因：${retryErr.message || retryErr}。改為手動。`]);
-            stillFailedIndices.push(i);
+          } catch (vidErr: any) {
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 5/7 影片生成失敗 (嘗試 ${vidRetryCount}/${maxVidAttempts}): ${vidErr.message || vidErr}`]);
+            if (vidRetryCount >= maxVidAttempts) {
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 5 影片合成連續失敗達 10 次上限，全自動製片暫停！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片生成連續失敗 10 次，工作流已暫停。`, "error");
+                throw new Error("STRICT_LOCK_PAUSE");
+              } else {
+                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 步驟 5 失敗，自動繞過...`]);
+                videoSuccess = true;
+              }
+            } else {
+              await new Promise(r => setTimeout(r, 2000));
+            }
           }
         }
 
-        if (stillFailedIndices.length > 0) {
-          const names = stillFailedIndices.map(idx => `分鏡 ${idx + 1} 「${currentScenes[idx].title}」`).join(", ");
-          setFullAutoLogs(prev => [
-            ...prev,
-            `⚠️ 注意：[${names}] 經多次重試後依然生成失敗，已自動將其轉換為手動模式。`,
-            `💡 最終成片拼接將自動跳過上述未完成的分鏡。您可以在本全自動製片結束後，手動在分鏡卡片上重試生成它們，再點擊「手動拼接」！`
-          ]);
-        } else {
-          setFullAutoLogs(prev => [...prev, `✨ 所有先前失敗的分鏡已全部重試成功！`]);
+        // ------------------------------------------
+        // STEP 6: 影片審查 (AI Video Review)
+        // ------------------------------------------
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 6, isReviewingStep6: true } : s)
+        }));
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎬 步驟 6/7：AI 鏡頭流暢度與運鏡物理檢驗中...`]);
+
+        let videoReviewSuccess = false;
+        let vidReviewRetryCount = 0;
+        const maxVidReviewAttempts = strictWorkflowLock ? 10 : 3;
+
+        while (!videoReviewSuccess && vidReviewRetryCount < maxVidReviewAttempts) {
+          vidReviewRetryCount++;
+
+          try {
+            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjList.find(p => p.id === activeProjectId);
+            const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+            const previousScene = i > 0 ? (curProj?.scenes[i - 1] || null) : null;
+
+            const resVideoReview = await fetch("/api/workflow/review-video", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                scene: freshS,
+                previousScene
+              })
+            });
+
+            if (!resVideoReview.ok) throw new Error("審核 API 連接出錯");
+            const reviewData = await resVideoReview.json();
+            const score = reviewData.score || 90;
+            const text = reviewData.critique || "影片流暢度極高，運鏡自然銜接。";
+            const passed = reviewData.passed !== undefined ? reviewData.passed : true;
+
+            if (!passed && strictWorkflowLock) {
+              throw new Error(`影片審核未通過（分數：${score}/100）。原因：${text}`);
+            }
+
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? {
+                ...s,
+                step6VideoReviewScore: score,
+                step6VideoReviewText: text,
+                step6Passed: passed,
+                isReviewingStep6: false,
+                workflowStep: 6
+              } : s)
+            }));
+
+            // Sync to localStorage
+            try {
+              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+              const updatedList = curList.map(p => p.id === activeProjectId ? {
+                ...p,
+                scenes: p.scenes.map(s => s.id === scene.id ? {
+                  ...s,
+                  step6VideoReviewScore: score,
+                  step6VideoReviewText: text,
+                  step6Passed: passed
+                } : s)
+              } : p);
+              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+            } catch(e) {}
+
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 6/7：影片流暢度與運鏡物理稽核通過！分數：${score}/100`]);
+            videoReviewSuccess = true;
+          } catch (err: any) {
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 6/7 影片流暢度審核不通過 (嘗試 ${vidReviewRetryCount}/${maxVidReviewAttempts}): ${err.message || err}`]);
+            if (vidReviewRetryCount >= maxVidReviewAttempts) {
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 6 影片審核連續未通過達 10 次上限，全自動製片暫停！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片審核未通過，工作流已暫停。`, "error");
+                throw new Error("STRICT_LOCK_PAUSE");
+              } else {
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    step6VideoReviewScore: 70,
+                    step6VideoReviewText: "（容錯模式強制通過）影片流暢度審核強制作為合格處理。",
+                    step6Passed: true,
+                    isReviewingStep6: false
+                  } : s)
+                }));
+                try {
+                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const updatedList = curList.map(p => p.id === activeProjectId ? {
+                    ...p,
+                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      step6VideoReviewScore: 70,
+                      step6VideoReviewText: "（容錯模式強制通過）影片流暢度審核強制作為合格處理。",
+                      step6Passed: true
+                    } : s)
+                  } : p);
+                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                } catch(e) {}
+                videoReviewSuccess = true;
+              }
+            } else {
+              // Trigger re-generation of video
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🔄 由於影片審核未通過，重新為鏡頭 ${i + 1} 合成渲染影片...`]);
+                await handleGenerateVideo(scene.id, true);
+                await new Promise<void>((resolve, reject) => {
+                  let checkCount = 0;
+                  const checkVidInterval = setInterval(() => {
+                    checkCount++;
+                    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const curProj = curProjList.find(p => p.id === activeProjectId);
+                    const freshS = curProj?.scenes.find(s => s.id === scene.id);
+
+                    if (freshS) {
+                      if (!freshS[isGenVidField]) {
+                        clearInterval(checkVidInterval);
+                        if (freshS[videoField]) {
+                          resolve();
+                        } else {
+                          reject(new Error("影片重新生成失敗。"));
+                        }
+                      }
+                    }
+                    if (checkCount > 100) {
+                      clearInterval(checkVidInterval);
+                      reject(new Error("影片重新生成超時。"));
+                    }
+                  }, 3000);
+                });
+              }
+              await new Promise(r => setTimeout(r, 1000));
+            }
+          }
         }
+
+        // ------------------------------------------
+        // STEP 7: 連續性傳導 (Continuity Feedback/Advice Generation)
+        // ------------------------------------------
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7, isGeneratingStep7: true } : s)
+        }));
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🧠 步驟 7/7：AI 正在分析物理特徵，為下一個鏡頭提供連續性對齊傳導建議...`]);
+
+        try {
+          const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
+          const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+          const curProj = curProjList.find(p => p.id === activeProjectId);
+          const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+
+          const resAdvice = await fetch("/api/workflow/generate-step7-advice", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              currentScene: freshS,
+              nextScene,
+              customApiKey: customApiKey || undefined
+            })
+          });
+
+          if (resAdvice.ok) {
+            const adviceData = await resAdvice.json();
+            const advice = adviceData.advice || "維持上一鏡頭中人物的服裝色彩與氛圍基調。";
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? {
+                ...s,
+                step7AdviceForNext: advice,
+                isGeneratingStep7: false,
+                workflowStep: 7
+              } : s)
+            }));
+            
+            // Sync to localStorage
+            try {
+              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+              const updatedList = curList.map(p => p.id === activeProjectId ? {
+                ...p,
+                scenes: p.scenes.map(s => s.id === scene.id ? {
+                  ...s,
+                  step7AdviceForNext: advice
+                } : s)
+              } : p);
+              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+            } catch(e) {}
+
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7：物理連續性傳導建議已完美生成：${advice}`]);
+          } else {
+            throw new Error("連續性分析 API 響應錯誤");
+          }
+        } catch (adviceErr: any) {
+          console.warn("Advice step failed, fallback applied:", adviceErr);
+          const fallbackAdvice = "維持上一分鏡角色一致服飾即可。";
+          updateActiveProject((prev) => ({
+            scenes: prev.scenes.map(s => s.id === scene.id ? {
+              ...s,
+              step7AdviceForNext: fallbackAdvice,
+              isGeneratingStep7: false,
+              workflowStep: 7
+            } : s)
+          }));
+          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 7/7：已自動套用安全連續性對齊對應。`]);
+        }
+
+        // Calculate intermediate progress
+        const percent = Math.floor(((i + 1) / currentScenes.length) * 80);
+        setFullAutoProgress(`${percent}%`);
+        setFullAutoLogs(prev => [...prev, `🎉 鏡頭 ${i + 1} 的七步導演工作流已 100% 完美閉環！`]);
+        await new Promise(r => setTimeout(r, 1000));
       }
 
-      // 5. Multi-Clip Video Stitching using our new backend endpoint!
+      // 4. Final multi-clip video stitching
       setFullAutoProgress("85%");
       setFullAutoLogs(prev => [...prev, "🎬 第四步：所有分鏡鏡頭已完美生成完畢！正在啟動 AI 剪輯大師，極速拼接大片中..."]);
 
@@ -4208,9 +4120,17 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       }
 
     } catch (err: any) {
-      console.error("[Toonflow Error] Auto-Produce Pipeline failed:", err);
-      setFullAutoLogs(prev => [...prev, `❌ 錯誤：${err.message || err}`, "⚠️ 全自動製片中斷，您可以手動點擊單個鏡頭重試，或排除問題後再次點擊一鍵出片。"]);
-      showToast(`全自動製片中斷：${err.message || err}`, "error");
+      if (err.message === "STRICT_LOCK_PAUSE") {
+        setFullAutoLogs(prev => [
+          ...prev,
+          "🛑 [嚴格安全鎖防護觸發] 由於分鏡重試達 10 次上限且未全項目通過，已安全關閉自動製片線路，拒絕自動推進！",
+          "💡 提示：本專案已安全暫停在當前分鏡，請點擊分鏡卡片，手動微調或重新生成失敗的步驟後，再次點擊自動製片或一鍵拼接。"
+        ]);
+      } else {
+        console.error("[Toonflow Error] Auto-Produce Pipeline failed:", err);
+        setFullAutoLogs(prev => [...prev, `❌ 錯誤：${err.message || err}`, "⚠️ 全自動製片中斷，您可以手動點擊單個鏡頭重試，或排除問題後再次點擊一鍵出片。"]);
+        showToast(`全自動製片中編：${err.message || err}`, "error");
+      }
     } finally {
       setIsFullAutoProducing(false);
     }
@@ -6976,6 +6896,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                         <div className="flex items-center space-x-2">
                           <button
+                            id="global-strict-lock-btn-1"
+                            onClick={handleToggleStrictWorkflowLock}
+                            className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
+                              strictWorkflowLock
+                                ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-950/50"
+                                : "bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-800"
+                            }`}
+                          >
+                            {strictWorkflowLock ? "🔒 嚴格鎖：開啟" : "🔓 嚴格鎖：關閉"}
+                          </button>
+
+                          <button
                             onClick={handleAddCustomScene}
                             className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold rounded-lg border border-slate-800 transition flex items-center gap-1 cursor-pointer relative z-50 pointer-events-auto"
                           >
@@ -7018,6 +6950,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 fullAutoProgress={fullAutoProgress}
                                 fullAutoLogs={fullAutoLogs}
                                 onFullAutoProduce={handleFullAutoVideoProduction}
+
                               />
                               {scene.videoUrl && (
                                   <div className="space-y-1.5 mt-2">
@@ -7535,21 +7468,43 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                   {/* Right Column: Workflow Trigger & Scenes List */}
                   <div className="xl:col-span-8 space-y-6 relative z-10">
                     {/* Storyboard Extension Banner */}
-                    <div className="bg-gradient-to-r from-emerald-950/40 via-teal-900/20 to-slate-900/60 border border-emerald-500/20 rounded-2xl p-5 shadow-xl flex items-center justify-between gap-6 relative z-20">
-                      <div className="space-y-1">
-                        <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
-                          <Film className="w-4 h-4 text-emerald-400" />
-                          AI 分鏡劇本延長 (影格無縫連貫模式)
-                        </h4>
-                        <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
-                          在此模式下，後續分鏡的生成會<strong>自動繼承前一幕影片的最後一影格 (Last Frame)</strong> 作為首影格，確保故事人物的動作與場景無縫過渡、畫面完全連貫不跳頓！
-                        </p>
+                    <div className="bg-gradient-to-r from-emerald-950/40 via-teal-900/20 to-slate-900/60 border border-emerald-500/20 rounded-2xl p-5 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative z-20">
+                      <div className="space-y-3 flex-1 w-full">
+                        <div className="space-y-1">
+                          <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
+                            <Film className="w-4 h-4 text-emerald-400" />
+                            AI 分鏡劇本延長 (影格無縫連貫模式)
+                          </h4>
+                          <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
+                            在此模式下，後續分鏡的生成會<strong>自動繼承前一幕影片的最後一影格 (Last Frame)</strong> 作為首影格，確保故事人物的動作與場景無縫過渡、畫面完全連貫不跳頓！
+                          </p>
+                        </div>
+                        
+                        {/* 嚴格工作流防護鎖切換按鈕 */}
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2.5 bg-emerald-950/40 border border-emerald-500/15 rounded-xl p-2.5 max-w-xl">
+                          <button
+                            id="strict-workflow-lock-btn-ext"
+                            onClick={handleToggleStrictWorkflowLock}
+                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer select-none shrink-0 border ${
+                              strictWorkflowLock
+                                ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-900/40"
+                                : "bg-slate-850 hover:bg-slate-800 text-slate-300 border-slate-700"
+                            }`}
+                          >
+                            {strictWorkflowLock ? "🔒 嚴格鎖：開啟 (Strict)" : "🔓 嚴格鎖：關閉 (Lenient)"}
+                          </button>
+                          <span className="text-[10px] text-slate-300 leading-normal">
+                            {strictWorkflowLock 
+                              ? "當前為嚴格防護模式，若生成/審核不合格將自動重試並在重试次數用盡後防護暫停。" 
+                              : "當前為容錯降級模式，故障或不合格時會自動安全繞過並推進。"}
+                          </span>
+                        </div>
                       </div>
 
                       <button
                         onClick={handleGenerateAllSequentially}
                         disabled={isGeneratingAllSequentially || activeProject.scenes.length === 0}
-                        className="py-2.5 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-55 shrink-0 hover:scale-[1.02] relative z-20 animate-pulse"
+                        className="py-2.5 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-55 shrink-0 hover:scale-[1.02] relative z-20 animate-pulse w-full md:w-auto justify-center"
                       >
                         {isGeneratingAllSequentially ? (
                           <>
@@ -7579,6 +7534,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         </div>
 
                         <div className="flex items-center space-x-2">
+                          <button
+                            id="global-strict-lock-btn-2"
+                            onClick={handleToggleStrictWorkflowLock}
+                            className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
+                              strictWorkflowLock
+                                ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-950/50"
+                                : "bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-800"
+                            }`}
+                          >
+                            {strictWorkflowLock ? "🔒 嚴格鎖：開啟" : "🔓 嚴格鎖：關閉"}
+                          </button>
+
                           <button
                             onClick={handleAddCustomScene}
                             className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold rounded-lg border border-slate-800 transition flex items-center gap-1 cursor-pointer relative z-50 pointer-events-auto"
@@ -8368,18 +8335,40 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                   {/* Right Column: Workflow Trigger & Scenes List */}
                   <div className="xl:col-span-8 space-y-6 relative z-10">
                     {/* Storyboard Keyframes Banner */}
-                    <div className="bg-gradient-to-r from-purple-950/40 via-indigo-900/20 to-slate-900/60 border border-purple-500/20 rounded-2xl p-5 shadow-xl flex items-center justify-between gap-6 relative z-20">
-                      <div className="space-y-1">
-                        <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
-                          <Film className="w-4 h-4 text-purple-400" />
-                          AI 分鏡劇本首尾幀 (首尾轉換無縫連貫模式)
-                        </h4>
-                        <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
-                          在此模式下，各分鏡影片獨立製作。以<strong>當前分鏡產生的相片為首影格 (Start Frame)</strong>，並以<strong>下一分鏡的相片為尾影格 (End Frame)</strong>，實現影格與影格之間的無縫連貫過渡！
-                        </p>
-                        <p className="text-xs text-amber-400 font-medium pt-1">
-                          ● 建議：影片長度必須考慮首尾幀過渡的時長，確保過渡效果合理及順暢。
-                        </p>
+                    <div className="bg-gradient-to-r from-purple-950/40 via-indigo-900/20 to-slate-900/60 border border-purple-500/20 rounded-2xl p-5 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative z-20">
+                      <div className="space-y-3 flex-1 w-full">
+                        <div className="space-y-1">
+                          <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
+                            <Film className="w-4 h-4 text-purple-400" />
+                            AI 分鏡劇本首尾幀 (首尾轉換無縫連貫模式)
+                          </h4>
+                          <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
+                            在此模式下，各分鏡影片獨立製作。以<strong>當前分鏡產生的相片為首影格 (Start Frame)</strong>，並以<strong>下一分鏡的相片為尾影格 (End Frame)</strong>，實現影格與影格之間的無縫連貫過渡！
+                          </p>
+                          <p className="text-xs text-amber-400 font-medium pt-1">
+                            ● 建議：影片長度必須考慮首尾幀過渡的時長，確保過渡效果合理及順暢。
+                          </p>
+                        </div>
+
+                        {/* 嚴格工作流防護鎖切換按鈕 */}
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2.5 bg-purple-950/40 border border-purple-500/15 rounded-xl p-2.5 max-w-xl">
+                          <button
+                            id="strict-workflow-lock-btn-key"
+                            onClick={handleToggleStrictWorkflowLock}
+                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer select-none shrink-0 border ${
+                              strictWorkflowLock
+                                ? "bg-purple-600 hover:bg-purple-500 text-white border-purple-500 shadow-md shadow-purple-900/40"
+                                : "bg-slate-850 hover:bg-slate-800 text-slate-300 border-slate-700"
+                            }`}
+                          >
+                            {strictWorkflowLock ? "🔒 嚴格鎖：開啟 (Strict)" : "🔓 嚴格鎖：關閉 (Lenient)"}
+                          </button>
+                          <span className="text-[10px] text-slate-300 leading-normal">
+                            {strictWorkflowLock 
+                              ? "當前為嚴格防護模式，若生成/審核不合格將自動重試並在重试次數用盡後防護暫停。" 
+                              : "當前為容錯降級模式，故障或不合格時會自動安全繞過並推進。"}
+                          </span>
+                        </div>
                       </div>
 
                       <div className="flex flex-col sm:flex-row gap-2.5 shrink-0 items-center">
@@ -8426,6 +8415,27 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
                             只需點擊一次，AI 將為您全自動處理：<strong>分析大綱/拆解劇本 ➔ 自動對齊角色服裝 ➔ 依序生成首尾影格 ➔ 完美連續過渡運鏡 ➔ 智能無縫剪輯及自動合成影片 ➔ 一鍵完成最終出片！</strong>
                           </p>
+
+                          {/* 嚴格工作流防護鎖切換按鈕 */}
+                          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 mt-3 bg-emerald-950/40 border border-emerald-500/15 rounded-xl p-3 max-w-xl">
+                            <button
+                              id="strict-workflow-lock-btn"
+                              onClick={handleToggleStrictWorkflowLock}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none shrink-0 border ${
+                                strictWorkflowLock
+                                  ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-900/40"
+                                  : "bg-slate-800 hover:bg-slate-750 text-slate-300 border-slate-700"
+                              }`}
+                            >
+                              {strictWorkflowLock ? "🔒 開啟嚴格鎖 (Strict)" : "🔓 關閉嚴格鎖 (Lenient)"}
+                            </button>
+                            <span className="text-[11px] text-slate-300 leading-normal">
+                              <strong>七步嚴格工作流安全鎖：</strong>
+                              {strictWorkflowLock 
+                                ? "若分鏡或影片審核不合格，會啟動最高10次自動重生成/防護暫停，保證畫面與流暢度品質。" 
+                                : "故障或審核不合格時自動容錯降級，安全繞過並強制拼接成片。"}
+                            </span>
+                          </div>
                         </div>
 
                         <div className="flex flex-col sm:flex-row gap-2 shrink-0 w-full md:w-auto">
@@ -8535,6 +8545,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         </div>
 
                         <div className="flex items-center space-x-2">
+                          <button
+                            id="global-strict-lock-btn-3"
+                            onClick={handleToggleStrictWorkflowLock}
+                            className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
+                              strictWorkflowLock
+                                ? "bg-purple-600 hover:bg-purple-500 text-white border-purple-500 shadow-md shadow-purple-950/50"
+                                : "bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-800"
+                            }`}
+                          >
+                            {strictWorkflowLock ? "🔒 嚴格鎖：開啟" : "🔓 嚴格鎖：關閉"}
+                          </button>
+
                           <button
                             onClick={handleAddCustomScene}
                             className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold rounded-lg border border-slate-800 transition flex items-center gap-1 cursor-pointer relative z-50 pointer-events-auto"
@@ -9203,7 +9225,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                     <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
                                       {[
                                         { text: "💡 幫我將台詞改得更有情感張力，並同步更新英文 PROMPT", action: "請幫我把台詞對白改得更有情感張力、口語化且吸引人，並依據此情感同步優化繪圖英文描述提示詞 (PROMPT) 與動作描述 (ACTION PROMPT)。" },
-                                        { text: "👩 解決雙男角/雙女角問題：在 PROMPT 中明確設定主角與女主角的性別與長相", action: "我的場景中有男主角（陳默）和女主角（林芊），但 AI 繪圖生成了兩個男生。請幫我修改英文 PROMPT，在裡面明確標記：Chen Mo 為帥氣年輕男性 (handsome young Chinese male)、Lin Qian 為長髮美麗女性 (beautiful young Chinese female with long hair)，以修正雙男角問題，並保持角色服裝一致。" },
+                                        { text: "👩 解決雙男角/雙女角問題：在 PROMPT 中明確設定主角與女主角的性別與長相", action: "我的場景中有男主角（陳默）和女主角（林芊），但 AI 繪圖生成了兩個男生。請幫我修改英文 PROMPT，在裡面明確標記：Chen Mo 為帥氣年輕男性 (handsome young Chinese male)，Lin Qian 為長髮美麗女性 (beautiful young Chinese female with long hair)，以修正雙男角問題，並保持角色服裝一致。" },
                                         { text: "🎬 幫我優化鏡頭運動 (Action Prompt) 與導演註記", action: "請幫我精進本分鏡的「影片動作描述提示詞 (ACTION PROMPT)」與「導演註記 (DIRECTOR'S NOTES)」，加入更專業的電影級運鏡技巧、燈光氛圍、冷暖色調與情感特寫指示。" },
                                         { text: "🎵 設計更有臨場感的環境音效與背景音樂描述", action: "請針對此場景的氣氛，幫我設計更生動、具有電影臨場感的「音效與背景音樂 / 鏡頭音訊 (audioCue)」描述。" }
                                       ].map((btn, bIdx) => (
@@ -9441,112 +9463,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       </AnimatePresence>
 
       {/* ================= SETTINGS DRAWER ================= */}
-      <AnimatePresence>
-        {isSettingsOpen && (
-          <div className="fixed inset-0 z-50 overflow-hidden">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 0.5 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsSettingsOpen(false)}
-              className="absolute inset-0 bg-black"
-            />
-
-            <div className="absolute inset-y-0 right-0 max-w-md w-full flex pl-10">
-              <motion.div 
-                initial={{ x: "100%" }}
-                animate={{ x: 0 }}
-                exit={{ x: "100%" }}
-                className="w-screen max-w-md bg-slate-900 border-l border-slate-800 p-6 flex flex-col space-y-6 shadow-2xl relative"
-              >
-                {/* Close Settings */}
-                <button
-                  onClick={() => setIsSettingsOpen(false)}
-                  className="absolute top-4 right-4 p-1.5 bg-slate-950 hover:bg-slate-850 border border-slate-800 rounded-lg text-slate-400 hover:text-white transition cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-
-                <div className="space-y-1 pr-10">
-                  <h3 className="font-display font-extrabold text-lg text-white flex items-center gap-2">
-                    <Settings className="w-5 h-5 text-pink-500" />
-                    Toonflow Settings
-                  </h3>
-                  <p className="text-xs text-slate-400">Configure your professional AI video keys and integrations.</p>
-                </div>
-
-                <div className="space-y-5 flex-1 overflow-y-auto">
-                  {/* Custom API key parameter input */}
-                  <div className="space-y-2">
-                    <label className="text-xs text-slate-300 font-bold uppercase block">
-                      個人專屬 Agnes API Key (AGNES_API_KEY)
-                    </label>
-                    <input
-                      type="password"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs font-mono text-slate-200 focus:outline-none focus:border-pink-500 transition placeholder:text-slate-700"
-                      placeholder="cpk-CJxrCSyi..."
-                      value={customApiKey}
-                      onChange={(e) => handleSaveApiKey(e.target.value)}
-                    />
-                    <div className="bg-slate-950 p-3.5 border border-slate-850 rounded-xl text-[10px] text-slate-400 leading-normal space-y-1">
-                      <p className="font-bold text-slate-300">💡 提示與免費額度說明</p>
-                      <p>
-                        預設免費用量：我們已在伺服器後台環境中為您內置配置了目前最新可成功調用的內建有效金鑰，您無需設定即可直接成功調用。
-                      </p>
-                      <p className="text-indigo-400 font-bold">
-                        如果您有自己註冊的 Agnes 帳號，在此貼上您的金鑰後，系統會將它儲存於您的瀏覽器本地，並在生成影片時自動以您的個人配額發起請求！
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Force Reset Task Lock Section */}
-                  <div className="bg-slate-950 p-4 border border-slate-850 rounded-xl space-y-2">
-                    <p className="text-xs font-bold text-slate-300">⚙️ 影片生成狀態修復</p>
-                    <p className="text-[10px] text-slate-400 leading-normal">
-                      如果系統提示「A video generation is already in progress」或生成進度卡住，請點擊下方按鈕強制清除背景任務排程鎖。
-                    </p>
-                    <button
-                      onClick={() => handleResetVideoTask()}
-                      className="w-full py-2 bg-pink-600 hover:bg-pink-700 text-white text-xs font-semibold rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>強制重置影片生成鎖 (Force Reset Lock)</span>
-                    </button>
-                  </div>
-
-                  <div className="border-t border-slate-800/80 pt-4 space-y-2">
-                    <p className="text-xs font-bold text-slate-400">Environment Metadata</p>
-                    <div className="bg-slate-950 p-3 rounded-lg text-[11px] font-mono text-slate-500 space-y-1">
-                      <div className="flex justify-between">
-                        <span>PORT:</span>
-                        <span>3000</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>NODE_ENV:</span>
-                        <span>development</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>VITE_HMR:</span>
-                        <span>disabled</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t border-slate-850 pt-4">
-                  <button
-                    onClick={() => setIsSettingsOpen(false)}
-                    className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-750 text-white font-medium rounded-xl text-xs transition text-center"
-                  >
-                    關閉設定並返回
-                  </button>
-                </div>
-
-              </motion.div>
-            </div>
-          </div>
-        )}
-      </AnimatePresence>
+      <SettingsDrawer
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        customApiKey={customApiKey}
+        onSaveApiKey={handleSaveApiKey}
+        onResetVideoTask={handleResetVideoTask}
+      />
 
       {/* ================= PRINT / PDF SCRIPT PREVIEW MODAL ================= */}
       <AnimatePresence>

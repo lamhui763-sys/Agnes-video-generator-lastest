@@ -141,9 +141,9 @@ def create_video_task(base_url, api_key, payload, timeout):
             return res
         except SystemExit as exc:
             err_str = str(exc)
-            if "503" in err_str and "Service busy" in err_str:
+            if any(term in err_str for term in ("503", "500", "502", "504", "Service busy", "do request failed", "upstream error")):
                 if attempt < max_retries - 1:
-                    print(f"[SYSTEM] Agnes server is busy. Retrying in 10 seconds... (Attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                    print(f"[SYSTEM] Agnes server busy or returned transient error: {err_str}. Retrying in 10 seconds... (Attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                     time.sleep(10)
                 else:
                     raise
@@ -200,7 +200,7 @@ def poll_until_complete(base_url, api_key, timeout, poll_interval, video_id=None
             )
         except SystemExit as exc:
             err_str = str(exc)
-            if "503" in err_str or "502" in err_str or "504" in err_str or "Service busy" in err_str:
+            if any(term in err_str for term in ("503", "500", "502", "504", "Service busy", "do request failed", "upstream error")):
                 print(f"[DEBUG] Polling caught transient error: {err_str}. Retrying...", file=sys.stderr)
                 time.sleep(poll_interval)
                 continue

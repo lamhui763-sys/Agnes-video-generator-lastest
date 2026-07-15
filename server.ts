@@ -695,11 +695,17 @@ async function generateContentWithFallback(options: {
   
   if (isImage) {
     fallbacks = [
+      "gemini-2.5-flash", // modern default which handles standard requests
+      "gemini-2.0-flash",
       "gemini-3.1-flash-image",
       "gemini-3.1-flash-lite-image"
     ];
   } else {
     fallbacks = [
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
+      "gemini-1.5-pro",
       "gemini-3.1-flash-lite",
       "gemini-3.5-flash",
       "gemini-3.1-pro-preview",
@@ -715,7 +721,7 @@ async function generateContentWithFallback(options: {
 
   for (const model of modelsToTry) {
     let attempts = 0;
-    const maxAttempts = 2;
+    const maxAttempts = 3;
     while (attempts < maxAttempts) {
       attempts++;
       try {
@@ -1553,11 +1559,26 @@ app.post("/api/generate", async (req, res) => {
     fs.mkdirSync(assetsDir, { recursive: true });
   }
 
-  // Determine the final synthesized prompt
-  let finalPrompt = prompt;
-  let hasSynthesized = false;
+  activeTask = {
+    status: "in_progress",
+    progress: "1%",
+    logs: [`[SYSTEM] Accepted Agnes AI video generation request. Executing in background...`],
+    prompt: prompt,
+    startTime: Date.now(),
+    apiLatency: "",
+    downloadLatency: "",
+    resourceAllocation: "",
+  };
 
-  const logs: string[] = [];
+  res.json({ message: "Generation started", task: { ...activeTask } });
+
+  // Run the slow setup and Python spawn asynchronously
+  (async () => {
+    try {
+      // Determine the final synthesized prompt
+      let finalPrompt = prompt;
+      let hasSynthesized = false;
+      const logs: string[] = [];
 
   if (visualPrompt || actionPrompt || transitionPrompt || directorNotes) {
     try {
@@ -1666,21 +1687,12 @@ Instructions for synthesis:
     finalPrompt += " [FLUID CONTINUOUS MOTION] The character and camera must transform and move fluidly and continuously from the very first frame to the very last frame without any freezing or pausing.";
   }
 
-  activeTask = {
-    status: "in_progress",
-    progress: "5%",
-    logs: [
-      `[SYSTEM] Starting Agnes AI video generation...`,
-      hasSynthesized 
-        ? `[SYSTEM] AI-Synthesized cinematic video prompt: "${finalPrompt}"` 
-        : `[SYSTEM] Using combined cinematic prompt: "${finalPrompt}"`
-    ],
-    prompt: finalPrompt,
-    startTime: Date.now(),
-    apiLatency: "",
-    downloadLatency: "",
-    resourceAllocation: "",
-  };
+  activeTask.progress = "5%";
+  activeTask.prompt = finalPrompt;
+  activeTask.logs.push(`[SYSTEM] Starting Agnes AI video generation...`);
+  activeTask.logs.push(hasSynthesized 
+         ? `[SYSTEM] AI-Synthesized cinematic video prompt: "${finalPrompt}"` 
+         : `[SYSTEM] Using combined cinematic prompt: "${finalPrompt}"`);
 
   try {
     const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
@@ -2038,12 +2050,17 @@ Instructions for synthesis:
     activeTask.error = userFriendlyMsg;
     activeChildProcess = null; // Important: ensure process is marked null
   }
-
-    res.json({ message: "Generation started", task: { ...activeTask, logs: activeTask.logs.slice(-10) } });
-  } catch (outerErr: any) {
-    console.error("[Toonflow Error] Uncaught error inside /api/generate:", outerErr);
+    } catch (outerErr: any) {
+      console.error("[Toonflow Error] Uncaught error in background task:", outerErr);
+      activeTask.status = "failed";
+      activeTask.error = outerErr?.message || "Uncaught server error in background task";
+    }
+  })();
+} catch (outerErr: any) {
+  if (!res.headersSent) {
     res.status(500).json({ error: outerErr?.message || "Uncaught server error inside /api/generate" });
   }
+}
 });
 
 // Toonflow Feature: AI Prompt Optimizer Endpoint using Gemini/Agnes
@@ -2358,7 +2375,7 @@ async function generateText(prompt: string, engine: 'gemini' | 'agnes' | 'mistra
       const response = await withTimeout(fetchPromise, 120000, new Error("Agnes API text generation timed out"));
       if (!response.ok) {
         const errText = await response.text();
-        console.error(`Agnes API returned status ${response.status}: ${errText}`);
+        console.log(`[Toonflow Info] Agnes API returned status ${response.status}: ${errText}`);
         let parsedErr = errText;
         try { parsedErr = JSON.parse(errText).error?.message || errText; } catch(e){}
         throw new Error(`Agnes API error: ${parsedErr}`);
@@ -2367,8 +2384,8 @@ async function generateText(prompt: string, engine: 'gemini' | 'agnes' | 'mistra
       const data: any = await response.json();
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
-      console.error(`[Toonflow Warning] Agnes AI text generation failed:`, err);
-      throw err;
+      console.log(`[Toonflow Info] Agnes AI text generation bypassed, falling back to Gemini. Reason: ${err.message || err}`);
+      return await generateText(prompt, 'gemini', geminiModel, customApiKey);
     }
   } else if (engine === 'mistral') {
     try {
@@ -2388,15 +2405,15 @@ async function generateText(prompt: string, engine: 'gemini' | 'agnes' | 'mistra
       const response = await withTimeout(fetchPromise, 120000, new Error("Mistral API text generation timed out"));
       if (!response.ok) {
         const errText = await response.text();
-        console.error(`Mistral API returned status ${response.status}: ${errText}`);
+        console.log(`[Toonflow Info] Mistral API returned status ${response.status}: ${errText}`);
         throw new Error(`Mistral API error: ${errText}`);
       }
       
       const data: any = await response.json();
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
-      console.error(`[Toonflow Warning] Mistral AI text generation failed:`, err);
-      throw err;
+      console.log(`[Toonflow Info] Mistral AI text generation bypassed, falling back to Gemini. Reason: ${err.message || err}`);
+      return await generateText(prompt, 'gemini', geminiModel, customApiKey);
     }
   } else {
     const response = await generateContentWithFallback({

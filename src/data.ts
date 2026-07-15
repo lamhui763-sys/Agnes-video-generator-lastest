@@ -40,3 +40,41 @@ export const STYLE_PRESETS = [
     prompt: "Sleek high-tech futuristic sci-fi scene, glowing blue holographic interfaces, chrome and carbon fiber textures, sterile cool-toned lighting, cinematic masterpiece."
   }
 ];
+
+export const NEGATIVE_PRESETS = [
+  {
+    name: "🤖 AI 智慧分析生成",
+    value: "ai-auto"
+  },
+  {
+    name: "🚫 基礎畫質提升 (通用)",
+    value: "general",
+    prompt: "blurry, low resolution, low quality, worst quality, jpeg artifacts, noise, grain, compression artifacts, cropped, out of frame"
+  },
+  {
+    name: "🎬 寫實防畸變 (寫實/電影)",
+    value: "realistic",
+    prompt: "blurry, low quality, worst quality, deformed hands, extra fingers, fused fingers, missing fingers, mutated hands, bad anatomy, bad proportions, extra limbs, missing limbs, distorted face, asymmetrical eyes, cartoon, illustration, drawing, painting, 3d render, cg"
+  },
+  {
+    name: "🌸 二次元極淨化 (動漫)",
+    value: "anime",
+    prompt: "blurry, low quality, worst quality, realistic, photorealistic, 3d, gritty, sketch, monochrome, deformed hands, extra fingers, text, watermark, logo"
+  },
+  {
+    name: "🎨 藝術手繪去雜 (水彩/古風)",
+    value: "artistic",
+    prompt: "photorealistic, photograph, 3d render, cg, blurry, low resolution, low quality, deformed, text, watermark, signature"
+  },
+  {
+    name: "🧸 3D 黏土極平滑 (3D/黏土)",
+    value: "clay",
+    prompt: "blurry, low resolution, low quality, photorealistic, realistic, flat color, sketch, lineart, text, watermark"
+  },
+  {
+    name: "🔇 去字去水印 (純淨版)",
+    value: "pure",
+    prompt: "text, watermark, signature, username, logo, title, subtitles, border, frame, timestamp"
+  }
+];
+
