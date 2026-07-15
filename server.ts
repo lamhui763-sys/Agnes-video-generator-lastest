@@ -1503,16 +1503,24 @@ app.get("/api/video-proxy", async (req, res) => {
 
 // Diagnostic endpoint to test Agnes API key and connectivity
 app.get("/api/test-key", async (req, res) => {
-  const cleanKey = getAgnesApiKey();
-  const obfuscated = cleanKey.length > 8 ? `${cleanKey.substring(0, 6)}...${cleanKey.substring(cleanKey.length - 6)}` : "too short";
+  const cleanKey = getAgnesApiKey(typeof req.query.key === "string" ? req.query.key : undefined);
+  const obfuscated = cleanKey.length > 8 ? `${cleanKey.substring(0, 10)}...${cleanKey.substring(cleanKey.length - 6)}` : "too short";
+  const revokedInEnv = isRevokedAgnesKey(process.env.AGNES_API_KEY || "");
   
   try {
-    // Attempting to hit the Agnes task GET status with a dummy task or list endpoint to verify authorization
-    const response = await fetch("https://apihub.agnes-ai.com/v1/videos/dummy-task-id", {
-      method: "GET",
+    // Prefer a real image-generation probe so we verify the same endpoint used by character design
+    const probeBody = {
+      model: "agnes-image-2.0-flash",
+      prompt: "simple anime character portrait, clean background, test image",
+      size: "512x512",
+    };
+    const response = await fetch("https://apihub.agnes-ai.com/v1/images/generations", {
+      method: "POST",
       headers: {
-        "Authorization": `Bearer ${cleanKey}`
-      }
+        Authorization: `Bearer ${cleanKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(probeBody),
     });
     const status = response.status;
     let bodyText = "";
@@ -1521,15 +1529,24 @@ app.get("/api/test-key", async (req, res) => {
     } catch (e) {}
     
     return res.json({
-      success: status !== 401 && status !== 403,
+      success: response.ok,
       statusCode: status,
       obfuscatedKey: obfuscated,
-      response: bodyText ? bodyText.substring(0, 500) : "No body text"
+      defaultKeyPrefix: AGNES_DEFAULT_API_KEY.slice(0, 12),
+      envKeyWasRevokedAndIgnored: revokedInEnv,
+      message:
+        status === 401 || status === 403
+          ? "金鑰無效：請更新設定中的 Agnes API Key 並重啟伺服器"
+          : response.ok
+            ? "Agnes 繪圖 API 連線正常"
+            : "Agnes 有回應但請求未成功，請查看 response",
+      response: bodyText ? bodyText.substring(0, 500) : "No body text",
     });
   } catch (err: any) {
     return res.json({
       success: false,
-      error: err.message
+      error: err.message,
+      obfuscatedKey: obfuscated,
     });
   }
 });
@@ -3728,8 +3745,82 @@ app.post("/api/generate-image", async (req, res) => {
 
   const resolvedImageNegativePrompt = enrichNegativePromptWithSceneContext(baseNegativePrompt, (finalPrompt || prompt), characterDescription);
 
-  if (resolvedImageNegativePrompt) {
+  // Storyboards can append negative guidance; for avatars keep the main prompt clean
+  // (Agnes sometimes false-flags long NEGATIVE MANDATE blocks as policy violations).
+  if (resolvedImageNegativePrompt && !isAvatar) {
     enhancedPrompt += ` [NEGATIVE PROMPT MANDATE: You MUST explicitly avoid generating any of the following: ${resolvedImageNegativePrompt}]`;
+  }
+
+  /** Map raw Agnes HTTP errors to clear Chinese messages (avoid mislabeling 401 as content policy). */
+  function classifyAgnesImageFailure(errMsg: string): { kind: "auth" | "policy" | "timeout" | "other"; userMessage: string } {
+    const msg = errMsg || "";
+    if (
+      msg.includes("401") ||
+      msg.includes("403") ||
+      msg.includes("无效的令牌") ||
+      msg.includes("無效的令牌") ||
+      msg.includes("Unauthorized") ||
+      msg.includes("invalid token") ||
+      msg.includes("Invalid token")
+    ) {
+      return {
+        kind: "auth",
+        userMessage:
+          "Agnes API 金鑰無效或已過期（401/403）。請到設定頁貼上新的 cpk- 金鑰，或重啟伺服器以載入最新內建金鑰。",
+      };
+    }
+    if (msg.includes("content_policy_violation") || msg.includes("Content policy violation")) {
+      return {
+        kind: "policy",
+        userMessage: "內容違反政策 (Content policy violation) - 請修改您的提示詞（系統將嘗試安全簡化後重試）",
+      };
+    }
+    if (msg.toLowerCase().includes("timeout") || msg.includes("timed out")) {
+      return { kind: "timeout", userMessage: "Agnes 繪圖逾時，請稍後再試。" };
+    }
+    const short = msg.length > 280 ? msg.substring(0, 280) + "..." : msg;
+    return { kind: "other", userMessage: `Agnes AI 繪圖失敗：${short}` };
+  }
+
+  async function callAgnesImageOnce(promptText: string, size: string): Promise<{ url?: string; error?: string }> {
+    const modelsToTry = ["agnes-image-2.0-flash", "agnes-image-2.1-flash"];
+    let lastError = "";
+    for (const model of modelsToTry) {
+      try {
+        const fetchPromise = fetchAgnesWithAuthRetry(
+          "https://apihub.agnes-ai.com/v1/images/generations",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              model,
+              prompt: promptText,
+              size,
+            }),
+          },
+          customApiKey
+        );
+        const response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
+        if (response.ok) {
+          const data: any = await response.json();
+          const url = data?.data?.[0]?.url;
+          if (url) return { url };
+          lastError = "Agnes returned OK but no image URL in response";
+        } else {
+          let bodyText = "";
+          try {
+            bodyText = await response.text();
+          } catch {
+            /* ignore */
+          }
+          lastError = `Agnes API returned status ${response.status}${bodyText ? ": " + bodyText : ""}`;
+          // Auth errors won't succeed on other models either
+          if (response.status === 401 || response.status === 403) break;
+        }
+      } catch (e: any) {
+        lastError = e?.message || String(e);
+      }
+    }
+    return { error: lastError };
   }
 
   try {
@@ -3741,7 +3832,7 @@ app.post("/api/generate-image", async (req, res) => {
       activeEngine = 'agnes';
     }
 
-    console.log(`[Toonflow] Generating ${isAvatar ? "avatar" : "storyboard"} image using ${activeEngine} AI with prompt: ${enhancedPrompt}`);
+    console.log(`[Toonflow] Generating ${isAvatar ? "avatar" : "storyboard"} image using ${activeEngine} AI with prompt: ${enhancedPrompt.substring(0, 200)}...`);
 
     if (activeEngine === 'nanobanana' || activeEngine === 'mistral') {
       // Nano Banana / Mistral AI is our high-speed fallback visualizer matching context
@@ -3760,68 +3851,70 @@ app.post("/api/generate-image", async (req, res) => {
       }
 
       console.log(`[Toonflow] Agnes AI drawing mode is [${agnesImageMode}]. Selected size: ${size}`);
-      const modelsToTry = ["agnes-image-2.0-flash", "agnes-image-2.1-flash"];
-      let response;
-      let lastError;
+      console.log(`[Toonflow] Using Agnes key fingerprint: ${getAgnesApiKey(customApiKey).slice(0, 12)}...`);
 
-      for (const model of modelsToTry) {
-        try {
-          const fetchPromise = fetchAgnesWithAuthRetry(
-            "https://apihub.agnes-ai.com/v1/images/generations",
-            {
-              method: "POST",
-              body: JSON.stringify({
-                model: model,
-                prompt: enhancedPrompt,
-                size: size
-              })
-            },
-            customApiKey
-          );
-
-          response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
-          if (response.ok) break;
-          
-          let bodyText = "";
-          try {
-            bodyText = await response.clone().text();
-          } catch (e) {}
-          lastError = new Error(`Agnes API returned status ${response.status}${bodyText ? ": " + bodyText : ""}`);
-        } catch (e) {
-          lastError = e;
-        }
+      let lastError = "";
+      const primary = await callAgnesImageOnce(enhancedPrompt, size);
+      if (primary.url) {
+        return res.json({
+          imageUrl: primary.url,
+          isAgnesImage: true,
+          message: isAvatar
+            ? "成功使用 Agnes AI 生成角色設計圖！"
+            : "成功使用 Agnes AI 高階繪圖引擎生成高品質分鏡圖像！",
+        });
       }
+      lastError = primary.error || "Unknown Agnes error";
+      console.warn(`[Toonflow Warning] Primary Agnes image call failed: ${lastError}`);
 
-      let succeededWithAgnes = false;
-      if (response && response.ok) {
+      // Retry once with a simplified safe prompt (often recovers policy / overlong-prompt failures)
+      const simplePrompt = isAvatar
+        ? `Character design reference sheet of ${character || "a person"}, front view and side view, anime style concept art, clean light grey background, consistent face, full body, no text, no watermark. Description: ${(finalPrompt || prompt).slice(0, 300)}`
+        : `Cinematic storyboard scene, single frame, detailed, style: ${styleAddon}. ${(finalPrompt || prompt).slice(0, 400)}. No text, no watermark.`;
+      const retry = await callAgnesImageOnce(simplePrompt, size);
+      if (retry.url) {
+        return res.json({
+          imageUrl: retry.url,
+          isAgnesImage: true,
+          message: "Agnes 首次請求未通過，已用安全簡化提示詞成功生成圖像！",
+        });
+      }
+      if (retry.error) lastError = retry.error;
+
+      const classified = classifyAgnesImageFailure(lastError);
+      console.warn(`[Toonflow Warning] Agnes image generation failed (${classified.kind}): ${lastError}`);
+
+      // Auth failure: return clear message — do not pretend it is content policy
+      if (classified.kind === "auth") {
+        // Still try Pollinations so the UI is not completely blocked
         try {
-          const data: any = await response.json();
-          if (data && data.data && data.data[0] && data.data[0].url) {
-            succeededWithAgnes = true;
-            return res.json({ 
-              imageUrl: data.data[0].url,
-              isAgnesImage: true,
-              message: "成功使用 Agnes AI 高階繪圖引擎生成高品質分鏡圖像！"
+          console.log("[Toonflow] Agnes auth failed — attempting Pollinations emergency fallback...");
+          const cleanPollinationsPrompt = isAvatar
+            ? `Character design sheet of ${character || "character"}, multiple angles, front and side view. Style: ${styleAddon}. ${(finalPrompt || prompt).slice(0, 400)}`
+            : `${(finalPrompt || prompt).slice(0, 500)}. Style: ${styleAddon}`;
+          const pollinationsUrl = `https://image.pollinations.ai/p/${encodeURIComponent(cleanPollinationsPrompt.slice(0, 900))}?width=${isAvatar ? "1024" : "1024"}&height=${isAvatar ? "1024" : "576"}&nologo=true`;
+          const pollinationsRes = await withTimeout(fetch(pollinationsUrl), 20000, new Error("Pollinations timeout"));
+          if (pollinationsRes.ok) {
+            const arrayBuffer = await pollinationsRes.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            const filename = `pollinations-fallback-${Date.now()}.png`;
+            const localPath = path.join(process.cwd(), "assets", filename);
+            fs.writeFileSync(localPath, buffer);
+            return res.json({
+              imageUrl: `/assets/${filename}`,
+              isAgnesImage: false,
+              message: "⚠️ Agnes API 金鑰無效，已改用 Pollinations 備用引擎生成（請更新設定中的 Agnes 金鑰）",
             });
           }
         } catch (e) {
-          lastError = e;
+          /* fall through */
         }
+        return res.status(401).json({ error: classified.userMessage });
       }
 
-      if (!succeededWithAgnes) {
-        const errMsg = lastError?.message || '';
-        if (errMsg.includes("content_policy_violation") || errMsg.includes("Content policy violation")) {
-          return res.status(400).json({ error: "內容違反政策 (Content policy violation) - 請修改您的提示詞" });
-        }
-        console.warn(`[Toonflow Warning] agnes AI Image generation failed or timed out: ${errMsg}`);
-        
-        // Strict Agnes mode: do not fall back to Gemini if the user strictly requested Agnes,
-        // to avoid consuming Gemini quota or falling back when they only want Agnes.
-        if (activeEngine === 'agnes') {
-          return res.status(500).json({ error: `Agnes AI 繪圖生成失敗：${errMsg}。請稍後再試。` });
-        }
-
+      // Non-auth failure: continue into Gemini / Pollinations fallback chain below
+      // (removed hard-fail that blocked all recovery when engine=agnes)
+      {
         let geminiImageUrl = null;
         if (!isGeminiImageQuotaExhausted) {
           const aspectRatio = isAvatar ? "1:1" : "16:9";
