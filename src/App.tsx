@@ -143,10 +143,18 @@ export default function App() {
 
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const activeProject = projects.find(p => p.id === activeProjectId) || null;
-  const [activeTab, setActiveTab] = useState<"novel" | "characters" | "scenes" | "scenes_ext" | "gallery">("scenes");
+  const [activeTab, setActiveTab] = useState<"novel" | "characters" | "scenes" | "scenes_ext" | "scenes_keyframes" | "gallery">("scenes");
   
   // Settings & Custom API Keys
-  const [customApiKey, setCustomApiKey] = useState<string>("cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8");
+  // Built-in default after Agnes platform key reset (old cpk-CJxrCSyi... was revoked → 401 无效的令牌)
+  const DEFAULT_AGNES_API_KEY = "cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J";
+  const REVOKED_AGNES_API_KEYS = [
+    "cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8",
+  ];
+  const isRevokedAgnesKey = (key: string) =>
+    REVOKED_AGNES_API_KEYS.some((r) => key === r || key.startsWith(r.slice(0, 18)));
+
+  const [customApiKey, setCustomApiKey] = useState<string>(DEFAULT_AGNES_API_KEY);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState<boolean>(false);
   
@@ -499,10 +507,17 @@ export default function App() {
       }
     }
 
-    if (savedKey) {
+    // Auto-migrate revoked / reset Agnes keys from browser cache (fixes 401 无效的令牌)
+    if (savedKey && !isRevokedAgnesKey(savedKey.trim())) {
       setCustomApiKey(savedKey);
     } else {
-      setCustomApiKey("cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8");
+      if (savedKey && isRevokedAgnesKey(savedKey.trim())) {
+        console.warn("[Toonflow] Detected revoked Agnes API key in localStorage. Migrating to new default key.");
+      }
+      setCustomApiKey(DEFAULT_AGNES_API_KEY);
+      try {
+        localStorage.setItem("agnes_custom_api_key", DEFAULT_AGNES_API_KEY);
+      } catch (e) {}
     }
 
     if (savedProjects) {
@@ -876,10 +891,17 @@ export default function App() {
     saveProjects([defaultProject]);
   };
 
-  // Sync saved key to localStorage
+  // Sync saved key to localStorage (block writing revoked keys)
   const handleSaveApiKey = (key: string) => {
-    setCustomApiKey(key);
-    localStorage.setItem("agnes_custom_api_key", key);
+    const trimmed = (key || "").trim();
+    if (isRevokedAgnesKey(trimmed)) {
+      setCustomApiKey(DEFAULT_AGNES_API_KEY);
+      localStorage.setItem("agnes_custom_api_key", DEFAULT_AGNES_API_KEY);
+      showToast("偵測到已失效的舊 Agnes 金鑰，已自動更新為目前有效的預設金鑰。", "info");
+      return;
+    }
+    setCustomApiKey(trimmed);
+    localStorage.setItem("agnes_custom_api_key", trimmed);
   };
 
   const [copiedSceneId, setCopiedSceneId] = useState<string | null>(null);
@@ -1725,7 +1747,12 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // Storyboard Image Generation (calls Gemini-3.1-flash-image)
-  const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
+  // fieldMode: force which image field to write (needed by full-auto / sequential pipelines regardless of active tab)
+  const handleGenerateImage = async (
+    sceneId: string,
+    engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes',
+    fieldMode?: 'standard' | 'ext' | 'keyframes'
+  ) => {
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -1734,8 +1761,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     } catch(e) {}
     if (!freshActiveProject) return;
     
-    const isGenField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
-    const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
+    const resolvedMode = fieldMode ?? (
+      activeTab === "scenes_ext" ? "ext" :
+      activeTab === "scenes_keyframes" ? "keyframes" :
+      "standard"
+    );
+    const isGenField = resolvedMode === "ext" ? "isGeneratingImageExt" : (resolvedMode === "keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
+    const imageField = resolvedMode === "ext" ? "imageUrlExt" : (resolvedMode === "keyframes" ? "imageUrlKeyframes" : "imageUrl");
 
     // Update loading state
     updateActiveProject((prev) => ({
@@ -2689,7 +2721,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               "videoLogsExt", 
               "isGeneratingVideoExt", 
               "videoErrorExt", 
-              "videoErrorExtCode", 
+              "videoErrorCodeExt", 
               () => handleGenerateVideoExtended(sceneId, index)
             );
             if (handled) {
@@ -2724,7 +2756,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                          videoProgressExt: "100%",
                          videoLogsExt: [...logs, "[SYSTEM] Video generated and mapped successfully!"],
                          videoErrorExt: statusData.error,
-                         videoErrorExtCode: statusData.errorCode
+                         videoErrorCodeExt: statusData.errorCode
                        };
                      } else if (status === "failed") {
                        clearInterval(intervalId);
@@ -2733,7 +2765,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                          ...s,
                          isGeneratingVideoExt: false,
                          videoErrorExt: statusData.error || "Generation process failed",
-                         videoErrorExtCode: statusData.errorCode,
+                         videoErrorCodeExt: statusData.errorCode,
                          videoLogsExt: logs,
                          isRetryingPolicy: false
                        };
@@ -2819,9 +2851,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           continue;
         }
 
-        // Generate the image first if missing
+        // Generate the image first if missing (force Ext field regardless of active tab)
         if (!scene.imageUrlExt) {
-          await handleGenerateImage(scene.id, 'agnes');
+          await handleGenerateImage(scene.id, 'agnes', 'ext');
           // Wait for React to process the state update and localStorage
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
@@ -3464,13 +3496,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         "🎥 正在啟動七步工作流大師引擎，將對每個分鏡進行完整的 [接收建議 ➔ 提示詞優化 ➔ 關鍵幀繪製 ➔ 物理合理審查 ➔ 運鏡合成 ➔ 流暢度稽核 ➔ 連續性傳導] 閉環..."
       ]);
 
-      const isGenImgField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
-      const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
+      // Full-auto 7-step pipeline always uses keyframes fields (independent of UI tab)
+      const isGenImgField = "isGeneratingImageKeyframes" as const;
+      const imageField = "imageUrlKeyframes" as const;
       
-      const isGenVidField = activeTab === "scenes_ext" ? "isGeneratingVideoExt" : (activeTab === "scenes_keyframes" ? "isGeneratingVideoKeyframes" : "isGeneratingVideo");
-      const videoField = activeTab === "scenes_ext" ? "videoUrlExt" : (activeTab === "scenes_keyframes" ? "videoUrlKeyframes" : "videoUrl");
-      const progressField = activeTab === "scenes_ext" ? "videoProgressExt" : (activeTab === "scenes_keyframes" ? "videoProgressKeyframes" : "videoProgress");
-      const errorField = activeTab === "scenes_ext" ? "videoErrorExt" : (activeTab === "scenes_keyframes" ? "videoErrorKeyframes" : "videoError");
+      const isGenVidField = "isGeneratingVideoKeyframes" as const;
+      const videoField = "videoUrlKeyframes" as const;
+      const progressField = "videoProgressKeyframes" as const;
+      const errorField = "videoErrorKeyframes" as const;
 
       for (let i = 0; i < currentScenes.length; i++) {
         const scene = currentScenes[i];
@@ -3557,7 +3590,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           imgRetryCount++;
           setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎨 步驟 3/7：正在呼叫 AI 畫師繪製首影格極致畫面 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
           
-          await handleGenerateImage(scene.id, 'agnes');
+          await handleGenerateImage(scene.id, 'agnes', 'keyframes');
 
           // Wait/Poll until generation flag is false and URL is present
           try {
@@ -3742,7 +3775,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               // Trigger a re-draw under strict lock
               if (strictWorkflowLock) {
                 setFullAutoLogs(prev => [...prev, `🔄 由於畫面審核未通過，重新為鏡頭 ${i + 1} 重新繪製首格影像...`]);
-                await handleGenerateImage(scene.id, 'agnes');
+                await handleGenerateImage(scene.id, 'agnes', 'keyframes');
                 await new Promise<void>((resolve) => {
                   const checkImgInterval = setInterval(() => {
                     const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];

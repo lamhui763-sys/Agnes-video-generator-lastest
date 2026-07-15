@@ -9,8 +9,9 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
 
-// Load environment variables
+// Load environment variables (.env then .env.local overrides)
 dotenv.config();
+dotenv.config({ path: ".env.local", override: true });
 
 // Disable SSL rejection for external file servers in sandbox environment
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -29,10 +30,23 @@ function sanitizeApiKey(key: string | undefined): string {
   return clean.trim();
 }
 
-// Robust helper to retrieve and sanitize Agnes API key, ignoring placeholder values
+// Latest working built-in Agnes key after platform.agnes-ai.com key reset.
+// Old key cpk-CJxrCSyi... was revoked by Agnes and must never be sent again (401 无效的令牌).
+const AGNES_DEFAULT_API_KEY = "cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J";
+const AGNES_REVOKED_API_KEYS = [
+  "cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8",
+];
+
+function isRevokedAgnesKey(key: string | undefined): boolean {
+  if (!key) return false;
+  const clean = sanitizeApiKey(key);
+  return AGNES_REVOKED_API_KEYS.some(
+    (revoked) => clean === revoked || clean.startsWith(revoked.slice(0, 18))
+  );
+}
+
+// Robust helper to retrieve and sanitize Agnes API key, ignoring placeholder / revoked values
 function getAgnesApiKey(customApiKey?: string): string {
-  const defaultSubscribedKey = "cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8";
-  
   let rawKey = "";
   if (customApiKey && customApiKey.trim()) {
     rawKey = customApiKey.trim();
@@ -45,9 +59,10 @@ function getAgnesApiKey(customApiKey?: string): string {
       rawKey === "YOUR_AGNES_API_KEY" || 
       rawKey.includes("PLACEHOLDER") ||
       rawKey === "YOUR_KEY" ||
-      rawKey === "MY_KEY"
+      rawKey === "MY_KEY" ||
+      isRevokedAgnesKey(rawKey)
   ) {
-    return defaultSubscribedKey;
+    return AGNES_DEFAULT_API_KEY;
   }
   
   // Apply sanitization
@@ -57,9 +72,63 @@ function getAgnesApiKey(customApiKey?: string): string {
   if (rawKey.includes("cpk-") && !clean.startsWith("cpk-")) {
     clean = "cpk-" + clean.replace(/^cpk-?/, "");
   }
+
+  if (isRevokedAgnesKey(clean) || !clean) {
+    return AGNES_DEFAULT_API_KEY;
+  }
   
   return clean;
 }
+
+/**
+ * Call Agnes API with automatic 401 recovery:
+ * if a user/custom key is rejected, retry once with env or built-in default key.
+ */
+async function fetchAgnesWithAuthRetry(
+  url: string,
+  init: RequestInit,
+  customApiKey?: string
+): Promise<Response> {
+  const primaryKey = getAgnesApiKey(customApiKey);
+  const headers = new Headers(init.headers || {});
+  headers.set("Authorization", `Bearer ${primaryKey}`);
+  if (!headers.has("Content-Type") && init.body) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  let response = await fetch(url, { ...init, headers });
+
+  if (response.status === 401 && primaryKey !== AGNES_DEFAULT_API_KEY) {
+    console.warn(
+      `[Toonflow] Agnes API returned 401 for custom/env key. Falling back to built-in default key...`
+    );
+    try { await response.text(); } catch { /* ignore */ }
+
+    const fallbackHeaders = new Headers(init.headers || {});
+    fallbackHeaders.set("Authorization", `Bearer ${AGNES_DEFAULT_API_KEY}`);
+    if (!fallbackHeaders.has("Content-Type") && init.body) {
+      fallbackHeaders.set("Content-Type", "application/json");
+    }
+    response = await fetch(url, { ...init, headers: fallbackHeaders });
+  }
+
+  return response;
+}
+
+/** Resolve a working Python executable (Windows often only has `python`, not `python3`). */
+function resolvePythonCommand(): string {
+  for (const cmd of ["python3", "python"]) {
+    try {
+      execSync(`${cmd} --version`, { stdio: "ignore" });
+      return cmd;
+    } catch {
+      // try next
+    }
+  }
+  return process.platform === "win32" ? "python" : "python3";
+}
+
+const PYTHON_CMD = resolvePythonCommand();
 
 // Pre-fetch/cache a public image to prevent Pollinations dynamic image generation timeouts on external endpoints
 function downloadImage(url: string, destPath: string): Promise<void> {
@@ -264,23 +333,52 @@ async function uploadToFreeImageHost(localPath: string): Promise<string> {
   }
 }
 
-// Robust CDN upload manager: attempts freeimage.host first for images, falls back to catbox, then tmpfiles, then qu.ax
+// Robust CDN for Agnes storyboard frames:
+// FreeImageHost (no hotlink block) → Catbox → qu.ax → tmpfiles last.
+// tmpfiles.org Cloudflare hotlink/bot rules cause Agnes HTTP 400 invalid_request.
 async function uploadToPublicCDN(localPath: string, activeTaskLogs?: string[]): Promise<string> {
   const ext = path.extname(localPath).toLowerCase();
   const isImage = [".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext);
+  const absPath = path.resolve(localPath);
 
   if (isImage) {
     try {
-      if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] 正在上傳圖片至 FreeImageHost 影像 CDN (推薦影像端)...`);
+      if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] 正在上傳圖片至 FreeImageHost 影像 CDN（無熱連限制，Agnes 友善）...`);
       const freeimageUrl = await uploadToFreeImageHost(localPath);
+      registerCloudMapping(freeimageUrl, absPath);
+      if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] FreeImageHost 上傳成功：${freeimageUrl}`);
       return freeimageUrl;
     } catch (freeimageErr: any) {
-      console.log(`[Toonflow CDN] FreeImageHost upload bypassed, trying backup: ${freeimageErr.message}`);
-      if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] FreeImageHost 上傳失敗，正在切換至備用雲端儲存...`);
-      return await uploadFileToCatbox(localPath);
+      console.log(`[Toonflow CDN] FreeImageHost upload bypassed, trying Catbox: ${freeimageErr.message}`);
+      if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] FreeImageHost 上傳失敗，切換至 Catbox 備用 CDN...`);
+      try {
+        const catboxUrl = await uploadToCatbox(localPath);
+        registerCloudMapping(catboxUrl, absPath);
+        if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] Catbox 上傳成功：${catboxUrl}`);
+        return catboxUrl;
+      } catch (catboxErr: any) {
+        console.log(`[Toonflow CDN] Catbox bypassed, trying qu.ax: ${catboxErr.message}`);
+        if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] Catbox 失敗，切換至 qu.ax...`);
+        try {
+          const quaxUrl = await uploadToQuax(localPath);
+          registerCloudMapping(quaxUrl, absPath);
+          return quaxUrl;
+        } catch {
+          if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] 警告：主要 CDN 皆失敗，最後嘗試 tmpfiles（可能被熱連攔截）...`);
+          try {
+            const tmpUrl = await uploadToTmpfiles(localPath);
+            registerCloudMapping(tmpUrl, absPath);
+            return tmpUrl;
+          } catch {
+            const localFilename = path.basename(localPath);
+            const relativeUrl = `/assets/${localFilename}`;
+            registerCloudMapping(relativeUrl, absPath);
+            return relativeUrl;
+          }
+        }
+      }
     }
   } else {
-    // For videos and other file types, use the robust uploader
     if (activeTaskLogs) activeTaskLogs.push(`[SYSTEM] 正在上傳影片/檔案至雲端永久儲存空間...`);
     return await uploadFileToCatbox(localPath);
   }
@@ -330,27 +428,40 @@ async function uploadToCatbox(localPath: string): Promise<string> {
 
 async function uploadFileToCatbox(localPath: string): Promise<string> {
   const absPath = path.resolve(localPath);
+  const ext = path.extname(localPath).toLowerCase();
+  const isImage = [".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext);
+
+  // Images: FreeImageHost first (Agnes-friendly), then Catbox — never prefer tmpfiles
+  if (isImage) {
+    try {
+      const freeimageUrl = await uploadToFreeImageHost(localPath);
+      registerCloudMapping(freeimageUrl, absPath);
+      return freeimageUrl;
+    } catch {
+      // fall through to Catbox chain
+    }
+  }
+
   try {
     console.log(`[Toonflow CDN] Uploading ${localPath} to Catbox...`);
     const catboxUrl = await uploadToCatbox(localPath);
     registerCloudMapping(catboxUrl, absPath);
     return catboxUrl;
   } catch (err: any) {
-    console.log(`[Toonflow CDN] Catbox upload bypassed, trying Tmpfiles backup`);
+    console.log(`[Toonflow CDN] Catbox upload bypassed, trying Qu.ax (skipping tmpfiles for Agnes compatibility)`);
     try {
-      const tmpfilesUrl = await uploadToTmpfiles(localPath);
-      console.log(`[Toonflow CDN] File successfully uploaded to Tmpfiles backup: ${tmpfilesUrl}`);
-      registerCloudMapping(tmpfilesUrl, absPath);
-      return tmpfilesUrl;
-    } catch (tmpfilesErr: any) {
-      console.log(`[Toonflow CDN] Tmpfiles upload bypassed, trying Qu.ax last fallback`);
+      const quaxUrl = await uploadToQuax(localPath);
+      console.log(`[Toonflow CDN] File successfully uploaded to Qu.ax backup: ${quaxUrl}`);
+      registerCloudMapping(quaxUrl, absPath);
+      return quaxUrl;
+    } catch (quaxErr: any) {
       try {
-        const quaxUrl = await uploadToQuax(localPath);
-        console.log(`[Toonflow CDN] File successfully uploaded to Qu.ax backup: ${quaxUrl}`);
-        registerCloudMapping(quaxUrl, absPath);
-        return quaxUrl;
-      } catch (quaxErr: any) {
-        console.log("[Toonflow CDN] External cloud uploads bypassed. Gracefully falling back to local static asset serving.");
+        const tmpfilesUrl = await uploadToTmpfiles(localPath);
+        console.log(`[Toonflow CDN] Tmpfiles last-resort upload: ${tmpfilesUrl}`);
+        registerCloudMapping(tmpfilesUrl, absPath);
+        return tmpfilesUrl;
+      } catch {
+        console.log("[Toonflow CDN] External cloud uploads bypassed. Falling back to local static asset serving.");
         const localFilename = path.basename(localPath);
         const relativeUrl = `/assets/${localFilename}`;
         registerCloudMapping(relativeUrl, absPath);
@@ -848,7 +959,6 @@ async function generateContentWithFallback(options: {
   if (!isImage && !hasImage) {
     console.log("[Toonflow Info] All Gemini fallback models failed. Activating Agnes AI text model as fail-safe backup...");
     try {
-      const sanitizedAgnesKey = getAgnesApiKey(options.customApiKey);
       let fullPromptText = "";
       
       // Combine systemInstruction and contents
@@ -870,17 +980,17 @@ async function generateContentWithFallback(options: {
         }
       }
 
-      const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${sanitizedAgnesKey}`,
-          "Content-Type": "application/json"
+      const fetchPromise = fetchAgnesWithAuthRetry(
+        "https://apihub.agnes-ai.com/v1/chat/completions",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            model: "agnes-2.0-flash",
+            messages: [{ role: "user", content: fullPromptText }]
+          })
         },
-        body: JSON.stringify({
-          model: "agnes-2.0-flash",
-          messages: [{ role: "user", content: fullPromptText }]
-        })
-      });
+        options.customApiKey
+      );
 
       const response = await withTimeout(fetchPromise, 120000, new Error("Agnes API text generation timed out"));
       if (response.ok) {
@@ -1951,12 +2061,14 @@ Instructions for synthesis:
         activeTask.logs = activeTask.logs.slice(-100);
       }
       activeTask.logs.push(`[SYSTEM] Spawning Python background process to interface with Agnes API...`);
+      activeTask.logs.push(`[SYSTEM] Using Python command: ${PYTHON_CMD}`);
     
-    const child = spawn("python3", args, {
+    const child = spawn(PYTHON_CMD, args, {
       env: {
         ...process.env,
         AGNES_API_KEY: sanitizedAgnesKey
-      }
+      },
+      shell: process.platform === "win32"
     });
 
     activeChildProcess = child;
@@ -2427,19 +2539,17 @@ Please review this scene and provide the evaluation in JSON format.`;
 async function generateText(prompt: string, engine: 'gemini' | 'agnes' | 'mistral', geminiModel: string, customApiKey?: string): Promise<string> {
   if (engine === 'agnes') {
     try {
-      const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
-
-      const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${sanitizedAgnesKey}`,
-          "Content-Type": "application/json"
+      const fetchPromise = fetchAgnesWithAuthRetry(
+        "https://apihub.agnes-ai.com/v1/chat/completions",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            model: "agnes-2.0-flash",
+            messages: [{ role: "user", content: prompt }]
+          })
         },
-        body: JSON.stringify({
-          model: "agnes-2.0-flash",
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
+        customApiKey
+      );
       
       const response = await withTimeout(fetchPromise, 120000, new Error("Agnes API text generation timed out"));
       if (!response.ok) {
@@ -3428,7 +3538,7 @@ app.post("/api/stitch-videos", async (req, res) => {
     sendLog("🎞️ 正在向剪輯核心提交已生成的分鏡影片檔案...");
 
     // Run ffmpeg with spawn and stream logs
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs, { shell: process.platform === "win32" });
     ffmpeg.stderr.on('data', (data) => {
         // Optionally stream stderr log
     });
@@ -3642,8 +3752,6 @@ app.post("/api/generate-image", async (req, res) => {
         message: `成功使用 ${activeEngine === 'mistral' ? 'Mistral AI' : 'Nano Banana'} 高速繪圖引擎生成視覺預覽！`
       });
     } else if (activeEngine === 'agnes') {
-      const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
-
       let size = isAvatar ? "1024x1024" : "1024x576";
       if (agnesImageMode === "fast") {
         size = isAvatar ? "512x512" : "768x432";
@@ -3658,18 +3766,18 @@ app.post("/api/generate-image", async (req, res) => {
 
       for (const model of modelsToTry) {
         try {
-          const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/images/generations", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${sanitizedAgnesKey}`,
-              "Content-Type": "application/json"
+          const fetchPromise = fetchAgnesWithAuthRetry(
+            "https://apihub.agnes-ai.com/v1/images/generations",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                model: model,
+                prompt: enhancedPrompt,
+                size: size
+              })
             },
-            body: JSON.stringify({
-              model: model,
-              prompt: enhancedPrompt,
-              size: size
-            })
-          });
+            customApiKey
+          );
 
           response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
           if (response.ok) break;
@@ -3863,24 +3971,23 @@ app.post("/api/generate-image", async (req, res) => {
         });
       } else {
         console.log("[Toonflow] Attempting fallback to Agnes AI image generation...");
-        const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
         const size = isAvatar ? "1024x1024" : "1024x576";
         const modelsToTry = ["agnes-image-2.0-flash", "agnes-image-2.1-flash"];
         let response;
         for (const model of modelsToTry) {
           try {
-            const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/images/generations", {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${sanitizedAgnesKey}`,
-                "Content-Type": "application/json"
+            const fetchPromise = fetchAgnesWithAuthRetry(
+              "https://apihub.agnes-ai.com/v1/images/generations",
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  model: model,
+                  prompt: enhancedPrompt,
+                  size: size
+                })
               },
-              body: JSON.stringify({
-                model: model,
-                prompt: enhancedPrompt,
-                size: size
-              })
-            });
+              customApiKey
+            );
             response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
             if (response.ok) break;
           } catch (e) {}

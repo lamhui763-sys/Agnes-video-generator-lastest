@@ -61,14 +61,14 @@ export const SettingsDrawer = ({
                   <input
                     type="password"
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs font-mono text-slate-200 focus:outline-none focus:border-pink-500 transition placeholder:text-slate-700"
-                    placeholder="cpk-CJxrCSyi..."
+                    placeholder="cpk-oTHuYiCU..."
                     value={customApiKey}
                     onChange={(e) => onSaveApiKey(e.target.value)}
                   />
                   <div className="bg-slate-950 p-3.5 border border-slate-850 rounded-xl text-[10px] text-slate-400 leading-normal space-y-1">
                     <p className="font-bold text-slate-300">💡 提示與免費額度說明</p>
                     <p>
-                      預設免費用量：我們已在伺服器後台環境中為您內置配置了目前最新可成功調用的內建有效金鑰，您無需設定即可直接成功調用。
+                      預設免費用量：系統已內置最新有效 Agnes 金鑰。若您在 platform.agnes-ai.com 重置過金鑰，舊的 cpk-CJxrCSyi... 會自動被清除並遷移，避免 401 无效的令牌。
                     </p>
                     <p className="text-indigo-400 font-bold">
                       如果您有自己註冊的 Agnes 帳號，在此貼上您的金鑰後，系統會將它儲存於您的瀏覽器本地，並在生成影片時自動以您的個人配額發起請求！
