@@ -2651,6 +2651,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             customApiKey: customApiKey || undefined,
             durationSeconds: targetScene.durationSeconds,
             agnesVideoMode: activeProject.agnesVideoMode || "quality",
+            useFreezeAndMove: targetScene.step5Mode === "transition" || targetScene.useFreezeAndMove,
+            useMidpointSplit: targetScene.useMidpointSplit,
             sceneIndex: index,
             sceneType: activeTab === "scenes_ext" ? "ext" : (activeTab === "scenes_keyframes" ? "keyframes" : "standard")
           })
@@ -3780,6 +3782,11 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         const curProj = curProjects.find(p => p.id === activeProjectId);
         const freshScene = curProj?.scenes.find(s => s.id === scene.id) || scene;
 
+        // Sync the local UI tab to Step 3 so the user can see what's happening
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
+        }));
+
         if (!freshScene.imageUrlKeyframes) {
           setFullAutoLogs(prev => [...prev, `🖌️ 正在繪製分鏡 ${i + 1} 「${scene.title}」之首影格精準畫面...`]);
           
@@ -3924,16 +3931,21 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           }
         }
 
-        if (freshScene.videoUrlKeyframes) {
+        if (freshScene.videoUrl) {
           setFullAutoLogs(prev => [...prev, `✨ 分鏡 ${i + 1} 「${scene.title}」影片已就緒，直接套用。`]);
           continue;
         }
+        
+        // Sync the local UI tab to Step 5 so the user can see what's happening
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 5 } : s)
+        }));
 
-        setFullAutoLogs(prev => [...prev, `📹 正在全自動生成分鏡 ${i + 1} 「${scene.title}」的高動態物理過渡影片...`]);
+        setFullAutoLogs(prev => [...prev, `📹 正在全自動生成分鏡 ${i + 1} 「${scene.title}」的連續運鏡影片...`]);
 
         try {
           await new Promise<void>((resolve, reject) => {
-            handleGenerateVideoKeyframes(scene.id, i);
+            handleGenerateVideo(scene.id, true);
 
             const checkInterval = setInterval(() => {
               const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -3941,9 +3953,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               const curScene = curProj?.scenes.find(s => s.id === scene.id);
               
               if (curScene) {
-                if (curScene.videoProgressKeyframes && curScene.videoProgressKeyframes !== "0%" && curScene.videoProgressKeyframes !== "100%") {
+                if (curScene.videoProgress && curScene.videoProgress !== "0%" && curScene.videoProgress !== "100%") {
+                  const progressValue = parseInt(curScene.videoProgress) || 0;
+                  const baseProgress = 40 + Math.floor(i / currentScenes.length * 35);
+                  const sceneContribution = Math.floor((progressValue / 100) * (35 / currentScenes.length));
+                  setFullAutoProgress(`${Math.min(75, baseProgress + sceneContribution)}%`);
+                  
                   setFullAutoLogs(prev => {
-                    const prefix = `⏳ 鏡頭 ${i + 1} 物理運鏡生成中... 進度 ${curScene.videoProgressKeyframes}`;
+                    const prefix = `⏳ 鏡頭 ${i + 1} 影片生成中... 進度 ${curScene.videoProgress}`;
                     if (prev[prev.length - 1] !== prefix) {
                       return [...prev, prefix];
                     }
@@ -3951,18 +3968,52 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                   });
                 }
 
-                if (!curScene.isGeneratingVideoKeyframes) {
+                if (!curScene.isGeneratingVideo) {
                   clearInterval(checkInterval);
-                  if (curScene.videoUrlKeyframes) {
-                    setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 「${scene.title}」完美運鏡影片生成完畢！`]);
+                  if (curScene.videoUrl) {
+                    setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 「${scene.title}」影片生成完畢！`]);
                     resolve();
                   } else {
-                    reject(new Error(curScene?.videoErrorKeyframes || "未知錯誤"));
+                    reject(new Error(curScene?.videoError || "未知錯誤"));
                   }
                 }
               }
             }, 3000);
           });
+          
+          // Move UI to step 7 (final step) upon success for this scene
+          updateActiveProject((prev) => ({
+            scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7 } : s)
+          }));
+
+          // Generate Step 7 advice automatically for context passing
+          try {
+            setFullAutoLogs(prev => [...prev, `🧠 正在為分鏡 ${i + 1} 分析物理連續性與生成銜接建議...`]);
+            const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
+            const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjects.find(p => p.id === activeProjectId);
+            const curSceneData = curProj?.scenes.find(s => s.id === scene.id) || scene;
+
+            const res = await fetch("/api/workflow/generate-step7-advice", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                currentScene: curSceneData,
+                nextScene,
+                customApiKey: customApiKey || undefined
+              })
+            });
+            if (res.ok) {
+              const data = await res.json();
+              updateActiveProject((prev) => ({
+                scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: data.advice || "維持連續性即可。" } : s)
+              }));
+              setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 銜接建議已生成並自動傳遞！`]);
+            }
+          } catch (e) {
+            // Ignore advice failure in auto mode
+          }
+
         } catch (vidErr: any) {
           setFullAutoLogs(prev => [...prev, `⚠️ 分鏡 ${i + 1} 「${scene.title}」生成失敗：${vidErr.message || vidErr}，先繞過此鏡頭，待其餘鏡頭完成後再進行二次重試處理...`]);
           failedSceneIndices.push(i);
@@ -3990,12 +4041,23 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           try {
             if (scene.id.startsWith("scene_transition_")) {
               setFullAutoLogs(prev => [...prev, `🔄 重新嘗試提取銜接分鏡 ${i + 1} 的前置分鏡結尾影格...`]);
+              
+              // Sync to Step 3 for retry image gen
+              updateActiveProject((prev) => ({
+                scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
+              }));
+              
               await handleGenerateImage(scene.id, 'agnes');
               await new Promise(resolve => setTimeout(resolve, 1000));
             }
 
+            // Sync to Step 5 for retry video gen
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 5 } : s)
+            }));
+
             await new Promise<void>((resolve, reject) => {
-              handleGenerateVideoKeyframes(scene.id, i);
+              handleGenerateVideo(scene.id, true);
 
               const checkInterval = setInterval(() => {
                 const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -4003,9 +4065,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 const curScene = curProj?.scenes.find(s => s.id === scene.id);
                 
                 if (curScene) {
-                  if (curScene.videoProgressKeyframes && curScene.videoProgressKeyframes !== "0%" && curScene.videoProgressKeyframes !== "100%") {
+                  if (curScene.videoProgress && curScene.videoProgress !== "0%" && curScene.videoProgress !== "100%") {
+                    const progressValue = parseInt(curScene.videoProgress) || 0;
+                    const sceneContribution = Math.floor((progressValue / 100) * (10 / failedSceneIndices.length));
+                    const baseProgress = 75 + Math.floor((idx) / failedSceneIndices.length * 10);
+                    setFullAutoProgress(`${Math.min(85, baseProgress + sceneContribution)}%`);
+
                     setFullAutoLogs(prev => {
-                      const prefix = `⏳ 鏡頭 ${i + 1} 重試中... 進度 ${curScene.videoProgressKeyframes}`;
+                      const prefix = `⏳ 鏡頭 ${i + 1} 重試中... 進度 ${curScene.videoProgress}`;
                       if (prev[prev.length - 1] !== prefix) {
                         return [...prev, prefix];
                       }
@@ -4013,18 +4080,51 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     });
                   }
 
-                  if (!curScene.isGeneratingVideoKeyframes) {
+                  if (!curScene.isGeneratingVideo) {
                     clearInterval(checkInterval);
-                    if (curScene.videoUrlKeyframes) {
+                    if (curScene.videoUrl) {
                       setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 「${scene.title}」重試生成成功！`]);
                       resolve();
                     } else {
-                      reject(new Error(curScene?.videoErrorKeyframes || "未知錯誤"));
+                      reject(new Error(curScene?.videoError || "未知錯誤"));
                     }
                   }
                 }
               }, 3000);
             });
+            
+            // Move UI to step 7 upon success
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7 } : s)
+            }));
+
+            // Generate Step 7 advice automatically for context passing
+            try {
+              setFullAutoLogs(prev => [...prev, `🧠 正在為分鏡 ${i + 1} 分析物理連續性與生成銜接建議...`]);
+              const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
+              const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+              const curProj = curProjects.find(p => p.id === activeProjectId);
+              const curSceneData = curProj?.scenes.find(s => s.id === scene.id) || scene;
+  
+              const res = await fetch("/api/workflow/generate-step7-advice", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  currentScene: curSceneData,
+                  nextScene,
+                  customApiKey: customApiKey || undefined
+                })
+              });
+              if (res.ok) {
+                const data = await res.json();
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: data.advice || "維持連續性即可。" } : s)
+                }));
+                setFullAutoLogs(prev => [...prev, `✅ 分鏡 ${i + 1} 銜接建議已生成並自動傳遞！`]);
+              }
+            } catch (e) {
+              // Ignore advice failure in auto mode
+            }
           } catch (retryErr: any) {
             setFullAutoLogs(prev => [...prev, `❌ 分鏡 ${i + 1} 「${scene.title}」多次生成均告無效。原因：${retryErr.message || retryErr}。改為手動。`]);
             stillFailedIndices.push(i);
@@ -6916,6 +7016,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 showToast={showToast}
                                 isFullAutoProducing={isFullAutoProducing}
                                 fullAutoProgress={fullAutoProgress}
+                                fullAutoLogs={fullAutoLogs}
                                 onFullAutoProduce={handleFullAutoVideoProduction}
                               />
                               {scene.videoUrl && (

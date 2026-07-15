@@ -29,6 +29,7 @@ interface SceneItemProps {
   showToast: (message: string, type: 'success' | 'error') => void;
   isFullAutoProducing?: boolean;
   fullAutoProgress?: string;
+  fullAutoLogs?: string[];
   onFullAutoProduce?: () => void;
 }
 
@@ -57,6 +58,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
   showToast,
   isFullAutoProducing,
   fullAutoProgress,
+  fullAutoLogs,
   onFullAutoProduce
 }) => {
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -253,6 +255,24 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
       showToast("AI 生成超時，已加載默認分鏡銜接建議。", "success");
     }
   };
+
+  const getPrevAdvice = () => {
+    if (index === 0) return "本鏡頭為整部影片的第一個開場畫面，無需接收任何前置建議，將以原著設定直接展開。";
+    if (scene.step1PrevShotAdvice) return scene.step1PrevShotAdvice;
+    
+    // Auto backtrack to find valid advice
+    for (let i = index - 1; i >= 0; i--) {
+      if (scenes[i]?.step7AdviceForNext) {
+        if (i === index - 1) {
+          return scenes[i].step7AdviceForNext;
+        } else {
+          return `(自動回溯至分鏡 ${i + 1} 的連續性建議)：` + scenes[i].step7AdviceForNext;
+        }
+      }
+    }
+    return "⚠️ 提示：前置鏡頭皆無強制傳遞之連續性建議，或為跳過/失敗狀態。目前連續性較弱，建議修復前面鏡頭以提升整體影片流暢度，或您可以直接維持本鏡頭獨立之敘事連貫性，點擊進入下一步。";
+  };
+
   return (
     <div 
       key={scene.id}
@@ -279,7 +299,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
 
       {/* Global Auto Generation Trigger for the whole workflow */}
       {index === 0 && onFullAutoProduce && (
-        <div className="md:col-span-12 mb-2 pb-2 border-b border-slate-800">
+        <div className="md:col-span-12 mb-2 pb-2 border-b border-slate-800 flex flex-col gap-2">
           <button
             onClick={onFullAutoProduce}
             disabled={isFullAutoProducing}
@@ -297,6 +317,14 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               </>
             )}
           </button>
+          
+          {/* Live Progress Log Text to reassure user it is not frozen */}
+          {isFullAutoProducing && fullAutoLogs && fullAutoLogs.length > 0 && (
+            <div className="w-full px-3 py-2 bg-slate-900/80 rounded-lg border border-slate-800 text-xs text-emerald-400 font-mono flex items-center gap-2 overflow-hidden whitespace-nowrap text-ellipsis">
+              <span className="shrink-0 font-bold animate-pulse">›</span>
+              <span className="truncate">{fullAutoLogs[fullAutoLogs.length - 1]}</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -399,10 +427,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                   {index === 0 ? "第一個鏡頭（無前置建議）" : "前置鏡頭連續性對齊指南："}
                 </span>
                 <p className="text-xs text-slate-300 leading-relaxed italic">
-                  {index === 0 
-                    ? "本鏡頭為整部影片的第一個開場畫面，無需接收任何前置建議，將以原著設定直接展開。"
-                    : (scene.step1PrevShotAdvice || (index > 0 && scenes[index - 1]?.step7AdviceForNext) || "尚無前置鏡頭傳遞建議，可以直接點擊進入下一步。")
-                  }
+                  {getPrevAdvice()}
                 </p>
               </div>
 
@@ -839,16 +864,15 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 </div>
               </div>
 
-              {scene.step7AdviceForNext ? (
-                <div className="bg-slate-950/70 border border-slate-850 rounded-lg p-3 space-y-2">
-                  <span className="text-[10px] font-bold text-indigo-400 block uppercase tracking-wider font-mono">即將傳遞給下一個鏡頭的連續性指令：</span>
-                  <p className="text-xs text-slate-300 leading-relaxed italic">{scene.step7AdviceForNext}</p>
-                </div>
-              ) : (
-                <div className="bg-slate-950/30 border border-dashed border-slate-800 rounded-lg p-4 text-center">
-                  <p className="text-xs text-slate-400">尚未生成下個鏡頭的銜接建議，請點擊下方按鈕以生成。</p>
-                </div>
-              )}
+              <div className="bg-slate-950/70 border border-slate-850 rounded-lg p-3 space-y-2">
+                <span className="text-[10px] font-bold text-indigo-400 block uppercase tracking-wider font-mono">即將傳遞給下一個鏡頭的連續性指令：</span>
+                <textarea
+                  value={scene.step7AdviceForNext || ""}
+                  onChange={(e) => updateSceneMultipleFields({ step7AdviceForNext: e.target.value })}
+                  placeholder="尚未生成，您可以點擊下方按鈕讓 AI 生成，或手動在此輸入（例如：「人物轉身離開房間，光線變暗」）"
+                  className="w-full h-20 bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500/50 resize-none transition-colors leading-relaxed"
+                />
+              </div>
 
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-2 border-t border-slate-800/40">
                 <button
