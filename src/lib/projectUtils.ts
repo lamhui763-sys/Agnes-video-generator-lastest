@@ -1,4 +1,31 @@
 import { Project } from "../types";
+import { normalizeSceneSpeech, getDisplaySubtitle } from "./sceneSpeech";
+
+function enrichSceneSpeechFields(s: any): any {
+  const n = normalizeSceneSpeech({
+    dialogue: s.dialogue || "",
+    narration: s.narration || "",
+    character: s.character || "",
+    durationSeconds: s.durationSeconds,
+    subtitleEn: s.subtitleEn || "",
+    actionPrompt: s.actionPrompt || "",
+    visualPrompt: s.visualPrompt || "",
+  });
+  // Keep existing dialogue/narration from storage; only fill missing subtitleEn so old projects get captions
+  const subtitleEn =
+    (s.subtitleEn || "").trim() ||
+    (n.subtitleEn || "").trim() ||
+    getDisplaySubtitle({
+      dialogue: s.dialogue || "",
+      narration: s.narration || "",
+      subtitleEn: "",
+    }) ||
+    "";
+  return {
+    ...s,
+    subtitleEn,
+  };
+}
 
 export function getProjectSignature(project: Project | null): string {
   if (!project) return "";
@@ -62,7 +89,7 @@ export function normalizeProjectsList(parsed: any[]): Project[] {
       clothing: c.clothing || "",
       personality: c.personality || ""
     })) : [],
-    scenes: Array.isArray(p.scenes) ? p.scenes.map((s: any) => ({
+    scenes: Array.isArray(p.scenes) ? p.scenes.map((s: any) => enrichSceneSpeechFields({
       ...s,
       id: s.id || `scene_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
       title: s.title || "Scene",
@@ -81,7 +108,8 @@ export function normalizeProjectsList(parsed: any[]): Project[] {
       videoError: s.videoError || "",
       audioCue: s.audioCue || "",
       directorNotes: s.directorNotes || "",
-      transitionPrompt: s.transitionPrompt || ""
+      transitionPrompt: s.transitionPrompt || "",
+      subtitleEn: s.subtitleEn || "",
     })) : [],
     scenesExt: Array.isArray(p.scenesExt) ? p.scenesExt.map((s: any) => ({
       ...s,

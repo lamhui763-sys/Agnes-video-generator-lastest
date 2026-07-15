@@ -141,17 +141,20 @@ export const ScrubbableVideoPlayer = ({
         </div>
       )}
 
-      {/* Soft English subtitle for pure-narration shots (not burned into Agnes frames) */}
-      {subtitle && subtitle.trim() && (isPlaying || isHovering) && (
-        <div className="pointer-events-none absolute bottom-14 left-0 right-0 flex justify-center px-3 z-10">
-          <div className="max-w-[95%] rounded-md bg-black/75 px-3 py-1.5 text-center text-[11px] sm:text-xs font-medium text-white leading-snug shadow-lg border border-white/10">
+      {/* Soft subtitle: ALWAYS visible when provided (not only on hover/play) */}
+      {subtitle && subtitle.trim() && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-[18%] sm:bottom-16 flex justify-center px-2 z-30">
+          <div
+            className="max-w-[96%] rounded-lg bg-black/85 px-3 py-2 text-center text-[12px] sm:text-sm font-semibold text-white leading-snug shadow-2xl border border-emerald-400/40 ring-1 ring-black/40"
+            style={{ textShadow: "0 1px 3px rgba(0,0,0,0.9)" }}
+          >
             {subtitle.trim()}
           </div>
         </div>
       )}
       
       <div 
-        className={`absolute bottom-0 left-0 right-0 px-3 py-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-300 ${isHovering || !isPlaying ? 'opacity-100' : 'opacity-0'}`}
+        className={`absolute bottom-0 left-0 right-0 px-3 py-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-300 z-20 ${isHovering || !isPlaying ? 'opacity-100' : 'opacity-0'}`}
       >
         <div className="flex flex-col gap-2">
           <input

@@ -54,7 +54,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Scene, Character, Project, TaskState, DEFAULT_SCENE } from "./types";
-import { normalizeSceneSpeech, MAX_SCENE_SECONDS, truncateSpokenText } from "./lib/sceneSpeech";
+import { normalizeSceneSpeech, MAX_SCENE_SECONDS, truncateSpokenText, getDisplaySubtitle } from "./lib/sceneSpeech";
 import VideoGallery from "./components/VideoGallery";
 import SceneItem from "./components/SceneItem";
 import AuthWrapper from "./components/AuthWrapper";
@@ -7899,8 +7899,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         <ScrubbableVideoPlayer
                                           src={scene.videoUrlExt}
                                           className="w-full h-full object-cover"
-                                          subtitle={scene.subtitleEn || (scene.narration && !scene.dialogue ? scene.narration : undefined)}
+                                          subtitle={getDisplaySubtitle(scene) || undefined}
                                         />
+                                        {getDisplaySubtitle(scene) ? (
+                                          <div className="absolute bottom-0 left-0 right-0 z-40 px-2 py-1.5 bg-black/85 text-center text-[11px] text-emerald-200 font-medium border-t border-emerald-500/30">
+                                            字幕: {getDisplaySubtitle(scene)}
+                                          </div>
+                                        ) : null}
                                         <div className="absolute top-2 left-2 bg-black/80 backdrop-blur text-emerald-400 text-[9px] px-2 py-0.5 rounded-md border border-emerald-500/20 font-bold font-mono z-20">
                                           已延長渲染
                                         </div>
@@ -8946,8 +8951,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         <ScrubbableVideoPlayer
                                           src={scene.videoUrlKeyframes}
                                           className="w-full h-full object-cover"
-                                          subtitle={scene.subtitleEn || (scene.narration && !scene.dialogue ? scene.narration : undefined)}
+                                          subtitle={getDisplaySubtitle(scene) || undefined}
                                         />
+                                        {getDisplaySubtitle(scene) ? (
+                                          <div className="absolute bottom-0 left-0 right-0 z-40 px-2 py-1.5 bg-black/85 text-center text-[11px] text-emerald-200 font-medium border-t border-emerald-500/30">
+                                            字幕: {getDisplaySubtitle(scene)}
+                                          </div>
+                                        ) : null}
                                         {/* Redo / Reset button */}
                                         <div className="absolute top-2 right-2 flex gap-1 z-30">
                                           <button

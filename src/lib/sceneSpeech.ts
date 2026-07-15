@@ -90,6 +90,44 @@ export type SpeechNormalizeResult = SpeechNormalizeInput & {
  * 2) If remaining pure narration → English subtitle + closed-mouth hints
  * 3) Cap duration ≤ 5s and spoken text length
  */
+/**
+ * What text to show as soft subtitle on the video player.
+ * Prefer English subtitleEn; fall back so the player never looks "empty" when there is speech/narration.
+ */
+export function getDisplaySubtitle(scene: {
+  dialogue?: string;
+  narration?: string;
+  subtitleEn?: string;
+}): string {
+  const en = (scene.subtitleEn || "").trim();
+  if (en) return en;
+
+  const dialogue = (scene.dialogue || "").trim();
+  const narration = (scene.narration || "").trim();
+
+  // Pure narration shot → English soft subtitle
+  if (narration && !dialogue) {
+    return roughNarrationToEnglish(narration) || narration;
+  }
+
+  // Narration + dialogue → subtitle for narrative beat
+  if (narration) {
+    return roughNarrationToEnglish(narration) || narration;
+  }
+
+  // Spoken dialogue (including 內心) → still show a readable caption line
+  // (after rule-1 conversion, most text lives in dialogue, so without this users see "no subtitles")
+  if (dialogue) {
+    const bare = dialogue.replace(/^[（(]\s*(?:內心|心想|內心對話)[：:]\s*/, "").replace(/[）)]$/, "").trim();
+    const asEn = roughNarrationToEnglish(bare);
+    // Prefer EN-ish line; if heuristic only echoes Chinese, show Chinese dialogue as soft caption
+    if (asEn && !asEn.startsWith("Narration:")) return asEn;
+    return bare || dialogue;
+  }
+
+  return "";
+}
+
 export function normalizeSceneSpeech(input: SpeechNormalizeInput): SpeechNormalizeResult {
   let dialogue = stripQuotes(input.dialogue || "");
   let narration = stripQuotes(input.narration || "");
@@ -148,12 +186,27 @@ export function normalizeSceneSpeech(input: SpeechNormalizeInput): SpeechNormali
 
   if (dialogue && !isInner) {
     speechMode = "dialogue";
+    useEnglishSubtitle = true;
+    // Soft EN caption for player (not burned into video)
+    if (!subtitleEn) {
+      const bare = truncateSpokenText(dialogue);
+      subtitleEn = roughNarrationToEnglish(bare);
+      if (!subtitleEn || subtitleEn.startsWith("Narration:")) {
+        // Keep a visible caption even if EN heuristic is weak
+        subtitleEn = bare;
+      }
+    }
     // Reinforce lip-sync in action if missing
     if (actionPrompt && !/lip|speak|mouth|talking/i.test(actionPrompt)) {
       actionPrompt = `${actionPrompt} The character speaks the line "${dialogue}" with natural lip sync.`;
     }
   } else if (dialogue && isInner) {
     speechMode = "inner";
+    useEnglishSubtitle = true;
+    if (!subtitleEn) {
+      const bare = dialogue.replace(/^[（(][^：:]*[：:]?\s*/, "").replace(/[）)]$/, "").trim();
+      subtitleEn = roughNarrationToEnglish(bare) || bare;
+    }
     if (actionPrompt && !/closed mouth|no lip/i.test(actionPrompt)) {
       actionPrompt = `${actionPrompt} No character is talking, no lip movement, closed mouth, deep thoughtful expression, silent action.`;
     }

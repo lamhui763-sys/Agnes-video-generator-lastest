@@ -3,6 +3,7 @@ import { Scene, Character, Project } from '../types';
 import { Trash2, GripVertical, Clock, Info, Sparkles, Users, ChevronLeft, Plus, RefreshCw, Upload, Film, CheckCircle, AlertCircle, ArrowRight, Star, HelpCircle, Play } from 'lucide-react';
 import { STYLE_PRESETS } from '../data'; // Need to make sure this is available
 import { ScrubbableVideoPlayer } from './ScrubbableVideoPlayer';
+import { getDisplaySubtitle } from '../lib/sceneSpeech';
 
 interface SceneItemProps {
   scene: Scene;
@@ -1112,8 +1113,13 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               <ScrubbableVideoPlayer
                 src={scene.videoUrl}
                 className="w-full h-full object-cover"
-                subtitle={scene.subtitleEn || (scene.narration && !scene.dialogue ? scene.narration : undefined)}
+                subtitle={getDisplaySubtitle(scene) || undefined}
               />
+              {getDisplaySubtitle(scene) ? (
+                <div className="absolute bottom-0 left-0 right-0 z-40 px-2 py-1.5 bg-black/80 text-center text-[11px] text-emerald-200 font-medium border-t border-emerald-500/30">
+                  字幕: {getDisplaySubtitle(scene)}
+                </div>
+              ) : null}
               {/* Manual redo / reset button */}
               <div className="absolute top-2 right-2 flex gap-1 z-30">
                 <button
