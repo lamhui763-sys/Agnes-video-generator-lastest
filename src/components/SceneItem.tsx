@@ -1112,6 +1112,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               <ScrubbableVideoPlayer
                 src={scene.videoUrl}
                 className="w-full h-full object-cover"
+                subtitle={scene.subtitleEn || (scene.narration && !scene.dialogue ? scene.narration : undefined)}
               />
               {/* Manual redo / reset button */}
               <div className="absolute top-2 right-2 flex gap-1 z-30">

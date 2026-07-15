@@ -54,6 +54,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Scene, Character, Project, TaskState, DEFAULT_SCENE } from "./types";
+import { normalizeSceneSpeech, MAX_SCENE_SECONDS, truncateSpokenText } from "./lib/sceneSpeech";
 import VideoGallery from "./components/VideoGallery";
 import SceneItem from "./components/SceneItem";
 import AuthWrapper from "./components/AuthWrapper";
@@ -1282,6 +1283,7 @@ export default function App() {
   };
 
   // Helper to precisely estimate the spoken duration in seconds based on Traditional/Simplified Chinese characters and pauses in BOTH dialogue and narration
+  // Product rule: hard cap at MAX_SCENE_SECONDS (5s) for Agnes stability
   const estimateDialogueDuration = (dialogue: string, narration: string = ""): number => {
     const diagDur = estimateTextDuration(dialogue);
     const narrDur = estimateTextDuration(narration);
@@ -1293,7 +1295,29 @@ export default function App() {
     }
     
     // Cap strictly between 3 and 5 seconds to guarantee maximum stability for Agnes video rendering
-    return Math.max(3, Math.min(5, maxDur));
+    return Math.max(3, Math.min(MAX_SCENE_SECONDS, maxDur));
+  };
+
+  /** Apply dialogue-first / EN soft-subtitle / ≤5s policy before video generation or after split. */
+  const applySpeechPolicyToScene = (scene: Scene): Scene => {
+    const n = normalizeSceneSpeech({
+      dialogue: scene.dialogue,
+      narration: scene.narration,
+      character: scene.character,
+      durationSeconds: scene.durationSeconds,
+      subtitleEn: scene.subtitleEn,
+      actionPrompt: scene.actionPrompt,
+      visualPrompt: scene.visualPrompt,
+    });
+    return {
+      ...scene,
+      dialogue: n.dialogue || "",
+      narration: n.narration || "",
+      subtitleEn: n.subtitleEn || "",
+      durationSeconds: n.durationSeconds ?? 4,
+      actionPrompt: n.actionPrompt || scene.actionPrompt,
+      visualPrompt: n.visualPrompt || scene.visualPrompt,
+    };
   };
 
   // Render function for Toonflow Global Storyboard Director Chatbot
@@ -1444,26 +1468,34 @@ export default function App() {
       if (data.scenes && data.scenes.length > 0) {
         // Map to internal scene structures
         const formattedScenes: Scene[] = data.scenes.map((s: any, idx: number) => {
-          // Automatically estimate speaking/pacing duration based on dialogue and narration character counts more precisely
-          const dialogueText = s.dialogue || "";
-          const estimatedDuration = estimateDialogueDuration(dialogueText, s.narration || "");
-
-          // Use server-provided duration only if valid, otherwise fallback to our estimated duration
-          const finalDuration = s.durationSeconds && typeof s.durationSeconds === 'number'
-            ? s.durationSeconds
-            : estimatedDuration;
+          // Server already applied speech policy; re-apply client-side for safety (dialogue-first, ≤5s, EN subtitle)
+          const normalized = normalizeSceneSpeech({
+            dialogue: s.dialogue || "",
+            narration: s.narration || "",
+            character: s.character || "旁白",
+            durationSeconds: s.durationSeconds,
+            subtitleEn: s.subtitleEn || "",
+            actionPrompt: s.actionPrompt || "",
+            visualPrompt: s.visualPrompt || "",
+          });
+          const estimatedDuration = estimateDialogueDuration(normalized.dialogue || "", normalized.narration || "");
+          const finalDuration = Math.min(
+            MAX_SCENE_SECONDS,
+            typeof normalized.durationSeconds === "number" ? normalized.durationSeconds : estimatedDuration
+          );
 
           return {
             ...DEFAULT_SCENE,
             ...s,
             id: `scene_${Date.now()}_${idx}`,
             title: s.title || `分鏡場景 ${idx + 1}`,
-            dialogue: dialogueText,
-            narration: s.narration || "",
-            character: s.character || "旁白",
-            visualPrompt: s.visualPrompt || "",
+            dialogue: normalized.dialogue || "",
+            narration: normalized.narration || "",
+            subtitleEn: normalized.subtitleEn || s.subtitleEn || "",
+            character: normalized.character || s.character || "旁白",
+            visualPrompt: normalized.visualPrompt || s.visualPrompt || "",
             negativePrompt: s.negativePrompt || "",
-            actionPrompt: s.actionPrompt || "",
+            actionPrompt: normalized.actionPrompt || s.actionPrompt || "",
             durationSeconds: finalDuration,
             audioCue: s.audioCue || "",
             directorNotes: s.directorNotes || "",
@@ -2379,35 +2411,58 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             return cName === targetCharLower || cName.includes(targetCharLower) || targetCharLower.includes(cName);
           })
         : undefined;
+      // Product speech policy: (1) narration→dialogue when possible (2) else EN soft subtitle (3) ≤5s
+      const speechScene = applySpeechPolicyToScene(targetScene);
+      if (
+        speechScene.dialogue !== targetScene.dialogue ||
+        speechScene.narration !== targetScene.narration ||
+        speechScene.subtitleEn !== targetScene.subtitleEn ||
+        speechScene.durationSeconds !== targetScene.durationSeconds
+      ) {
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map((s) => (s.id === sceneId ? { ...s, ...speechScene } : s)),
+        }));
+      }
+
       const charDesc = characterObj?.description || "";
-      const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
-      const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
-      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
-      const transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
+      const hasSpokenDialogue = !!(speechScene.dialogue && speechScene.dialogue.trim() && !/^[（(]/.test(speechScene.dialogue.trim()));
+      const isInnerDialogue = !!(speechScene.dialogue && /^[（(]/.test(speechScene.dialogue.trim()));
+      const dialogueAddon = hasSpokenDialogue
+        ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${truncateSpokenText(speechScene.dialogue)}". The video must be completely clean with ABSOLUTELY NO burned-in SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).`
+        : " No character is talking, no lip movement. Mouth closed and completely still.";
+      // Pure narration: closed mouth; English subtitles are soft-overlaid in the player (not burned into Agnes frames)
+      const narrationAddon = speechScene.narration
+        ? ` (Silent atmospheric scene with closed mouth. English soft subtitles will be shown in the player UI only — do NOT burn any text into the video frames. No character is talking, no lip movement).`
+        : isInnerDialogue
+          ? ` (Inner monologue mood, closed mouth, thoughtful expression, no lip movement, clean video no burned-in text).`
+          : "";
+      const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
+      const transitionAddon = speechScene.transitionPrompt ? ` Transition action: ${speechScene.transitionPrompt}. ` : (targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ");
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
+      const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
 
       try {
         const url = force ? "/api/generate?force=true" : "/api/generate";
+        const cappedDuration = Math.min(MAX_SCENE_SECONDS, Math.max(3, speechScene.durationSeconds || 4));
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             prompt: enhancedPrompt,
-            visualPrompt: targetScene.visualPrompt,
+            visualPrompt: speechScene.visualPrompt || targetScene.visualPrompt,
             negativePrompt: targetScene.negativePrompt,
-            actionPrompt: targetScene.actionPrompt,
+            actionPrompt: speechScene.actionPrompt || targetScene.actionPrompt,
             transitionPrompt: targetScene.transitionPrompt,
-            dialogue: targetScene.dialogue,
-            narration: targetScene.narration,
+            dialogue: speechScene.dialogue || "",
+            narration: speechScene.narration || "",
             directorNotes: targetScene.directorNotes,
-            character: targetScene.character,
+            character: speechScene.character || targetScene.character,
             characterDescription: charDesc,
             artStyle: characterObj?.artStyle || activeProject.artStyle,
             imageUrl: startImageUrlForTransition || (targetScene as any)[imageField] || undefined,
             endImageUrl: endImageUrl,
             customApiKey: customApiKey || undefined,
-            durationSeconds: targetScene.durationSeconds,
+            durationSeconds: cappedDuration,
             agnesVideoMode: activeProject.agnesVideoMode || "quality",
             useFreezeAndMove: targetScene.step5Mode === "transition" || targetScene.useFreezeAndMove,
             useMidpointSplit: targetScene.useMidpointSplit,
@@ -2652,13 +2707,19 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             return cName === targetCharLower || cName.includes(targetCharLower) || targetCharLower.includes(cName);
           })
         : undefined;
+      const speechScene = applySpeechPolicyToScene(targetScene);
       const charDesc = characterObj?.description || "";
-      const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
-      const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
-      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
-      const transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
+      const hasSpokenDialogue = !!(speechScene.dialogue && speechScene.dialogue.trim() && !/^[（(]/.test(speechScene.dialogue.trim()));
+      const dialogueAddon = hasSpokenDialogue
+        ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${truncateSpokenText(speechScene.dialogue)}". The video must be completely clean with ABSOLUTELY NO burned-in SUBTITLES).`
+        : " No character is talking, no lip movement. Mouth closed and completely still.";
+      const narrationAddon = speechScene.narration
+        ? ` (Silent atmospheric scene, closed mouth. Soft English subtitles in player only — do NOT burn text into frames.)`
+        : "";
+      const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
+      const transitionAddon = speechScene.transitionPrompt ? ` Transition action: ${speechScene.transitionPrompt}. ` : (targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ");
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
+      const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
 
       // If index > 0, we pass the previous scene's videoUrlExt as extendFromVideoUrl
       const prevScene = (index > 0) ? freshActiveProject.scenes[index - 1] : undefined;
@@ -2677,20 +2738,20 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
          headers: { "Content-Type": "application/json" },
          body: JSON.stringify({
            prompt: enhancedPrompt,
-           visualPrompt: targetScene.visualPrompt,
-           actionPrompt: targetScene.actionPrompt,
+           visualPrompt: speechScene.visualPrompt || targetScene.visualPrompt,
+           actionPrompt: speechScene.actionPrompt || targetScene.actionPrompt,
            transitionPrompt: targetScene.transitionPrompt,
-           dialogue: targetScene.dialogue,
-           narration: targetScene.narration,
+           dialogue: speechScene.dialogue || "",
+           narration: speechScene.narration || "",
            directorNotes: targetScene.directorNotes,
-           character: targetScene.character,
+           character: speechScene.character || targetScene.character,
            characterDescription: charDesc,
            artStyle: characterObj?.artStyle || freshActiveProject.artStyle,
            imageUrl: targetScene.imageUrlExt || undefined,
            endImageUrl: endImageUrl,
            extendFromVideoUrl: prevVideoUrl,
            customApiKey: customApiKey || undefined,
-           durationSeconds: targetScene.durationSeconds,
+           durationSeconds: Math.min(MAX_SCENE_SECONDS, Math.max(3, speechScene.durationSeconds || 4)),
            agnesVideoMode: freshActiveProject.agnesVideoMode || "quality",
            sceneIndex: index,
            sceneType: "ext",
@@ -3041,8 +3102,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       endImageUrl = foundEndImage;
     }
 
-    // Calculate transition duration - respect user set duration directly rather than forcing a long fixed duration
-    const finalDurationSeconds = targetScene.durationSeconds;
+    // Product rules: dialogue-first, EN soft subtitle if pure narration, hard-cap ≤5s
+    const speechScene = applySpeechPolicyToScene(targetScene);
+    const finalDurationSeconds = Math.min(MAX_SCENE_SECONDS, Math.max(3, speechScene.durationSeconds || 4));
 
     // Update specific scene video state to generating
     updateActiveProject((prev) => ({
@@ -3050,6 +3112,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         if (s.id === sceneId) {
           return { 
             ...s, 
+            ...speechScene,
             durationSeconds: finalDurationSeconds,
             isGeneratingVideoKeyframes: true, 
             videoProgressKeyframes: "0%",
@@ -3063,7 +3126,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     }));
 
     try {
-      const targetCharLower = (targetScene.character || "").trim().toLowerCase();
+      const targetCharLower = (speechScene.character || targetScene.character || "").trim().toLowerCase();
       const characterObj = targetCharLower && targetCharLower !== "旁白" && targetCharLower !== "narrator"
         ? activeProject.characters.find(c => {
             const cName = (c.name || "").trim().toLowerCase();
@@ -3071,30 +3134,35 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           })
         : undefined;
       const charDesc = characterObj?.description || "";
-      const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
-      const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
-      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
+      const hasSpokenDialogue = !!(speechScene.dialogue && speechScene.dialogue.trim() && !/^[（(]/.test(speechScene.dialogue.trim()));
+      const dialogueAddon = hasSpokenDialogue
+        ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${truncateSpokenText(speechScene.dialogue)}". Completely clean video, NO burned-in subtitles).`
+        : " No character is talking, no lip movement. Mouth closed and completely still.";
+      const narrationAddon = speechScene.narration
+        ? ` (Silent atmospheric scene, closed mouth. Soft English subtitles in player only — do NOT burn text into frames.)`
+        : "";
+      const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
       let transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : "";
       if (endImageUrl && index < activeProject.scenes.length - 1) {
         const nextScene = activeProject.scenes[index + 1];
         transitionAddon += ` The character smoothly moves and transitions from the current state into the end frame's state: [${nextScene.visualPrompt}]. Make sure to animate the logical physical action connecting these two states (e.g., standing up, walking, turning around, changing pose).`;
       }
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${dialogueAddon}${narrationAddon}${transitionAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
+      const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${dialogueAddon}${narrationAddon}${transitionAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
 
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: enhancedPrompt,
-          visualPrompt: targetScene.visualPrompt,
+          visualPrompt: speechScene.visualPrompt || targetScene.visualPrompt,
           negativePrompt: targetScene.negativePrompt,
-          actionPrompt: targetScene.actionPrompt,
+          actionPrompt: speechScene.actionPrompt || targetScene.actionPrompt,
           transitionPrompt: targetScene.transitionPrompt,
-          dialogue: targetScene.dialogue,
-          narration: targetScene.narration,
+          dialogue: speechScene.dialogue || "",
+          narration: speechScene.narration || "",
           directorNotes: targetScene.directorNotes,
-          character: targetScene.character,
+          character: speechScene.character || targetScene.character,
           characterDescription: charDesc,
           artStyle: characterObj?.artStyle || activeProject.artStyle,
           imageUrl: startImageUrl || undefined,
@@ -7831,6 +7899,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         <ScrubbableVideoPlayer
                                           src={scene.videoUrlExt}
                                           className="w-full h-full object-cover"
+                                          subtitle={scene.subtitleEn || (scene.narration && !scene.dialogue ? scene.narration : undefined)}
                                         />
                                         <div className="absolute top-2 left-2 bg-black/80 backdrop-blur text-emerald-400 text-[9px] px-2 py-0.5 rounded-md border border-emerald-500/20 font-bold font-mono z-20">
                                           已延長渲染
@@ -8877,6 +8946,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                         <ScrubbableVideoPlayer
                                           src={scene.videoUrlKeyframes}
                                           className="w-full h-full object-cover"
+                                          subtitle={scene.subtitleEn || (scene.narration && !scene.dialogue ? scene.narration : undefined)}
                                         />
                                         {/* Redo / Reset button */}
                                         <div className="absolute top-2 right-2 flex gap-1 z-30">

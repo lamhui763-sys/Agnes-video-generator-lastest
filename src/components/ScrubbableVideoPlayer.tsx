@@ -1,7 +1,16 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Play, Pause, Maximize2, Download } from 'lucide-react';
 
-export const ScrubbableVideoPlayer = ({ src, className }: { src: string, className?: string }) => {
+export const ScrubbableVideoPlayer = ({
+  src,
+  className,
+  subtitle,
+}: {
+  src: string;
+  className?: string;
+  /** Soft English (or any) subtitle overlay — not burned into the video file */
+  subtitle?: string;
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -129,6 +138,15 @@ export const ScrubbableVideoPlayer = ({ src, className }: { src: string, classNa
       ) : (
         <div className="flex items-center justify-center w-full h-full text-slate-400 text-xs text-center p-4">
           無效的影片來源
+        </div>
+      )}
+
+      {/* Soft English subtitle for pure-narration shots (not burned into Agnes frames) */}
+      {subtitle && subtitle.trim() && (isPlaying || isHovering) && (
+        <div className="pointer-events-none absolute bottom-14 left-0 right-0 flex justify-center px-3 z-10">
+          <div className="max-w-[95%] rounded-md bg-black/75 px-3 py-1.5 text-center text-[11px] sm:text-xs font-medium text-white leading-snug shadow-lg border border-white/10">
+            {subtitle.trim()}
+          </div>
         </div>
       )}
       

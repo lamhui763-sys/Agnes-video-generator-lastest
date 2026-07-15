@@ -4,6 +4,8 @@ export interface Scene {
   title: string;
   dialogue: string;
   narration?: string;
+  /** English soft subtitle (player overlay) when pure narration is unavoidable — not burned into Agnes frames */
+  subtitleEn?: string;
   character: string;
   visualPrompt: string;
   negativePrompt?: string;
@@ -80,6 +82,7 @@ export interface Scene {
 
 export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character' | 'visualPrompt'> = {
   narration: "",
+  subtitleEn: "",
   negativePrompt: "",
   actionPrompt: "",
   transitionPrompt: "",

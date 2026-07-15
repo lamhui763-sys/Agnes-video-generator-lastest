@@ -8,10 +8,38 @@ import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
+import { normalizeSceneSpeech } from "./src/lib/sceneSpeech";
 
 // Load environment variables (.env then .env.local overrides)
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
+
+/** Apply dialogue-first / EN-subtitle / ≤5s rules after AI split-novel. */
+function applySpeechPolicyToScenes(scenes: any[]): any[] {
+  if (!Array.isArray(scenes)) return scenes;
+  return scenes.map((s) => {
+    const n = normalizeSceneSpeech({
+      dialogue: s.dialogue,
+      narration: s.narration,
+      character: s.character,
+      durationSeconds: s.durationSeconds,
+      subtitleEn: s.subtitleEn,
+      actionPrompt: s.actionPrompt,
+      visualPrompt: s.visualPrompt,
+    });
+    return {
+      ...s,
+      dialogue: n.dialogue || "",
+      narration: n.narration || "",
+      character: n.character || s.character || "旁白",
+      durationSeconds: n.durationSeconds ?? 4,
+      subtitleEn: n.subtitleEn || "",
+      actionPrompt: n.actionPrompt || s.actionPrompt || "",
+      visualPrompt: n.visualPrompt || s.visualPrompt || "",
+      speechMode: n.speechMode,
+    };
+  });
+}
 
 // Disable SSL rejection for external file servers in sandbox environment
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -2775,12 +2803,14 @@ app.post("/api/split-novel", async (req, res) => {
 對於每個分鏡場景，請提供以下屬性的 JSON 對象：
 1. "title": 繁體中文場景名稱（例：地點 - 時間）
 2. "dialogue": 該場景主角說的角色對話台詞（繁體中文），無對白則留空 ""。
-   【極度重要：少旁白、多對白與內心對話規則】：
-   - 由於語音合成（如 Agnes）不朗讀旁白（narration）只朗讀對白（dialogue），你必須「極力多產出對白、少產出旁白」。
-    - 當角色「不便動口」或為「思考、心裡話、默念、在背後看著」時，你「必須」使用【內心對話】並放入 dialogue 欄位！內心對話請用括號包裝，例如 (內心對話：他看起來很緊張，我該怎麼辦？) 或 (心想：這實在是太不可思議了)。這樣語音合成就能順利朗讀！
-   - 對白與旁白必須互斥，一個分鏡要麼只有對白要麼只有旁白，絕對不可兩者同時存在。且對白長度必須極度精簡，控制在 5 秒內（15字以內）能自然讀完。
-3. "narration": 該場景的背景旁白、場景描述或字幕內容（繁體中文），嘴唇不說話。【極度重要：優先使用對白，旁白必須極度精簡，最好留空或控制在 10 字以內】。
-4. "character": 出場的關鍵角色名字
+   【產品鐵律 — Agnes 只吃對白口型，5 秒一鏡】：
+   (1) 儘管把敘事旁白改寫成「角色會說出口的第一人稱／短對白」寫入 dialogue（≤15 字，5 秒內念完）。例：旁白「他決定離開」→ 對白「今晚，我要離開這裡。」
+   (2) 僅當內容是純環境空鏡（雨、風、夜景、無角色可講）時，才允許 narration 非空；此時 dialogue 必須為 ""，並另給 "subtitleEn"。
+   (3) 內心話用括號放入 dialogue，例：(內心：原來我被騙了)。此時嘴閉、不唇形同步。
+   - 對白與旁白互斥：同一鏡不可兩者皆有字。能改寫成對白的，narration 必須為 ""。
+3. "narration": 僅限無法改成角色對白的極短環境描述（繁體中文，≤12 字）。能改對白則必須留空 ""。
+3b. "subtitleEn": 僅當 narration 非空時必填。一句簡短英文軟字幕（播放器疊加，非燒進畫面）。例："Rain falls over the neon streets."
+4. "character": 出場的關鍵角色名字（對白鏡必須是會開口的角色名，勿填「旁白」）
 5. "visualPrompt": 一段專門用於 AI 繪圖模型（如 Flux 或 SD）的詳細英文場景視覺提示詞 (Visual Prompt)，融入風格："${styleText}"。
    【重要：男女/多角色防混淆規則】：AI 繪圖模型（如 Agnes 或 Flux）無法理解抽象的中英文人名（如 "Chen Mo" 或 "Lin Qian"），也極易在一個畫面中畫出兩個性別相同的人（例如把男女畫成兩個男人）。
    - 任何時候當場景包含兩個或多個角色時，你「絕對不能」只在提示詞中寫人名，必須明確、具體地描述他們的性別與性別特徵差異。
@@ -2808,9 +2838,10 @@ CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
      - If there is inner dialogue/monologue wrapped in parentheses (dialogue starts with '('): You MUST append exactly: "No character is talking, no lip movement, closed mouth, deep thoughtful expression, silent action." at the end of both actionPrompt and visualPrompt.
      - If there is NO dialogue (dialogue is empty, only narration exists, or both are empty): You MUST append exactly: "No character is talking, no lip movement, closed mouth, silent action." at the end of both actionPrompt and visualPrompt to ensure the character's mouth remains closed and silent.
 - [DURATION & PACING]: AI Video generation segments MUST be dynamically set between 3 to 5 seconds.
-    - MAXIMUM 5 SECONDS per scene! Generating videos over 5 seconds is highly unstable.
+    - MAXIMUM 5 SECONDS per scene! durationSeconds MUST be an integer 3–5. Never exceed 5.
     - If the dialogue, action complexity, or pacing requires MORE than 5 seconds, YOU MUST split it into multiple consecutive scenes. It is always better to generate MORE scenes than to exceed the 5-second limit. Maintain story completeness across multiple scenes.
     - Pad the visual prompt with descriptive lingering expressions, environmental reactions, or subtle movements to smoothly fill the chosen duration.
+- [SPEECH PIPELINE]: Prefer dialogue over narration. When narration is unavoidable, provide subtitleEn (English). Never ask the image/video model to burn subtitles into pixels.
 
 ${characterContext}
 
@@ -2896,7 +2927,9 @@ CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
     }
 
     if (parsedData && Array.isArray(parsedData)) {
-      res.json({ scenes: parsedData });
+      const normalized = applySpeechPolicyToScenes(parsedData);
+      console.log(`[Toonflow] Speech policy applied to ${normalized.length} scenes (dialogue-first, ≤5s, EN subtitle when needed).`);
+      res.json({ scenes: normalized });
     } else {
       throw new Error("Invalid or empty response format from AI");
     }
@@ -2950,7 +2983,7 @@ CRITICAL VISUAL, MOTION, AND DURATION REQUIREMENTS:
         });
       }
 
-      res.json({ scenes: fallbackScenes, isFallback: true });
+      res.json({ scenes: applySpeechPolicyToScenes(fallbackScenes), isFallback: true });
     } catch (innerError: any) {
       console.error("[Toonflow] Hard failure in novel splitter:", innerError);
       res.status(500).json({ error: "Failed to split novel even with heuristic engine." });
