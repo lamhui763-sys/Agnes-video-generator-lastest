@@ -568,6 +568,60 @@ function getNegativePromptForStyle(artStyle: string): string {
   return "blurry, low resolution, low quality, worst quality, jpeg artifacts, noise, grain, compression artifacts, cropped, out of frame";
 }
 
+// Dynamically enrich negative prompts to strictly control character counts, genders, and locations
+function enrichNegativePromptWithSceneContext(negativePrompt: string, positivePrompt: string, characterDescription?: string): string {
+  let enriched = negativePrompt ? negativePrompt.trim() : "";
+  const posLower = (positivePrompt || "").toLowerCase();
+  const descLower = (characterDescription || "").toLowerCase();
+  const fullTextContext = `${posLower} ${descLower}`;
+  
+  const additionalNegatives: string[] = [];
+
+  // 1. Gender analysis for story context
+  const hasMaleKeywords = /\b(man|men|boy|boys|male|gentleman|gentlemen|husband|father|son|brother|uncle|guy|guys)\b/i.test(fullTextContext) || /男/.test(fullTextContext);
+  const hasFemaleKeywords = /\b(woman|women|girl|girls|female|lady|ladies|wife|mother|daughter|sister|aunt|gal)\b/i.test(fullTextContext) || /女/.test(fullTextContext);
+  
+  if (hasMaleKeywords && !hasFemaleKeywords) {
+    // Only male characters specified, strictly exclude female attributes to prevent gender errors
+    additionalNegatives.push("female, woman, girl, lady, feminine, womanly, female character");
+  } else if (hasFemaleKeywords && !hasMaleKeywords) {
+    // Only female characters specified, strictly exclude male attributes to prevent gender errors
+    additionalNegatives.push("male, man, boy, gentleman, masculine, facial hair, beard, moustache, male character");
+  }
+
+  // 2. Character count and consistency control
+  const hasMultiplePeople = /\b(two|three|four|five|several|group|many|crowd|pair|couple|together|each other)\b/i.test(fullTextContext) ||
+                             /\b\d+\s+(people|men|women|characters|girls|boys|guys)\b/i.test(fullTextContext) ||
+                             /[兩二三四五].*(人|男|女)/.test(fullTextContext);
+                             
+  if (hasMultiplePeople) {
+    // Multiple people: strictly prevent extra/duplicate people, wrong body counts, clashing clothes, or weird locations
+    additionalNegatives.push("extra people, extra characters, secondary character, ghost figures, duplicate characters, cloned faces, cloned people, multiple heads, fused bodies, mutated limbs, extra bodies, wrong character count, extra hands, extra legs, deformed limbs");
+    additionalNegatives.push("strange venue, mismatched background, unusual landscape features, clashing styles, non-unified clothing, mismatched outfit designs, inconsistent character features, chaotic attire, clashing color palette");
+  } else {
+    // Single character: strictly prevent cloning or secondary people appearing
+    additionalNegatives.push("extra people, secondary character, extra characters, duplicate characters, cloned faces, multiple heads, fused bodies, mutated limbs, extra bodies, wrong character count, ghost figures");
+  }
+
+  if (additionalNegatives.length > 0) {
+    const additionalStr = additionalNegatives.join(", ");
+    if (enriched) {
+      // Ensure we don't duplicate existing terms
+      const existingTerms = enriched.split(",").map(t => t.trim().toLowerCase());
+      const filteredAdditionals = additionalStr.split(",")
+        .map(t => t.trim())
+        .filter(t => !existingTerms.includes(t.toLowerCase()));
+      if (filteredAdditionals.length > 0) {
+        enriched += ", " + filteredAdditionals.join(", ");
+      }
+    } else {
+      enriched = additionalStr;
+    }
+  }
+
+  return enriched;
+}
+
 // Helper to retrieve the correct Gemini client, handling custom user API keys safely
 function getGeminiClient(customApiKey?: string): GoogleGenAI {
   const cleanKey = customApiKey ? customApiKey.trim() : "";
@@ -665,10 +719,12 @@ async function generateGeminiImage(options: {
     }
   } catch (err: any) {
     const rawErr = err?.message || String(err || "Unknown");
-    console.warn("[Toonflow Warning] Gemini image generation failed:", rawErr);
     const isQuota = rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED");
     if (isQuota) {
+      console.log("[Toonflow] Gemini image generation quota exceeded. Gracefully falling back to alternative engine.");
       markGeminiImageQuotaExhausted();
+    } else {
+      console.warn("[Toonflow Warning] Gemini image generation failed:", rawErr);
     }
   }
   return null;
@@ -1835,9 +1891,11 @@ Instructions for synthesis:
       "極致畫質模式 (1152x768 @ 24fps)"
     }`);
 
-    const resolvedVideoNegativePrompt = (negativePrompt && negativePrompt.trim())
+    const baseVideoNegativePrompt = (negativePrompt && negativePrompt.trim())
       ? negativePrompt
       : getNegativePromptForStyle(artStyle);
+
+    const resolvedVideoNegativePrompt = enrichNegativePromptWithSceneContext(baseVideoNegativePrompt, (finalPrompt || prompt), characterDescription);
 
     const args = [
       "src/agnes_video.py",
@@ -2086,6 +2144,13 @@ Maintain the selected art style: "${artStyle || "Anime key visual"}".
 If character is specified as "${character || ""}", integrate their visual description: "${characterDescription || ""}".
 [CRITICAL CLOTHING CONSISTENCY RULE]: If a character description is provided, the character MUST wear the exact same clothing and outfit described in their description ("${characterDescription || ""}"). You MUST strictly override and replace any conflicting clothing, shirts, or outfits mentioned in the original storyboard scene description to ensure perfect continuity.${moodGuidance}${lipSyncGuidance}
 
+[CRITICAL MULTI-CHARACTER & COUNT CONTROL RULE]:
+- If the scene/storyboard description mentions multiple people (e.g. "two men", "兩位男人", "兩人", "兩個人", multiple characters, group, pair), you MUST explicitly:
+  1. Describe each individual character's distinct features (e.g. distinct hairstyles, hair colors, face shapes, ages, expressions) so that they look like separate, unique individuals and not duplicate clones.
+  2. Specify the exact count/number of people in the scene (e.g., "exactly two men", "two male characters", "no extra people", "only two people").
+  3. Clearly state the gender of each person in the scene.
+  4. Ensure clothing/attire style is unified and coordinated (e.g. "wearing unified theme garments", "harmonized clothing of matching design", "outfits matching the same visual theme/aesthetic") so their costumes are consistent and do not clash or look randomly mismatched.
+
 [CRITICAL CLEAN VISUALS RULE]:
 - Ensure absolutely no dialogue text, on-screen text, subtitles, quotes, signatures, watermarks, logos, or Chinese characters are included.
 - You MUST append exactly "completely clean video, no subtitles, no text, no captions, no words, no watermark, no logo, no signature, clean visual aesthetics" to the end of the optimized prompt to ensure pristine visual quality.
@@ -2093,7 +2158,17 @@ If character is specified as "${character || ""}", integrate their visual descri
 Keep it purely visual, direct, and detailed.
 
 In addition, analyze this scene and generate a tailored list of English visual negative terms (Negative Prompt) representing unwanted features, artifacts, style mismatches, or physical deformities that should be strictly avoided.
-Universal quality-enhancers like "blurry, low resolution, low quality, worst quality, text, watermark, signature, username, logo" should be included, plus tailored words (e.g. if anime style, avoid realism/photorealistic/3d; if realistic style, avoid cartoon/painting; if human character, avoid deformed hands/extra fingers/bad anatomy).
+
+[CRITICAL TAILORED NEGATIVE PROMPT RULE]:
+Your generated negative prompt MUST include:
+1. Universal quality-enhancers: "blurry, low resolution, low quality, worst quality, jpeg artifacts, text, watermark, signature, username, logo".
+2. Art-style fallbacks: (if anime style, avoid "realism, photorealistic, 3d, oil painting, cg, textured render"; if photorealistic/realistic style, avoid "cartoon, illustration, drawing, painting, 3d render, cg, sketch").
+3. GENDER & CHARACTER COUNT CONTROLLER:
+   - If the scene features ONLY male characters (e.g. "two men", "兩位男人", or a male character name), the negative prompt MUST strictly include: "female, woman, girl, lady, feminine, womanly" to prevent random female appearances.
+   - If the scene features ONLY female characters, the negative prompt MUST strictly include: "male, man, boy, gentleman, masculine, facial hair, beard, moustache".
+   - To control the exact number of characters and avoid cloning, duplicate, or ghost characters, the negative prompt MUST strictly include: "extra people, extra characters, ghost figures, duplicate characters, cloned faces, cloned people, multiple heads, fused bodies, mutated limbs, extra bodies, wrong character count, extra hands, extra legs, deformed limbs".
+4. CONSISTENCY & STYLE CONTROLLER:
+   - To prevent weird settings/locations, inconsistent appearances, or mismatched themes, the negative prompt MUST strictly include: "strange venue, mismatched background, unusual landscape features, clashing styles, non-unified clothing, mismatched outfit designs, inconsistent character features, chaotic attire, clashing color palette".
 
 You MUST respond strictly in the following JSON format:
 {
@@ -3402,7 +3477,7 @@ app.post("/api/generate-image", async (req, res) => {
         console.log(`[Toonflow] Prompt contains Chinese or is very short. Translating/Optimizing using Gemini: "${prompt}"`);
         const geminiRes = await generateContentWithFallback({
           model: "gemini-3.5-flash",
-          contents: `Translate and enhance the following description into a highly detailed, professional English visual prompt for AI image generation (Stable Diffusion/Flux style). Describe visual appearance, face, clothing, features, posture, lighting, and composition. Keep it concrete, direct, and visual: "${prompt}"`,
+          contents: `Translate and enhance the following description into a highly detailed, professional English visual prompt for AI image generation (Stable Diffusion/Flux style). Describe visual appearance, face, clothing, features, posture, lighting, and composition. Keep it concrete, direct, and visual: "${prompt}". Respond with ONLY the optimized English prompt, no markdown formatting, no conversational text, no quotes.`,
           customApiKey
         });
         const optimizedText = geminiRes?.text?.trim();
@@ -3537,9 +3612,11 @@ app.post("/api/generate-image", async (req, res) => {
     enhancedPrompt = `A ${baseSceneType}. ${charDesc}${clothingConsistencyDirective}${moodAddon} Scene setting & action: ${finalPrompt}. Style: ${styleAddon}. This must be a SINGLE integrated scene image with professional cinematic framing and layout (NOT a multi-angle reference sheet, NOT a collage, NOT a character sheet). Beautiful lighting, highly detailed background. Absolutely NO text, labels, signatures, titles, subtitles, captions, watermarks, UI elements, words, or letters on the image.`;
   }
 
-  const resolvedImageNegativePrompt = (negativePrompt && negativePrompt.trim())
+  const baseNegativePrompt = (negativePrompt && negativePrompt.trim())
     ? negativePrompt
     : getNegativePromptForStyle(artStyle);
+
+  const resolvedImageNegativePrompt = enrichNegativePromptWithSceneContext(baseNegativePrompt, (finalPrompt || prompt), characterDescription);
 
   if (resolvedImageNegativePrompt) {
     enhancedPrompt += ` [NEGATIVE PROMPT MANDATE: You MUST explicitly avoid generating any of the following: ${resolvedImageNegativePrompt}]`;
@@ -4595,7 +4672,12 @@ Please analyze this image, evaluate its adherence to the visual prompt and style
     const result = JSON.parse(response?.text || "{}");
     res.json(result);
   } catch (error: any) {
-    console.error("[Toonflow] Workflow Image Review Error:", error);
+    const rawErr = error?.message || String(error);
+    if (rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED")) {
+      console.log("[Toonflow] Workflow Image Review skipped due to Gemini quota limit. Passing check automatically.");
+    } else {
+      console.warn("[Toonflow] Workflow Image Review Error:", error);
+    }
     res.json({
       score: 85,
       critique: "（本地自動校驗）畫面基礎品質良好。角色特徵與服飾搭配完整，光影對比符合當前場景氛圍要求，整體構圖流暢，建議您可以放心通過並進入下一步影片生成。",
@@ -4663,7 +4745,12 @@ Please review the cinematic motion plan, evaluate its continuity, and output the
     const result = JSON.parse(response?.text || "{}");
     res.json(result);
   } catch (error: any) {
-    console.error("[Toonflow] Workflow Video Review Error:", error);
+    const rawErr = error?.message || String(error);
+    if (rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED")) {
+      console.log("[Toonflow] Workflow Video Review skipped due to Gemini quota limit. Passing check automatically.");
+    } else {
+      console.warn("[Toonflow] Workflow Video Review Error:", error);
+    }
     res.json({
       score: 90,
       critique: "（本地自動校驗）鏡頭運動與動作邏輯合理。畫面動作流暢度高，人物特徵於動態中保持基本一致。對白口型配合流暢，連續畫面中未見明顯突變或AI物理穿模，建議直接通過。",
@@ -4724,7 +4811,12 @@ Please analyze these details and generate continuity advice in the JSON format.`
     const result = JSON.parse(response?.text || "{}");
     res.json(result);
   } catch (error: any) {
-    console.error("[Toonflow] Workflow Advice Generation Error:", error);
+    const rawErr = error?.message || String(error);
+    if (rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED")) {
+      console.log("[Toonflow] Workflow Advice Generation skipped due to Gemini quota limit. Providing fallback advice.");
+    } else {
+      console.warn("[Toonflow] Workflow Advice Generation Error:", error);
+    }
     res.json({
       summary: "完成了當前鏡頭的拍攝，畫面主體和背景光影設置流暢。",
       advice: "為保持鏡頭連續性，下一個鏡頭建議保持相同的色彩與主角服裝，角色面部朝向與表情建議與前一鏡頭相呼應，以維持無縫的空間與情節銜接感。"
