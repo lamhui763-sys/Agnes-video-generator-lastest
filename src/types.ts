@@ -47,6 +47,19 @@ export interface Scene {
   videoApiLatencyKeyframes?: string;
   videoDownloadLatencyKeyframes?: string;
   videoResourceAllocationKeyframes?: string;
+
+  // --- Keyframes dual-frame chain (P0): Start→End continuity ---
+  /** This shot's opening still (shot1 generated; shot2+ = prev endFrameKeyframes) */
+  startFrameKeyframes?: string;
+  /** This shot's ending still (always generated; handed to next shot as start) */
+  endFrameKeyframes?: string;
+  /** English visual description of end frame for next-shot locking */
+  endFrameDescriptionKeyframes?: string;
+  /** Where start frame came from (UI badge) */
+  startFrameSourceKeyframes?: "generated" | "inherited_prev_end" | "forced_pass_fallback";
+  isGeneratingStartFrameKeyframes?: boolean;
+  isGeneratingEndFrameKeyframes?: boolean;
+  step3ImageErrorKeyframes?: string;
   isRetryingPolicy?: boolean;
   policyRetryCount?: number;
   useFreezeAndMove?: boolean;
@@ -117,6 +130,13 @@ export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character
   videoApiLatencyKeyframes: "",
   videoDownloadLatencyKeyframes: "",
   videoResourceAllocationKeyframes: "",
+  startFrameKeyframes: "",
+  endFrameKeyframes: "",
+  endFrameDescriptionKeyframes: "",
+  startFrameSourceKeyframes: undefined,
+  isGeneratingStartFrameKeyframes: false,
+  isGeneratingEndFrameKeyframes: false,
+  step3ImageErrorKeyframes: "",
   audioCue: "",
   directorNotes: "",
   aiReviewStatus: "passed",

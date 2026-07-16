@@ -1320,6 +1320,73 @@ export default function App() {
     };
   };
 
+  // ---------- Keyframes dual-frame helpers (P0, scenes_keyframes only) ----------
+  const getKeyframesStartFrame = (s: Scene): string =>
+    (s.startFrameKeyframes || s.imageUrlKeyframes || "").trim();
+  const getKeyframesEndFrame = (s: Scene): string =>
+    (s.endFrameKeyframes || "").trim();
+
+  /** Call /api/generate-image and return URL (used only by keyframes Step3 dual-frame). */
+  const generateKeyframesStillUrl = async (scene: Scene, visualPrompt: string): Promise<string> => {
+    if (!activeProject) throw new Error("No active project");
+    const cleanSceneChar = (scene.character || "").trim().toLowerCase();
+    const characterObj = activeProject.characters.find(
+      (c) => (c.name || "").trim().toLowerCase() === cleanSceneChar
+    );
+    let charDesc = characterObj?.description || "";
+    if (characterObj?.clothing) charDesc += `. Ensure wearing: ${characterObj.clothing}.`;
+    const characterImages =
+      characterObj?.uploadedAvatarUrls && characterObj.uploadedAvatarUrls.length > 0
+        ? characterObj.uploadedAvatarUrls
+        : characterObj?.uploadedAvatarUrl
+          ? [characterObj.uploadedAvatarUrl]
+          : characterObj?.avatarUrls || (characterObj?.avatarUrl ? [characterObj.avatarUrl] : []);
+
+    const res = await fetch("/api/generate-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: visualPrompt,
+        negativePrompt: scene.negativePrompt,
+        artStyle: characterObj?.artStyle || activeProject.artStyle,
+        character: scene.character,
+        characterDescription: charDesc,
+        characterImages,
+        seed: characterObj?.seed,
+        engine: "agnes",
+        agnesImageMode: activeProject.agnesImageMode || "quality",
+        customApiKey: customApiKey || undefined,
+        mood: characterObj?.mood,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      let errData: any = {};
+      try {
+        errData = JSON.parse(errText);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(errData.error || errText || "關鍵幀繪圖 API 失敗");
+    }
+    const data = await res.json();
+    if (!data.imageUrl) throw new Error("繪圖 API 未回傳 imageUrl");
+    return data.imageUrl as string;
+  };
+
+  const buildKeyframesStartPrompt = (scene: Scene): string => {
+    const base = scene.step2OptimizedPrompt || scene.visualPrompt || scene.title || "cinematic storyboard still";
+    return `${base}. Opening still of this shot, establish pose and framing for animation start. Completely clean image, no text, no subtitles, no watermark.`;
+  };
+  const buildKeyframesEndPrompt = (scene: Scene, prevEndDesc?: string): string => {
+    const base = scene.step2OptimizedPrompt || scene.visualPrompt || scene.title || "cinematic storyboard still";
+    const cont = prevEndDesc
+      ? ` Continuity from previous end frame intent: ${prevEndDesc}.`
+      : "";
+    const action = scene.actionPrompt ? ` Action progressed to end state: ${scene.actionPrompt}.` : "";
+    return `${base}.${action}${cont} Ending still of this shot: same character identity and clothing, slightly progressed pose suitable as the next shot opening. Completely clean image, no text, no subtitles, no watermark.`;
+  };
+
   // Render function for Toonflow Global Storyboard Director Chatbot
   const renderStoryboardGlobalChat = () => {
     return (
@@ -1989,11 +2056,19 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       updateActiveProject((prev) => ({
         scenes: prev.scenes.map(s => {
           if (s.id === sceneId) {
-            return { 
-              ...s, 
-              [imageField]: data.imageUrl, 
-              [isGenField]: false 
-            };
+            const next: Scene = {
+              ...s,
+              [imageField]: data.imageUrl,
+              [isGenField]: false,
+            } as Scene;
+            // Keyframes tab: single-click generate maps to start frame (end needs dual Step3)
+            if (imageField === "imageUrlKeyframes") {
+              next.startFrameKeyframes = data.imageUrl;
+              if (!next.startFrameSourceKeyframes) {
+                next.startFrameSourceKeyframes = "generated";
+              }
+            }
+            return next;
           }
           return s;
         })
@@ -3072,7 +3147,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     }
   };
 
-  // Agnes Video Generation with keyframes (start frame is this scene's image, end frame is next scene's image)
+  // Agnes Video Generation with keyframes:
+  // start = this shot's startFrame (or inherited prev end); end = this shot's endFrame (NOT next shot's image)
   const handleGenerateVideoKeyframes = async (sceneId: string, index: number) => {
     let freshActiveProject = activeProject;
     try {
@@ -3085,21 +3161,40 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     const targetScene = freshActiveProject.scenes.find(s => s.id === sceneId);
     if (!targetScene) return;
 
-    const startImageUrl = targetScene.imageUrlKeyframes || targetScene.imageUrl || targetScene.imageUrlExt;
+    // P0: prefer dual-frame fields; migrate legacy single imageUrlKeyframes → start
+    let startImageUrl = getKeyframesStartFrame(targetScene);
+    if (!startImageUrl && index > 0) {
+      const prev = freshActiveProject.scenes[index - 1];
+      const prevEnd = getKeyframesEndFrame(prev);
+      if (prevEnd) {
+        startImageUrl = prevEnd;
+        updateActiveProject((prevP) => ({
+          scenes: prevP.scenes.map((s) =>
+            s.id === sceneId
+              ? {
+                  ...s,
+                  startFrameKeyframes: prevEnd,
+                  imageUrlKeyframes: prevEnd,
+                  startFrameSourceKeyframes: "inherited_prev_end",
+                }
+              : s
+          ),
+        }));
+      }
+    }
     if (!startImageUrl) {
-      alert("請先完成本分鏡的繪圖或智慧自動銜接！");
+      startImageUrl = targetScene.imageUrlKeyframes || targetScene.imageUrl || targetScene.imageUrlExt || "";
+    }
+    if (!startImageUrl) {
+      alert("請先完成本分鏡的首幀（或繼承上鏡尾幀）！");
       return;
     }
 
-    let endImageUrl: string | undefined = undefined;
-    if (index < activeProject.scenes.length - 1) {
-      const nextScene = activeProject.scenes[index + 1];
-      const foundEndImage = nextScene.imageUrlKeyframes || nextScene.imageUrl || nextScene.imageUrlExt;
-      if (!foundEndImage) {
-        alert(`請先完成下一分鏡「${nextScene.title}」的繪圖，以作為本分鏡影片的結尾影格！`);
-        return;
-      }
-      endImageUrl = foundEndImage;
+    let endImageUrl = getKeyframesEndFrame(targetScene);
+    if (!endImageUrl) {
+      // Legacy fallback: only if user never ran dual-frame Step3
+      endImageUrl = startImageUrl;
+      showToast("本鏡尚無獨立尾幀，暫時以首幀作為尾幀（建議重新跑 Step3 生成尾幀）。", "info");
     }
 
     // Product rules: dialogue-first, EN soft subtitle if pure narration, hard-cap ≤5s
@@ -3113,10 +3208,17 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           return { 
             ...s, 
             ...speechScene,
+            startFrameKeyframes: s.startFrameKeyframes || startImageUrl,
+            endFrameKeyframes: s.endFrameKeyframes || endImageUrl,
+            imageUrlKeyframes: s.imageUrlKeyframes || startImageUrl,
             durationSeconds: finalDurationSeconds,
             isGeneratingVideoKeyframes: true, 
             videoProgressKeyframes: "0%",
-            videoLogsKeyframes: ["[SYSTEM] Initiating Agnes Start-End Keyframes Video call..."],
+            videoLogsKeyframes: [
+              "[SYSTEM] Initiating Agnes Keyframes Video (this-shot start → this-shot end)...",
+              `[SYSTEM] Start frame: ${startImageUrl.slice(0, 80)}...`,
+              `[SYSTEM] End frame: ${endImageUrl.slice(0, 80)}...`,
+            ],
             policyRetryCount: s.isRetryingPolicy ? s.policyRetryCount : 0,
             isRetryingPolicy: s.isRetryingPolicy || false
           };
@@ -3142,11 +3244,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         ? ` (Silent atmospheric scene, closed mouth. Soft English subtitles in player only — do NOT burn text into frames.)`
         : "";
       const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
+      // Continuity: animate FROM this start still TO this end still (not next scene's image)
       let transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : "";
-      if (endImageUrl && index < activeProject.scenes.length - 1) {
-        const nextScene = activeProject.scenes[index + 1];
-        transitionAddon += ` The character smoothly moves and transitions from the current state into the end frame's state: [${nextScene.visualPrompt}]. Make sure to animate the logical physical action connecting these two states (e.g., standing up, walking, turning around, changing pose).`;
-      }
+      transitionAddon += ` Start frame is locked. Animate smoothly toward the end-frame still of THIS shot. Keep character identity and clothing consistent.`;
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
       const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${dialogueAddon}${narrationAddon}${transitionAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
 
@@ -3644,10 +3744,19 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         await new Promise(r => setTimeout(r, 600));
 
         // ------------------------------------------
-        // STEP 3: 關鍵幀生成 (Keyframe Image Generation)
+        // STEP 3: 雙幀生成 (P0 Keyframes dual-frame)
+        // Shot1: generate Start + End in parallel
+        // Shot2+: inherit prev End as Start; only generate End
         // ------------------------------------------
         updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
+          scenes: prev.scenes.map(s => s.id === scene.id ? {
+            ...s,
+            workflowStep: 3,
+            isGeneratingImageKeyframes: true,
+            isGeneratingStartFrameKeyframes: i === 0,
+            isGeneratingEndFrameKeyframes: true,
+            step3ImageErrorKeyframes: "",
+          } : s)
         }));
 
         let imageSuccess = false;
@@ -3656,78 +3765,176 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
         while (!imageSuccess && imgRetryCount < maxImgAttempts) {
           imgRetryCount++;
-          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎨 步驟 3/7：正在呼叫 AI 畫師繪製首影格極致畫面 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
-          
-          await handleGenerateImage(scene.id, 'agnes', 'keyframes');
-
-          // Wait/Poll until generation flag is false and URL is present
           try {
-            await new Promise<void>((resolve, reject) => {
-              let checkCount = 0;
-              const checkImgInterval = setInterval(() => {
-                checkCount++;
-                const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const curProj = curProjList.find(p => p.id === activeProjectId);
-                const freshS = curProj?.scenes.find(s => s.id === scene.id);
+            // Fresh scene after step2 + prev for inheritance
+            const curProjList0 = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj0 = curProjList0.find(p => p.id === activeProjectId);
+            const freshScene0 = curProj0?.scenes.find(s => s.id === scene.id) || scene;
+            const prevScene0 = i > 0 && curProj0 ? curProj0.scenes[i - 1] : null;
 
-                if (freshS) {
-                  if (!freshS[isGenImgField]) {
-                    clearInterval(checkImgInterval);
-                    if (freshS[imageField]) {
-                      resolve();
-                    } else {
-                      reject(new Error("影像生成完畢，但未回傳有效影像網址。"));
-                    }
-                  }
-                }
-                if (checkCount > 180) { // 3 minutes timeout
-                  clearInterval(checkImgInterval);
-                  reject(new Error("影像生成伺服器響應超時。"));
-                }
-              }, 1500);
-            });
-
-            // Re-read fresh URL
-            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-            const curProj = curProjList.find(p => p.id === activeProjectId);
-            const freshS = curProj?.scenes.find(s => s.id === scene.id);
-
-            if (freshS && freshS[imageField]) {
-              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 3/7：關鍵幀分鏡插圖生成成功！`]);
+            if (i === 0) {
+              setFullAutoLogs(prev => [...prev, `[鏡頭 1] 🎨 步驟 3/7：並發生成【首幀 + 尾幀】(嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
+              const startPrompt = buildKeyframesStartPrompt(freshScene0);
+              const endPrompt = buildKeyframesEndPrompt(freshScene0);
+              const [startUrl, endUrl] = await Promise.all([
+                generateKeyframesStillUrl(freshScene0, startPrompt),
+                generateKeyframesStillUrl(freshScene0, endPrompt),
+              ]);
+              const endDesc = `End frame of shot 1 "${freshScene0.title}": progressed from opening still; same character/outfit.`;
+              updateActiveProject((prev) => ({
+                scenes: prev.scenes.map(s => s.id === scene.id ? {
+                  ...s,
+                  startFrameKeyframes: startUrl,
+                  endFrameKeyframes: endUrl,
+                  imageUrlKeyframes: startUrl,
+                  startFrameSourceKeyframes: "generated",
+                  endFrameDescriptionKeyframes: endDesc,
+                  isGeneratingImageKeyframes: false,
+                  isGeneratingStartFrameKeyframes: false,
+                  isGeneratingEndFrameKeyframes: false,
+                  step3ImageErrorKeyframes: "",
+                } : s)
+              }));
+              try {
+                const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                const updatedList = curList.map(p => p.id === activeProjectId ? {
+                  ...p,
+                  scenes: p.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    startFrameKeyframes: startUrl,
+                    endFrameKeyframes: endUrl,
+                    imageUrlKeyframes: startUrl,
+                    startFrameSourceKeyframes: "generated" as const,
+                    endFrameDescriptionKeyframes: endDesc,
+                    isGeneratingImageKeyframes: false,
+                    isGeneratingStartFrameKeyframes: false,
+                    isGeneratingEndFrameKeyframes: false,
+                  } : s)
+                } : p);
+                localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+              } catch (e) {}
+              setFullAutoLogs(prev => [...prev, `[鏡頭 1] ✅ 步驟 3/7：首幀 + 尾幀皆已生成（雙幀鏈建立）`]);
               imageSuccess = true;
             } else {
-              throw new Error("網址映射失敗");
+              // Shot 2+: inherit previous end as start
+              const prevEnd = prevScene0 ? getKeyframesEndFrame(prevScene0) : "";
+              if (!prevEnd) {
+                throw new Error(`鏡頭 ${i + 1} 無法繼承首幀：上一個鏡頭沒有尾幀 endFrameKeyframes`);
+              }
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🔗 步驟 3/7：繼承鏡頭 ${i} 尾幀作為本鏡首幀；僅生成尾幀 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
+
+              updateActiveProject((prev) => ({
+                scenes: prev.scenes.map(s => s.id === scene.id ? {
+                  ...s,
+                  startFrameKeyframes: prevEnd,
+                  imageUrlKeyframes: prevEnd,
+                  startFrameSourceKeyframes: "inherited_prev_end",
+                  isGeneratingStartFrameKeyframes: false,
+                  isGeneratingEndFrameKeyframes: true,
+                  isGeneratingImageKeyframes: true,
+                } : s)
+              }));
+
+              const endPrompt = buildKeyframesEndPrompt(
+                freshScene0,
+                prevScene0?.endFrameDescriptionKeyframes || ""
+              );
+              const endUrl = await generateKeyframesStillUrl(freshScene0, endPrompt);
+              const endDesc = `End frame of shot ${i + 1} "${freshScene0.title}"; continues from inherited prev end; same identity/outfit.`;
+
+              updateActiveProject((prev) => ({
+                scenes: prev.scenes.map(s => s.id === scene.id ? {
+                  ...s,
+                  startFrameKeyframes: prevEnd,
+                  imageUrlKeyframes: prevEnd,
+                  endFrameKeyframes: endUrl,
+                  startFrameSourceKeyframes: "inherited_prev_end",
+                  endFrameDescriptionKeyframes: endDesc,
+                  isGeneratingImageKeyframes: false,
+                  isGeneratingStartFrameKeyframes: false,
+                  isGeneratingEndFrameKeyframes: false,
+                  step3ImageErrorKeyframes: "",
+                } : s)
+              }));
+              try {
+                const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                const updatedList = curList.map(p => p.id === activeProjectId ? {
+                  ...p,
+                  scenes: p.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    startFrameKeyframes: prevEnd,
+                    imageUrlKeyframes: prevEnd,
+                    endFrameKeyframes: endUrl,
+                    startFrameSourceKeyframes: "inherited_prev_end" as const,
+                    endFrameDescriptionKeyframes: endDesc,
+                    isGeneratingImageKeyframes: false,
+                    isGeneratingStartFrameKeyframes: false,
+                    isGeneratingEndFrameKeyframes: false,
+                  } : s)
+                } : p);
+                localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+              } catch (e) {}
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 3/7：首幀=上鏡尾幀（已鎖定），尾幀已新生成`]);
+              imageSuccess = true;
             }
           } catch (imgErr: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 3/7 關鍵幀生成失敗 (嘗試 ${imgRetryCount}/${maxImgAttempts}): ${imgErr.message || imgErr}`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 3/7 雙幀生成失敗 (嘗試 ${imgRetryCount}/${maxImgAttempts}): ${imgErr.message || imgErr}`]);
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? {
+                ...s,
+                step3ImageErrorKeyframes: imgErr?.message || String(imgErr),
+                isGeneratingImageKeyframes: false,
+                isGeneratingStartFrameKeyframes: false,
+                isGeneratingEndFrameKeyframes: false,
+              } : s)
+            }));
             if (imgRetryCount >= maxImgAttempts) {
               if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 3 連續出錯達 10 次上限，全自動製片暫停，請手動調整！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 連續失敗 10 次，已暫停，無繞過。`, "error");
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 3 連續出錯達上限，全自動製片暫停！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} Step3 失敗，已暫停。`, "error");
                 throw new Error("STRICT_LOCK_PAUSE");
               } else {
-                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 步驟 3 失敗，自動套用極速安全備用畫面...`]);
+                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 步驟 3 失敗，套用備用首尾幀...`]);
                 const fallbackImg = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80";
+                let startFb = fallbackImg;
+                let source: Scene["startFrameSourceKeyframes"] = "forced_pass_fallback";
+                try {
+                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const curProj = curList.find(p => p.id === activeProjectId);
+                  if (i > 0 && curProj) {
+                    const pe = getKeyframesEndFrame(curProj.scenes[i - 1]);
+                    if (pe) {
+                      startFb = pe;
+                      source = "inherited_prev_end";
+                    }
+                  }
+                } catch (e) {}
                 updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? { 
-                    ...s, 
-                    imageUrl: fallbackImg, 
-                    imageUrlExt: fallbackImg, 
-                    imageUrlKeyframes: fallbackImg,
-                    isGeneratingImage: false,
-                    isGeneratingImageExt: false,
-                    isGeneratingImageKeyframes: false
+                  scenes: prev.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    startFrameKeyframes: startFb,
+                    endFrameKeyframes: fallbackImg,
+                    imageUrlKeyframes: startFb,
+                    startFrameSourceKeyframes: source,
+                    isGeneratingImageKeyframes: false,
+                    isGeneratingStartFrameKeyframes: false,
+                    isGeneratingEndFrameKeyframes: false,
                   } : s)
                 }));
-                // sync to localStorage
                 try {
                   const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
                   const updatedList = curList.map(p => p.id === activeProjectId ? {
                     ...p,
-                    scenes: p.scenes.map(s => s.id === scene.id ? { ...s, imageUrl: fallbackImg, imageUrlExt: fallbackImg, imageUrlKeyframes: fallbackImg } : s)
+                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      startFrameKeyframes: startFb,
+                      endFrameKeyframes: fallbackImg,
+                      imageUrlKeyframes: startFb,
+                      startFrameSourceKeyframes: source,
+                    } : s)
                   } : p);
                   localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-                } catch(e) {}
+                } catch (e) {}
                 imageSuccess = true;
               }
             } else {
@@ -3762,9 +3969,12 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                imageUrl: freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes,
+                // Prefer dual-frame start; fall back to legacy imageUrlKeyframes
+                imageUrl: getKeyframesStartFrame(freshS) || freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes,
+                endImageUrl: getKeyframesEndFrame(freshS) || undefined,
                 visualPrompt: freshS.visualPrompt,
-                characterDescription: characterObj?.description || ""
+                characterDescription: characterObj?.description || "",
+                startFrameSource: freshS.startFrameSourceKeyframes || "",
               })
             });
 
@@ -4108,11 +4318,21 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
           if (resAdvice.ok) {
             const adviceData = await resAdvice.json();
-            const advice = adviceData.advice || "維持上一鏡頭中人物的服裝色彩與氛圍基調。";
+            const baseAdvice = adviceData.advice || "維持上一鏡頭中人物的服裝色彩與氛圍基調。";
+            // P0: always embed end-frame contract for next shot
+            const endUrl = getKeyframesEndFrame(freshS);
+            const endDesc = freshS.endFrameDescriptionKeyframes || `Shot ${i + 1} end still`;
+            const advice = [
+              baseAdvice,
+              `【下鏡首幀鎖定】必須使用本鏡尾幀作為開場。`,
+              endUrl ? `尾幀URL: ${endUrl}` : "尾幀URL: （未生成）",
+              `尾幀描述: ${endDesc}`,
+            ].join(" ");
             updateActiveProject((prev) => ({
               scenes: prev.scenes.map(s => s.id === scene.id ? {
                 ...s,
                 step7AdviceForNext: advice,
+                endFrameDescriptionKeyframes: endDesc,
                 isGeneratingStep7: false,
                 workflowStep: 7
               } : s)
@@ -4125,28 +4345,35 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 ...p,
                 scenes: p.scenes.map(s => s.id === scene.id ? {
                   ...s,
-                  step7AdviceForNext: advice
+                  step7AdviceForNext: advice,
+                  endFrameDescriptionKeyframes: endDesc,
                 } : s)
               } : p);
               localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
             } catch(e) {}
 
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7：物理連續性傳導建議已完美生成：${advice}`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7：已寫入下鏡建議（含尾幀資訊）`]);
           } else {
             throw new Error("連續性分析 API 響應錯誤");
           }
         } catch (adviceErr: any) {
           console.warn("Advice step failed, fallback applied:", adviceErr);
-          const fallbackAdvice = "維持上一分鏡角色一致服飾即可。";
+          const curProjListFb = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+          const curProjFb = curProjListFb.find(p => p.id === activeProjectId);
+          const freshFb = curProjFb?.scenes.find(s => s.id === scene.id) || scene;
+          const endUrl = getKeyframesEndFrame(freshFb);
+          const endDesc = freshFb.endFrameDescriptionKeyframes || "Keep costume and pose continuous.";
+          const fallbackAdvice = `維持上一分鏡角色一致服飾。【下鏡首幀鎖定】使用本鏡尾幀。尾幀URL: ${endUrl || "N/A"}。尾幀描述: ${endDesc}`;
           updateActiveProject((prev) => ({
             scenes: prev.scenes.map(s => s.id === scene.id ? {
               ...s,
               step7AdviceForNext: fallbackAdvice,
+              endFrameDescriptionKeyframes: endDesc,
               isGeneratingStep7: false,
               workflowStep: 7
             } : s)
           }));
-          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 7/7：已自動套用安全連續性對齊對應。`]);
+          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 7/7：已套用含尾幀鎖定的安全建議。`]);
         }
 
         // Calculate intermediate progress
@@ -8678,19 +8905,25 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       <div className="space-y-6">
                         {activeProject.scenes.map((scene, index) => {
                           const nextScene = index < activeProject.scenes.length - 1 ? activeProject.scenes[index + 1] : undefined;
-                          const startImageUrl = scene.imageUrlKeyframes || scene.imageUrlExt || scene.imageUrl;
-                          const endImageUrl = nextScene ? (nextScene.imageUrlKeyframes || nextScene.imageUrlExt || nextScene.imageUrl) : undefined;
+                          // P0: start/end are THIS shot's dual frames (not next shot's image)
+                          const startImageUrl =
+                            scene.startFrameKeyframes ||
+                            scene.imageUrlKeyframes ||
+                            scene.imageUrlExt ||
+                            scene.imageUrl ||
+                            "";
+                          const endImageUrl = scene.endFrameKeyframes || "";
                           return (
                           <div key={scene.id} className="space-y-4">
-                            {index < activeProject.scenes.length - 1 ? (
+                            {index === 0 ? (
                               <div className="flex items-center space-x-2 pl-6 text-purple-400 text-[10px] font-bold font-mono">
                                 <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
-                                <span>🧬 首影格為「分鏡 {index + 1} 圖片」，尾影格將自動指定為「分鏡 {index + 2} 圖片」(首尾轉換過渡啟用)</span>
+                                <span>🧬 鏡頭1：並發生成【首幀 + 尾幀】；影片 = 本鏡首幀 → 本鏡尾幀</span>
                               </div>
                             ) : (
-                              <div className="flex items-center space-x-2 pl-6 text-purple-400 text-[10px] font-bold font-mono">
-                                <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
-                                <span>🧬 結尾分鏡：首影格為「分鏡 {index + 1} 圖片」，無後續分鏡作為尾影格 (將自動過渡至故事結尾)</span>
+                              <div className="flex items-center space-x-2 pl-6 text-cyan-400 text-[10px] font-bold font-mono">
+                                <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
+                                <span>🔗 鏡頭{index + 1}：首幀 = 上鏡尾幀（鎖定）｜僅生成新尾幀｜影片 = 本鏡首→尾</span>
                               </div>
                             )}
 
@@ -8943,7 +9176,31 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       id={`upload-scene-img-kf-${scene.id}`} 
                                       accept="image/*" 
                                       className="hidden" 
-                                      onChange={(e) => handleUploadSceneImage(e, scene.id, "imageUrlKeyframes")} 
+                                      onChange={async (e) => {
+                                        await handleUploadSceneImage(e, scene.id, "imageUrlKeyframes");
+                                        // Keep dual-frame start in sync when user replaces start still
+                                        try {
+                                          const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                                          const p = list.find((x) => x.id === activeProjectId);
+                                          const s = p?.scenes.find((x) => x.id === scene.id);
+                                          if (s?.imageUrlKeyframes) {
+                                            updateActiveProject((prev) => ({
+                                              scenes: prev.scenes.map((sc) =>
+                                                sc.id === scene.id
+                                                  ? {
+                                                      ...sc,
+                                                      startFrameKeyframes: sc.imageUrlKeyframes,
+                                                      startFrameSourceKeyframes:
+                                                        sc.startFrameSourceKeyframes === "inherited_prev_end"
+                                                          ? "inherited_prev_end"
+                                                          : "generated",
+                                                    }
+                                                  : sc
+                                              ),
+                                            }));
+                                          }
+                                        } catch { /* ignore */ }
+                                      }}
                                     />
 
                                     {scene.videoUrlKeyframes ? (
@@ -9021,33 +9278,97 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           <div className="absolute top-2 left-2 bg-black/80 backdrop-blur text-purple-400 text-[9px] px-2 py-0.5 rounded-md border border-purple-500/30 font-bold font-mono z-20 shadow-sm shadow-purple-900/50">
                                             🎬 首幀 (START)
                                           </div>
+                                          {scene.startFrameSourceKeyframes === "inherited_prev_end" && (
+                                            <div className="absolute bottom-2 left-2 right-2 z-20 bg-cyan-950/90 border border-cyan-400/40 text-cyan-200 text-[8px] font-bold px-1.5 py-1 rounded text-center leading-tight">
+                                              上鏡尾幀 → 本鏡首幀（已鎖定）
+                                            </div>
+                                          )}
+                                          {scene.startFrameSourceKeyframes === "generated" && (
+                                            <div className="absolute bottom-2 left-2 z-20 bg-purple-950/90 border border-purple-400/30 text-purple-200 text-[8px] font-bold px-1.5 py-0.5 rounded">
+                                              本鏡生成首幀
+                                            </div>
+                                          )}
+                                          {scene.startFrameSourceKeyframes === "forced_pass_fallback" && (
+                                            <div className="absolute bottom-2 left-2 z-20 bg-amber-950/90 border border-amber-400/40 text-amber-200 text-[8px] font-bold px-1.5 py-0.5 rounded">
+                                              降級首幀
+                                            </div>
+                                          )}
                                           
                                           {/* Hover overlay for Start */}
                                           <div className="absolute inset-0 opacity-0 group-hover/start:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1 bg-black/60 z-10">
                                             <Upload className="w-4 h-4 text-purple-400 animate-bounce" />
-                                            <span className="text-[10px] font-bold text-slate-100 bg-purple-950/80 border border-purple-500/30 px-2 py-0.5 rounded-full">更換首幀圖片</span>
+                                            <span className="text-[10px] font-bold text-slate-100 bg-purple-950/80 border border-purple-500/30 px-2 py-0.5 rounded-full">
+                                              {scene.startFrameSourceKeyframes === "inherited_prev_end" ? "手動覆蓋鎖定首幀" : "更換首幀圖片"}
+                                            </span>
                                           </div>
                                         </div>
                                         
-                                        {/* End Frame (Right Half) */}
+                                        {/* End Frame (Right Half) — THIS shot's endFrameKeyframes */}
                                         <div 
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            if (nextScene) {
-                                              document.getElementById(`upload-scene-img-kf-${nextScene.id}`)?.click();
-                                            } else {
-                                              showToast("此為最後一幕，無後續分鏡尾幀。如需過渡，可在下方新增自定義銜接場景！", "info");
-                                            }
+                                            document.getElementById(`upload-scene-img-kf-end-${scene.id}`)?.click();
                                           }}
                                           onDragOver={handleImageDragOver}
                                           onDrop={(e) => {
                                             e.stopPropagation();
-                                            if (nextScene) {
-                                              handleImageDrop(e, nextScene.id, "imageUrlKeyframes");
-                                            }
+                                            // Upload into this scene's end frame via custom handler path
+                                            handleImageDrop(e, scene.id, "imageUrlKeyframes");
                                           }}
-                                          className={`flex-1 relative h-full overflow-hidden ${nextScene ? 'cursor-pointer group/end' : ''}`}
+                                          className="flex-1 relative h-full overflow-hidden cursor-pointer group/end"
                                         >
+                                          <input
+                                            type="file"
+                                            id={`upload-scene-img-kf-end-${scene.id}`}
+                                            accept="image/*"
+                                            className="hidden"
+                                            onChange={async (e) => {
+                                              // Reuse upload then map to endFrameKeyframes
+                                              const file = e.target.files?.[0];
+                                              if (!file) return;
+                                              try {
+                                                const reader = new FileReader();
+                                                const dataUrl: string = await new Promise((resolve, reject) => {
+                                                  reader.onload = () => resolve(reader.result as string);
+                                                  reader.onerror = reject;
+                                                  reader.readAsDataURL(file);
+                                                });
+                                                const up = await fetch("/api/upload-image", {
+                                                  method: "POST",
+                                                  headers: { "Content-Type": "application/json" },
+                                                  body: JSON.stringify({ base64Data: dataUrl }),
+                                                });
+                                                const upData = up.ok ? await up.json() : { imageUrl: dataUrl };
+                                                const url = upData.imageUrl || dataUrl;
+                                                updateActiveProject((prev) => ({
+                                                  scenes: prev.scenes.map((s) =>
+                                                    s.id === scene.id
+                                                      ? { ...s, endFrameKeyframes: url }
+                                                      : s
+                                                  ),
+                                                }));
+                                                // Also set next shot start if exists
+                                                if (nextScene) {
+                                                  updateActiveProject((prev) => ({
+                                                    scenes: prev.scenes.map((s) =>
+                                                      s.id === nextScene.id
+                                                        ? {
+                                                            ...s,
+                                                            startFrameKeyframes: url,
+                                                            imageUrlKeyframes: url,
+                                                            startFrameSourceKeyframes: "inherited_prev_end",
+                                                          }
+                                                        : s
+                                                    ),
+                                                  }));
+                                                }
+                                                showToast("已更新本鏡尾幀" + (nextScene ? "，並同步為下鏡首幀" : ""), "success");
+                                              } catch (err: any) {
+                                                showToast("尾幀上傳失敗：" + (err.message || err), "error");
+                                              }
+                                              e.target.value = "";
+                                            }}
+                                          />
                                           {endImageUrl ? (
                                             <img
                                               src={endImageUrl}
@@ -9056,21 +9377,24 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                               referrerPolicy="no-referrer"
                                             />
                                           ) : (
-                                            <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900/80 text-slate-600">
+                                            <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900/80 text-slate-600 gap-1">
                                               <span className="text-[10px] font-mono">尾幀未就緒</span>
+                                              <span className="text-[8px] text-slate-500">全自動 Step3 會生成</span>
                                             </div>
                                           )}
                                           <div className="absolute top-2 right-2 bg-black/80 backdrop-blur text-emerald-400 text-[9px] px-2 py-0.5 rounded-md border border-emerald-500/30 font-bold font-mono z-20 shadow-sm shadow-emerald-900/50">
                                             尾幀 (END) 🏁
                                           </div>
-
-                                          {/* Hover overlay for End */}
-                                          {nextScene && (
-                                            <div className="absolute inset-0 opacity-0 group-hover/end:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1 bg-black/60 z-10">
-                                              <Upload className="w-4 h-4 text-emerald-400 animate-bounce" />
-                                              <span className="text-[10px] font-bold text-slate-100 bg-emerald-950/80 border border-emerald-500/30 px-2 py-0.5 rounded-full">更換尾幀 (同步下幕首幀)</span>
+                                          {endImageUrl && nextScene && (
+                                            <div className="absolute bottom-2 left-2 right-2 z-20 bg-emerald-950/90 border border-emerald-400/30 text-emerald-200 text-[8px] font-bold px-1.5 py-1 rounded text-center leading-tight">
+                                              將作為下鏡首幀
                                             </div>
                                           )}
+
+                                          <div className="absolute inset-0 opacity-0 group-hover/end:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1 bg-black/60 z-10">
+                                            <Upload className="w-4 h-4 text-emerald-400 animate-bounce" />
+                                            <span className="text-[10px] font-bold text-slate-100 bg-emerald-950/80 border border-emerald-500/30 px-2 py-0.5 rounded-full">更換本鏡尾幀</span>
+                                          </div>
                                         </div>
 
                                         {/* VS Badge */}
