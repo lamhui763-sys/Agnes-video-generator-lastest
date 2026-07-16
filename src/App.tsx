@@ -64,6 +64,7 @@ import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } fr
 import { getProjectSignature, normalizeProjectsList, copyTextToClipboard as copyTextToClipboardUtil } from "./lib/projectUtils";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { PrintModal } from "./components/PrintModal";
+import { WorkflowStepper } from "./components/WorkflowStepper";
 
 
 export default function App() {
@@ -1326,6 +1327,82 @@ export default function App() {
   const getKeyframesEndFrame = (s: Scene): string =>
     (s.endFrameKeyframes || "").trim();
 
+  /** Mandatory visual locks from character sheet — prevents QA loop when model drops signature props. */
+  const buildCharacterLockBlock = (scene: Scene): string => {
+    if (!activeProject) return "";
+    const clean = (scene.character || "").trim().toLowerCase();
+    if (!clean || clean === "旁白" || clean === "narrator") return "";
+    const c = activeProject.characters.find((x) => (x.name || "").trim().toLowerCase() === clean);
+    if (!c) return "";
+    const bits = [
+      c.name ? `Character name: ${c.name}` : "",
+      c.description ? `MUST match description: ${c.description}` : "",
+      c.clothing ? `MUST wear: ${c.clothing}` : "",
+      c.age ? `Age: ${c.age}` : "",
+      c.personality ? `Personality vibe: ${c.personality}` : "",
+    ].filter(Boolean);
+    if (!bits.length) return "";
+    return ` [MANDATORY CHARACTER IDENTITY LOCK — do not omit any signature props, prosthetics, goggles, weapons, containers, or chest ports]: ${bits.join(". ")}.`;
+  };
+
+  /** After Step4 fail: rewrite prompt so next draw fixes missing features (not just redraw same prompt). */
+  const reviseKeyframesPromptFromReview = async (
+    scene: Scene,
+    critique: string,
+    attempt: number
+  ): Promise<{ visualPrompt: string; negativePrompt: string }> => {
+    const lock = buildCharacterLockBlock(scene);
+    const base = scene.step2OptimizedPrompt || scene.visualPrompt || "";
+    // Local hard patch always applied (works even if AI revise API fails)
+    const hardFix = [
+      base,
+      lock,
+      `[QA FAIL FIX attempt ${attempt}] Previous image was rejected for: ${critique.slice(0, 500)}`,
+      "RE-DRAW REQUIREMENTS: Every missing prop listed in the QA critique MUST be clearly visible and large enough to read.",
+      "If QA mentioned mechanical left arm / prosthetic / brass / pistons — draw a heavy brass mechanical LEFT arm with pistons, hydraulics, steam vents (not a normal flesh arm).",
+      "If QA mentioned glass container / blood crystal / 紅寶石 / 容器 — character MUST hold a transparent glass vial with a glowing pulsating red crystal.",
+      "If QA mentioned goggles / 護目鏡 — tactical goggles covering eyes.",
+      "If QA mentioned rooftop / rain / industrial — night rain industrial rooftop, wet metal, copper antennas.",
+      "Completely clean image, no text, no subtitles, no watermark.",
+    ].join(" ");
+
+    let visualPrompt = hardFix;
+    let negativePrompt =
+      (scene.negativePrompt || "") +
+      ", missing mechanical arm, flesh left arm instead of prosthetic, missing goggles, missing glass vial, missing red crystal, wrong chest gem instead of unlit port, clean modern street instead of industrial rooftop, extra fingers, deformed hands";
+
+    try {
+      const characterObj = activeProject?.characters.find(
+        (c) => (c.name || "").trim().toLowerCase() === (scene.character || "").trim().toLowerCase()
+      );
+      const res = await fetch("/api/optimize-prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: hardFix.slice(0, 3500),
+          artStyle: activeProject?.artStyle || "",
+          character: scene.character || "",
+          characterDescription: characterObj?.description || "",
+          context: `Image QA failed. Rewrite a STRONGER English visual prompt that forces ALL missing elements from this critique into the frame: ${critique.slice(0, 800)}`,
+          customApiKey: customApiKey || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.optimizedPrompt) {
+          visualPrompt = `${data.optimizedPrompt}${lock} [QA-driven rewrite attempt ${attempt}]`;
+        }
+        if (data.negativePrompt) {
+          negativePrompt = data.negativePrompt + ", missing mechanical prosthetic left arm, missing glass container with red crystal, missing tactical goggles";
+        }
+      }
+    } catch (e) {
+      console.warn("[Toonflow] Prompt revise API failed, using hard-fix prompt", e);
+    }
+
+    return { visualPrompt, negativePrompt };
+  };
+
   /** Call /api/generate-image and return URL (used only by keyframes Step3 dual-frame). */
   const generateKeyframesStillUrl = async (scene: Scene, visualPrompt: string): Promise<string> => {
     if (!activeProject) throw new Error("No active project");
@@ -1335,6 +1412,8 @@ export default function App() {
     );
     let charDesc = characterObj?.description || "";
     if (characterObj?.clothing) charDesc += `. Ensure wearing: ${characterObj.clothing}.`;
+    // Always bake identity lock into the prompt sent to the image API
+    const lockedPrompt = `${visualPrompt}${buildCharacterLockBlock(scene)}`;
     const characterImages =
       characterObj?.uploadedAvatarUrls && characterObj.uploadedAvatarUrls.length > 0
         ? characterObj.uploadedAvatarUrls
@@ -1346,7 +1425,7 @@ export default function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        prompt: visualPrompt,
+        prompt: lockedPrompt,
         negativePrompt: scene.negativePrompt,
         artStyle: characterObj?.artStyle || activeProject.artStyle,
         character: scene.character,
@@ -1385,6 +1464,102 @@ export default function App() {
       : "";
     const action = scene.actionPrompt ? ` Action progressed to end state: ${scene.actionPrompt}.` : "";
     return `${base}.${action}${cont} Ending still of this shot: same character identity and clothing, slightly progressed pose suitable as the next shot opening. Completely clean image, no text, no subtitles, no watermark.`;
+  };
+
+  /** Re-run dual-frame image gen for one scene (used after Step4 fail with revised prompts). */
+  const regenerateKeyframesDualFrames = async (sceneId: string, index: number): Promise<void> => {
+    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+    const curProj = curProjList.find((p) => p.id === activeProjectId);
+    if (!curProj) throw new Error("專案不存在");
+    const fresh = curProj.scenes.find((s) => s.id === sceneId);
+    if (!fresh) throw new Error("分鏡不存在");
+    const prev = index > 0 ? curProj.scenes[index - 1] : null;
+
+    if (index === 0) {
+      const [startUrl, endUrl] = await Promise.all([
+        generateKeyframesStillUrl(fresh, buildKeyframesStartPrompt(fresh)),
+        generateKeyframesStillUrl(fresh, buildKeyframesEndPrompt(fresh)),
+      ]);
+      updateActiveProject((prevP) => ({
+        scenes: prevP.scenes.map((s) =>
+          s.id === sceneId
+            ? {
+                ...s,
+                startFrameKeyframes: startUrl,
+                endFrameKeyframes: endUrl,
+                imageUrlKeyframes: startUrl,
+                startFrameSourceKeyframes: "generated",
+                isGeneratingImageKeyframes: false,
+              }
+            : s
+        ),
+      }));
+      try {
+        const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const updated = list.map((p) =>
+          p.id === activeProjectId
+            ? {
+                ...p,
+                scenes: p.scenes.map((s) =>
+                  s.id === sceneId
+                    ? {
+                        ...s,
+                        startFrameKeyframes: startUrl,
+                        endFrameKeyframes: endUrl,
+                        imageUrlKeyframes: startUrl,
+                        startFrameSourceKeyframes: "generated" as const,
+                      }
+                    : s
+                ),
+              }
+            : p
+        );
+        localStorage.setItem("toonflow_projects", JSON.stringify(updated));
+      } catch { /* ignore */ }
+    } else {
+      const prevEnd = prev ? getKeyframesEndFrame(prev) : "";
+      if (!prevEnd) throw new Error("上鏡無尾幀，無法重繪");
+      const endUrl = await generateKeyframesStillUrl(
+        fresh,
+        buildKeyframesEndPrompt(fresh, prev?.endFrameDescriptionKeyframes)
+      );
+      updateActiveProject((prevP) => ({
+        scenes: prevP.scenes.map((s) =>
+          s.id === sceneId
+            ? {
+                ...s,
+                startFrameKeyframes: prevEnd,
+                imageUrlKeyframes: prevEnd,
+                endFrameKeyframes: endUrl,
+                startFrameSourceKeyframes: "inherited_prev_end",
+                isGeneratingImageKeyframes: false,
+              }
+            : s
+        ),
+      }));
+      try {
+        const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const updated = list.map((p) =>
+          p.id === activeProjectId
+            ? {
+                ...p,
+                scenes: p.scenes.map((s) =>
+                  s.id === sceneId
+                    ? {
+                        ...s,
+                        startFrameKeyframes: prevEnd,
+                        imageUrlKeyframes: prevEnd,
+                        endFrameKeyframes: endUrl,
+                        startFrameSourceKeyframes: "inherited_prev_end" as const,
+                      }
+                    : s
+                ),
+              }
+            : p
+        );
+        localStorage.setItem("toonflow_projects", JSON.stringify(updated));
+      } catch { /* ignore */ }
+    }
   };
 
   // Render function for Toonflow Global Storyboard Director Chatbot
@@ -4050,29 +4225,50 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 reviewSuccess = true;
               }
             } else {
-              // Trigger a re-draw under strict lock
-              if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🔄 由於畫面審核未通過，重新為鏡頭 ${i + 1} 重新繪製首格影像...`]);
-                await handleGenerateImage(scene.id, 'agnes', 'keyframes');
-                await new Promise<void>((resolve) => {
-                  const checkImgInterval = setInterval(() => {
-                    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                    const curProj = curProjList.find(p => p.id === activeProjectId);
-                    const freshS = curProj?.scenes.find(s => s.id === scene.id);
-                    if (freshS && !freshS[isGenImgField]) {
-                      clearInterval(checkImgInterval);
-                      resolve();
-                    }
-                  }, 2000);
-                });
+              // Auto-revise prompt from QA critique, then re-run dual-frame keyframes generation
+              const critiqueText = String(err?.message || err || "");
+              setFullAutoLogs(prev => [...prev, `🧠 [鏡頭 ${i + 1}] 審核未過 → AI 正在根據缺失特徵改寫 Prompt 並重繪雙幀（非同一提示盲重試）...`]);
+              try {
+                const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                const curProj = curList.find(p => p.id === activeProjectId);
+                const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+                const revised = await reviseKeyframesPromptFromReview(freshS, critiqueText, reviewRetryCount);
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    visualPrompt: revised.visualPrompt,
+                    step2OptimizedPrompt: revised.visualPrompt,
+                    negativePrompt: revised.negativePrompt,
+                    step4ImageReviewText: critiqueText,
+                  } : s)
+                }));
+                try {
+                  const list2 = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const updated2 = list2.map(p => p.id === activeProjectId ? {
+                    ...p,
+                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      visualPrompt: revised.visualPrompt,
+                      step2OptimizedPrompt: revised.visualPrompt,
+                      negativePrompt: revised.negativePrompt,
+                    } : s)
+                  } : p);
+                  localStorage.setItem("toonflow_projects", JSON.stringify(updated2));
+                } catch { /* ignore */ }
+
+                setFullAutoLogs(prev => [...prev, `✏️ [鏡頭 ${i + 1}] Prompt 已強化角色鎖定特徵，開始重繪首/尾幀...`]);
+                await regenerateKeyframesDualFrames(scene.id, i);
+                setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 雙幀重繪完成，重新進入審核...`]);
+              } catch (redrawErr: any) {
+                setFullAutoLogs(prev => [...prev, `⚠️ [鏡頭 ${i + 1}] 改寫/重繪失敗：${redrawErr?.message || redrawErr}`]);
               }
-              await new Promise(r => setTimeout(r, 1000));
+              await new Promise(r => setTimeout(r, 800));
             }
           }
         }
 
         // ------------------------------------------
-        // STEP 5: 影片生成 (Video Generation)
+        // STEP 5: 影片生成 (Keyframes start→end ONLY)
         // ------------------------------------------
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 5 } : s)
@@ -4084,13 +4280,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
         while (!videoSuccess && vidRetryCount < maxVidAttempts) {
           vidRetryCount++;
-          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 📹 步驟 5/7：正在呼叫 AI 導演合成影片 (嘗試 ${vidRetryCount}/${maxVidAttempts})...`]);
+          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 📹 步驟 5/7：首尾幀影片合成（本鏡首幀→本鏡尾幀）(嘗試 ${vidRetryCount}/${maxVidAttempts})...`]);
 
           // Clear any backend locks
           await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
 
-          // Trigger video generation
-          await handleGenerateVideo(scene.id, true);
+          // IMPORTANT: keyframes pipeline must use handleGenerateVideoKeyframes (not standard handleGenerateVideo)
+          await handleGenerateVideoKeyframes(scene.id, i);
 
           // Wait/Poll video completion
           try {
@@ -4258,10 +4454,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 videoReviewSuccess = true;
               }
             } else {
-              // Trigger re-generation of video
+              // Trigger re-generation of keyframes video (start→end of THIS shot)
               if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🔄 由於影片審核未通過，重新為鏡頭 ${i + 1} 合成渲染影片...`]);
-                await handleGenerateVideo(scene.id, true);
+                setFullAutoLogs(prev => [...prev, `🔄 由於影片審核未通過，重新為鏡頭 ${i + 1} 合成首尾幀影片...`]);
+                await handleGenerateVideoKeyframes(scene.id, i);
                 await new Promise<void>((resolve, reject) => {
                   let checkCount = 0;
                   const checkVidInterval = setInterval(() => {
@@ -7897,6 +8093,21 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                   </div>
                               )}
 
+                            <div className="px-1">
+                              <WorkflowStepper
+                                workflowStep={scene.workflowStep || 1}
+                                title={`延長模式 · 分鏡 ${index + 1}「${scene.title}」七步進度`}
+                                subtitle={
+                                  scene.isGeneratingVideoExt
+                                    ? `影片延長中 ${scene.videoProgressExt || ""}`
+                                    : scene.videoUrlExt
+                                      ? "已有延長影片"
+                                      : "等待生成 / 審核"
+                                }
+                                accent="emerald"
+                              />
+                            </div>
+
                             <div 
                               draggable
                               onDragStart={(e) => handleDragStart(e, index)}
@@ -8927,6 +9138,22 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                               </div>
                             )}
 
+                            <div className="px-1">
+                              <WorkflowStepper
+                                workflowStep={scene.workflowStep || 1}
+                                title={`分鏡 ${index + 1}「${scene.title}」七步工作流進度`}
+                                subtitle={
+                                  scene.workflowStep === 4
+                                    ? `圖審 ${scene.step4ImageReviewScore || 0}/100 ${scene.step4Passed ? "✓" : "…"}`
+                                    : scene.workflowStep === 6
+                                      ? `片審 ${scene.step6VideoReviewScore || 0}/100 ${scene.step6Passed ? "✓" : "…"}`
+                                      : scene.startFrameSourceKeyframes === "inherited_prev_end"
+                                        ? "首幀=上鏡尾幀（鎖定）"
+                                        : "首尾幀雙幀鏈"
+                                }
+                                accent="purple"
+                              />
+                            </div>
                             <div 
                               draggable
                               onDragStart={(e) => handleDragStart(e, index)}

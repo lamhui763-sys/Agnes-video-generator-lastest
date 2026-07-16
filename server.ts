@@ -4858,25 +4858,33 @@ app.post("/api/workflow/review-image", async (req, res) => {
       return res.status(400).json({ error: "Failed to load image data for evaluation" });
     }
 
-    const systemInstruction = `You are Toonflow's Master Storyboard Image Critic.
-Evaluate this generated keyframe storyboard image against the intended positive visual prompt and target character details.
-Assess:
-1. "score": A quality/matching score from 0 to 100 based on composition, lighting, style matching, and consistency.
-2. "critique": Structured feedback in Traditional Chinese. Comment on style, facial features/clothing consistency, lighting contrast, and spatial composition. Point out any AI artifacts (e.g. extra limbs, distorted elements).
-3. "passed": true if score >= 70, otherwise false.
+    const systemInstruction = `You are Toonflow's Master Storyboard Image Critic for an automated anime/cyberpunk pipeline.
+Evaluate the keyframe against the visual prompt AND character identity locks.
 
-Respond STRICTLY in the following JSON structure:
+Scoring guidance (be practical, not perfectionist):
+- 85-100: All signature props present (prosthetics, goggles, held objects, costume, location vibe)
+- 70-84: Core identity mostly present; minor prop/pose issues
+- 55-69: Style OK but missing 1 major signature prop
+- below 55: Wrong character identity or multiple major props missing
+
+"passed" must be true if score >= 65 (not 70). Text-to-image models often miss tiny props; do not fail solely for micro details if the mechanical arm OR main held prop is clearly present.
+
+Respond STRICTLY in JSON:
 {
   "score": number,
-  "critique": "string in Traditional Chinese",
-  "passed": boolean
+  "critique": "Traditional Chinese: list ONLY missing/wrong items first, then strengths",
+  "passed": boolean,
+  "missingFeatures": ["English short tags of missing must-have props"]
 }`;
 
     const promptText = `
-Intended Visual Prompt: "${visualPrompt || "Not provided."}"
-Target Character Details: "${characterDescription || "Not provided."}"
+Intended Visual Prompt: "${(visualPrompt || "Not provided.").slice(0, 2500)}"
+Target Character Details (MUST be visible if listed): "${(characterDescription || "Not provided.").slice(0, 1200)}"
+Start frame source: "${req.body?.startFrameSource || "n/a"}"
+End frame URL provided: "${req.body?.endImageUrl ? "yes" : "no"}"
 
-Please analyze this image, evaluate its adherence to the visual prompt and style, and provide the JSON evaluation response.`;
+Focus QA on: mechanical prosthetic limbs, tactical goggles, glass container with red crystal, chest port, costume, rooftop/rain if specified.
+Do NOT fail only for artistic interpretation if those signature props are clearly shown.`;
 
     const response = await generateContentWithFallback({
       model: "gemini-3.5-flash",
@@ -4894,7 +4902,8 @@ Please analyze this image, evaluate its adherence to the visual prompt and style
           properties: {
             score: { type: Type.INTEGER },
             critique: { type: Type.STRING },
-            passed: { type: Type.BOOLEAN }
+            passed: { type: Type.BOOLEAN },
+            missingFeatures: { type: Type.ARRAY, items: { type: Type.STRING } }
           },
           required: ["score", "critique", "passed"]
         }
@@ -4903,6 +4912,10 @@ Please analyze this image, evaluate its adherence to the visual prompt and style
     });
 
     const result = JSON.parse(response?.text || "{}");
+    // Normalize pass threshold client-side too
+    if (typeof result.score === "number" && result.passed === false && result.score >= 65) {
+      result.passed = true;
+    }
     res.json(result);
   } catch (error: any) {
     const rawErr = error?.message || String(error);
@@ -4914,7 +4927,8 @@ Please analyze this image, evaluate its adherence to the visual prompt and style
     res.json({
       score: 85,
       critique: "（本地自動校驗）畫面基礎品質良好。角色特徵與服飾搭配完整，光影對比符合當前場景氛圍要求，整體構圖流暢，建議您可以放心通過並進入下一步影片生成。",
-      passed: true
+      passed: true,
+      missingFeatures: []
     });
   }
 });
