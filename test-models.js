@@ -1,5 +1,5 @@
 async function test() {
-    const key = "cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8";
+    const key = "cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J";
     const model = "models/gemini-3.1-flash-image";
     const res = await fetch("https://apihub.agnes-ai.com/v1/images/generations", {
         method: "POST",

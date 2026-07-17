@@ -1,6 +1,6 @@
 {
   "name": "Remix:   Agnes Video Generator revise 4/7/2026",
-  "description": "Generate high-quality cinematic videos using Agnes AI from text prompts.",
+  "description": "Generate high-quality cinematic videos using Agnes AI with a built-in AI Experience Library for continuous learning and error tracking.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

@@ -3,7 +3,6 @@ import { Scene, Character, Project } from '../types';
 import { Trash2, GripVertical, Clock, Info, Sparkles, Users, ChevronLeft, Plus, RefreshCw, Upload, Film, CheckCircle, AlertCircle, ArrowRight, Star, HelpCircle, Play } from 'lucide-react';
 import { STYLE_PRESETS } from '../data'; // Need to make sure this is available
 import { ScrubbableVideoPlayer } from './ScrubbableVideoPlayer';
-import { getDisplaySubtitle } from '../lib/sceneSpeech';
 
 interface SceneItemProps {
   scene: Scene;
@@ -32,6 +31,7 @@ interface SceneItemProps {
   fullAutoProgress?: string;
   fullAutoLogs?: string[];
   onFullAutoProduce?: () => void;
+  sceneType?: 'standard' | 'ext' | 'keyframes';
 }
 
 const SceneItem: React.FC<SceneItemProps> = React.memo(({
@@ -60,8 +60,19 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
   isFullAutoProducing,
   fullAutoProgress,
   fullAutoLogs,
-  onFullAutoProduce
+  onFullAutoProduce,
+  sceneType = 'standard'
 }) => {
+  const isGenImgField = sceneType === "ext" ? "isGeneratingImageExt" : (sceneType === "keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
+  const imageField = sceneType === "ext" ? "imageUrlExt" : (sceneType === "keyframes" ? "imageUrlKeyframes" : "imageUrl");
+  const isGenVidField = sceneType === "ext" ? "isGeneratingVideoExt" : (sceneType === "keyframes" ? "isGeneratingVideoKeyframes" : "isGeneratingVideo");
+  const videoField = sceneType === "ext" ? "videoUrlExt" : (sceneType === "keyframes" ? "videoUrlKeyframes" : "videoUrl");
+  const errorField = sceneType === "ext" ? "videoErrorExt" : (sceneType === "keyframes" ? "videoErrorKeyframes" : "videoError");
+
+  const nextSceneData = index < scenes.length - 1 ? scenes[index + 1] : undefined;
+  const endImageField = sceneType === "ext" ? "imageUrlExt" : (sceneType === "keyframes" ? "imageUrlKeyframes" : "imageUrl");
+  const endImageUrl = nextSceneData ? nextSceneData[endImageField] : undefined;
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -147,7 +158,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
 
   // Trigger Step 4: AI Storyboard Image Review
   const handleTriggerStep4Review = async () => {
-    if (!scene.imageUrl) {
+    if (!scene[imageField]) {
       showToast("請先生成或上傳分鏡插圖！", "error");
       return;
     }
@@ -158,7 +169,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          imageUrl: scene.imageUrl,
+          imageUrl: scene[imageField],
           visualPrompt: scene.visualPrompt,
           characterDescription: matchingChar?.description || ""
         })
@@ -187,7 +198,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
 
   // Trigger Step 6: AI Final Video Review
   const handleTriggerStep6Review = async () => {
-    if (!scene.videoUrl) {
+    if (!scene[videoField]) {
       showToast("請先在步驟 5 生成影片！", "error");
       return;
     }
@@ -542,29 +553,29 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 <div className="space-y-1">
                   <span className="text-[10px] font-bold text-indigo-400 block uppercase tracking-wider font-mono">當前分鏡插圖狀態</span>
                   <div className="flex items-center gap-1.5">
-                    <div className={`w-2.5 h-2.5 rounded-full ${scene.imageUrl ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
+                    <div className={`w-2.5 h-2.5 rounded-full ${scene[imageField] ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
                     <span className="text-xs font-bold text-slate-300">
-                      {scene.imageUrl ? "✓ 分鏡插圖已就緒" : "✗ 尚未上傳或生成插圖"}
+                      {scene[imageField] ? "✓ 分鏡插圖已就緒" : "✗ 尚未上傳或生成插圖"}
                     </span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    disabled={scene.isGeneratingImage}
+                    disabled={scene[isGenImgField]}
                     onClick={() => handleGenerateImage(scene.id, "agnes")}
                     className="px-3.5 py-1.5 bg-pink-600 hover:bg-pink-500 text-white text-xs font-bold rounded-lg shadow transition active:scale-95 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
                   >
-                    <RefreshCw className={`w-3 h-3 ${scene.isGeneratingImage ? "animate-spin" : ""}`} />
+                    <RefreshCw className={`w-3 h-3 ${scene[isGenImgField] ? "animate-spin" : ""}`} />
                     <span>Agnes 引擎繪圖</span>
                   </button>
                   <button
                     type="button"
-                    disabled={scene.isGeneratingImage}
+                    disabled={scene[isGenImgField]}
                     onClick={() => handleGenerateImage(scene.id, "gemini")}
                     className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg shadow transition active:scale-95 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
                   >
-                    <RefreshCw className={`w-3 h-3 ${scene.isGeneratingImage ? "animate-spin" : ""}`} />
+                    <RefreshCw className={`w-3 h-3 ${scene[isGenImgField] ? "animate-spin" : ""}`} />
                     <span>Gemini 引擎繪圖</span>
                   </button>
                 </div>
@@ -580,7 +591,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 </button>
                 <button
                   type="button"
-                  disabled={!scene.imageUrl}
+                  disabled={!scene[imageField]}
                   onClick={() => updateSceneMultipleFields({ workflowStep: 4 })}
                   className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-bold rounded-lg shadow-lg flex items-center gap-1 transition active:scale-95 cursor-pointer"
                 >
@@ -625,7 +636,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-2 border-t border-slate-800/40">
                 <button
                   type="button"
-                  disabled={scene.isReviewingStep4 || !scene.imageUrl}
+                  disabled={scene.isReviewingStep4 || !scene[imageField]}
                   onClick={handleTriggerStep4Review}
                   className="px-3.5 py-1.5 bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-500/30 text-indigo-300 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 transition active:scale-95 disabled:opacity-50 cursor-pointer"
                 >
@@ -732,21 +743,21 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 <div className="space-y-1">
                   <span className="text-[10px] font-bold text-indigo-400 block uppercase tracking-wider font-mono">影片預覽渲染狀態</span>
                   <div className="flex items-center gap-1.5">
-                    <div className={`w-2.5 h-2.5 rounded-full ${scene.videoUrl ? "bg-emerald-500" : "bg-red-500"}`} />
+                    <div className={`w-2.5 h-2.5 rounded-full ${scene[videoField] ? "bg-emerald-500" : "bg-red-500"}`} />
                     <span className="text-xs font-bold text-slate-300">
-                      {scene.videoUrl ? "✓ 影片預覽渲染已完成" : "✗ 影片尚未生成"}
+                      {scene[videoField] ? "✓ 影片預覽渲染已完成" : "✗ 影片尚未生成"}
                     </span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    disabled={scene.isGeneratingVideo || !scene.imageUrl}
+                    disabled={scene[isGenVidField] || !scene[imageField]}
                     onClick={() => handleGenerateVideo(scene.id)}
                     className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-bold rounded-lg shadow-lg flex items-center gap-1 transition active:scale-95 cursor-pointer"
                   >
-                    <Play className={`w-3.5 h-3.5 ${scene.isGeneratingVideo ? "animate-spin" : ""}`} />
-                    <span>{scene.isGeneratingVideo ? `渲染中 ${scene.videoProgress || "0%"}` : "🎬 啟動 Agnes 影片合成"}</span>
+                    <Play className={`w-3.5 h-3.5 ${scene[isGenVidField] ? "animate-spin" : ""}`} />
+                    <span>{scene[isGenVidField] ? `渲染中 ${scene.videoProgress || "0%"}` : "🎬 啟動 Agnes 影片合成"}</span>
                   </button>
                 </div>
               </div>
@@ -761,7 +772,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 </button>
                 <button
                   type="button"
-                  disabled={!scene.videoUrl}
+                  disabled={!scene[videoField]}
                   onClick={() => updateSceneMultipleFields({ workflowStep: 6 })}
                   className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-bold rounded-lg shadow-lg flex items-center gap-1 transition active:scale-95 cursor-pointer"
                 >
@@ -806,7 +817,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-2 border-t border-slate-800/40">
                 <button
                   type="button"
-                  disabled={scene.isReviewingStep6 || !scene.videoUrl}
+                  disabled={scene.isReviewingStep6 || !scene[videoField]}
                   onClick={handleTriggerStep6Review}
                   className="px-3.5 py-1.5 bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-500/30 text-indigo-300 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 transition active:scale-95 disabled:opacity-50 cursor-pointer"
                 >
@@ -1089,37 +1100,112 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
       {/* Right Col: Storyboard Image / Agnes Video Generation Frame with upgraded 3-Screen Layout */}
       <div className="md:col-span-5 flex flex-col space-y-4">
         {/* Screen 1: Playback Screen / Canvas */}
-        <div 
-          onDragOver={handleImageDragOver}
-          onDrop={(e) => handleImageDrop(e, scene.id, "imageUrl")}
+
+        {sceneType === 'keyframes' ? (
+          <div className="space-y-3">
+            <span className="text-[10px] font-mono text-slate-500 font-bold tracking-wider uppercase block">
+              🎥 首尾影格渲染中心
+            </span>
+            <div className="grid grid-cols-2 gap-4">
+              {/* Start Frame */}
+              <div 
+                className={`relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center ${!scene[imageField] ? 'cursor-pointer group/img' : ''}`}
+                onClick={() => {
+                  if (!scene[videoField]) {
+                    document.getElementById(`upload-scene-img-${scene.id}`)?.click();
+                  }
+                }}
+              >
+                <input 
+                  type="file" 
+                  id={`upload-scene-img-${scene.id}`} 
+                  accept="image/*" 
+                  className="hidden" 
+                  onChange={(e) => handleUploadSceneImage(e, scene.id, imageField as any)} 
+                />
+                {scene[imageField] ? (
+                  <div className="relative w-full h-full">
+                    <img src={scene[imageField]} alt="Start frame" className="w-full h-full object-cover" />
+                    <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] font-mono font-bold text-slate-300">首幀 (START)</div>
+                    {!scene[isGenVidField] && (
+                      <div className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center">
+                        <span className="text-[11px] font-bold text-slate-200">點擊更換</span>
+                      </div>
+                    )}
+                  </div>
+                ) : scene[isGenImgField] ? (
+                  <RefreshCw className="w-6 h-6 text-pink-500 animate-spin" />
+                ) : (
+                  <div className="flex flex-col items-center justify-center opacity-50 group-hover/img:opacity-100">
+                    <Upload className="w-6 h-6 text-slate-500 mb-1" />
+                    <p className="text-[10px] text-slate-400 font-medium">首幀</p>
+                  </div>
+                )}
+              </div>
+              
+              {/* End Frame */}
+              <div className="relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center">
+                {endImageUrl ? (
+                  <div className="relative w-full h-full">
+                    <img src={endImageUrl} alt="End frame" className="w-full h-full object-cover" />
+                    <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] font-mono font-bold text-slate-300">尾幀 (END)</div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center opacity-50 text-center px-4">
+                    <p className="text-[10px] text-slate-400 font-medium">等待下個鏡頭生成</p>
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            {/* If video generated, show below */}
+            {scene[videoField] && (
+              <div className="relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner mt-4">
+                <ScrubbableVideoPlayer src={scene[videoField]} className="w-full h-full object-cover" />
+                <div className="absolute top-2 right-2 flex gap-1 z-30">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm("您確定要重置並重新繪製此分鏡嗎？")) {
+                         // Reset fields
+                      }
+                    }}
+                    className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50"
+                  >
+                    <RefreshCw className="w-2.5 h-2.5" />
+                    <span>重做/重置影片</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div 
+            onDragOver={handleImageDragOver}
+
+          onDrop={(e) => handleImageDrop(e, scene.id, imageField as any)}
           onClick={() => {
-            if (!scene.videoUrl) {
+            if (!scene[videoField]) {
               document.getElementById(`upload-scene-img-${scene.id}`)?.click();
             }
           }}
-          className={`relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center ${!scene.videoUrl ? 'cursor-pointer group/img' : ''}`}
-          title={!scene.videoUrl ? "點擊或拖曳圖片至此處上傳自訂照片" : undefined}
+          className={`relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner flex flex-col items-center justify-center ${!scene[videoField] ? 'cursor-pointer group/img' : ''}`}
+          title={!scene[videoField] ? "點擊或拖曳圖片至此處上傳自訂照片" : undefined}
         >
           <input 
             type="file" 
             id={`upload-scene-img-${scene.id}`} 
             accept="image/*" 
             className="hidden" 
-            onChange={(e) => handleUploadSceneImage(e, scene.id, "imageUrl")} 
+            onChange={(e) => handleUploadSceneImage(e, scene.id, imageField as any)} 
           />
 
-          {scene.videoUrl ? (
+          {scene[videoField] ? (
             <div className="relative w-full h-full" onClick={(e) => e.stopPropagation()}>
               <ScrubbableVideoPlayer
-                src={scene.videoUrl}
+                src={scene[videoField]}
                 className="w-full h-full object-cover"
-                subtitle={getDisplaySubtitle(scene) || undefined}
               />
-              {getDisplaySubtitle(scene) ? (
-                <div className="absolute bottom-0 left-0 right-0 z-40 px-2 py-1.5 bg-black/80 text-center text-[11px] text-emerald-200 font-medium border-t border-emerald-500/30">
-                  字幕: {getDisplaySubtitle(scene)}
-                </div>
-              ) : null}
               {/* Manual redo / reset button */}
               <div className="absolute top-2 right-2 flex gap-1 z-30">
                 <button
@@ -1134,11 +1220,11 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                               if (s.id === scene.id) {
                                 return {
                                   ...s,
-                                  imageUrl: undefined,
-                                  videoUrl: undefined,
-                                  videoProgress: undefined,
-                                  videoLogs: undefined,
-                                  videoError: undefined
+                                  [imageField]: undefined,
+                                  [videoField]: undefined,
+                                  [(sceneType === "ext" ? "videoProgressExt" : (sceneType === "keyframes" ? "videoProgressKeyframes" : "videoProgress"))]: undefined,
+                                  [(sceneType === "ext" ? "videoLogsExt" : (sceneType === "keyframes" ? "videoLogsKeyframes" : "videoLogs"))]: undefined,
+                                  [errorField]: undefined
                                 };
                               }
                               return s;
@@ -1160,15 +1246,15 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 </button>
               </div>
             </div>
-          ) : scene.imageUrl ? (
+          ) : scene[imageField] ? (
             <div className="relative w-full h-full">
               <img 
-                src={scene.imageUrl} 
+                src={scene[imageField]} 
                 alt={scene.title} 
-                className={`w-full h-full object-cover transition-transform duration-[6000ms] ease-out transform scale-100 ${scene.isGeneratingVideo ? 'opacity-40 scale-105' : 'group-hover/img:scale-105'}`} 
+                className={`w-full h-full object-cover transition-transform duration-[6000ms] ease-out transform scale-100 ${scene[isGenVidField] ? 'opacity-40 scale-105' : 'group-hover/img:scale-105'}`} 
               />
               {/* If generating, display a nice overlay status */}
-              {scene.isGeneratingVideo ? (
+              {scene[isGenVidField] ? (
                 <div className="absolute inset-0 bg-indigo-950/20 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
                   <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold bg-indigo-950/90 text-indigo-400 border border-indigo-500/30 shadow-lg animate-pulse">
                     <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
@@ -1196,11 +1282,11 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                                   if (s.id === scene.id) {
                                     return {
                                       ...s,
-                                      imageUrl: undefined,
-                                      videoUrl: undefined,
-                                      videoProgress: undefined,
-                                      videoLogs: undefined,
-                                      videoError: undefined
+                                      [imageField]: undefined,
+                                      [videoField]: undefined,
+                                      [(sceneType === "ext" ? "videoProgressExt" : (sceneType === "keyframes" ? "videoProgressKeyframes" : "videoProgress"))]: undefined,
+                                      [(sceneType === "ext" ? "videoLogsExt" : (sceneType === "keyframes" ? "videoLogsKeyframes" : "videoLogs"))]: undefined,
+                                      [errorField]: undefined
                                     };
                                   }
                                   return s;
@@ -1225,7 +1311,7 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                 </>
               )}
             </div>
-          ) : scene.isGeneratingImage ? (
+          ) : scene[isGenImgField] ? (
             <div className="flex flex-col items-center space-y-3" onClick={(e) => e.stopPropagation()}>
               <RefreshCw className="w-6 h-6 text-pink-500 animate-spin" />
             </div>
@@ -1236,9 +1322,8 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
             </div>
           )}
         </div>
-
-        {/* If generating video, render Screen 2 & Screen 3 below */}
-        {scene.isGeneratingVideo && (
+        )}
+        {scene[isGenVidField] && (
           <div className="space-y-4 animate-fadeIn">
             {/* Screen 2: Render Output Screen */}
             <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 shadow-xl space-y-4">

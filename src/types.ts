@@ -4,8 +4,6 @@ export interface Scene {
   title: string;
   dialogue: string;
   narration?: string;
-  /** English soft subtitle (player overlay) when pure narration is unavoidable — not burned into Agnes frames */
-  subtitleEn?: string;
   character: string;
   visualPrompt: string;
   negativePrompt?: string;
@@ -47,19 +45,6 @@ export interface Scene {
   videoApiLatencyKeyframes?: string;
   videoDownloadLatencyKeyframes?: string;
   videoResourceAllocationKeyframes?: string;
-
-  // --- Keyframes dual-frame chain (P0): Start→End continuity ---
-  /** This shot's opening still (shot1 generated; shot2+ = prev endFrameKeyframes) */
-  startFrameKeyframes?: string;
-  /** This shot's ending still (always generated; handed to next shot as start) */
-  endFrameKeyframes?: string;
-  /** English visual description of end frame for next-shot locking */
-  endFrameDescriptionKeyframes?: string;
-  /** Where start frame came from (UI badge) */
-  startFrameSourceKeyframes?: "generated" | "inherited_prev_end" | "forced_pass_fallback";
-  isGeneratingStartFrameKeyframes?: boolean;
-  isGeneratingEndFrameKeyframes?: boolean;
-  step3ImageErrorKeyframes?: string;
   isRetryingPolicy?: boolean;
   policyRetryCount?: number;
   useFreezeAndMove?: boolean;
@@ -95,7 +80,6 @@ export interface Scene {
 
 export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character' | 'visualPrompt'> = {
   narration: "",
-  subtitleEn: "",
   negativePrompt: "",
   actionPrompt: "",
   transitionPrompt: "",
@@ -130,13 +114,6 @@ export const DEFAULT_SCENE: Omit<Scene, 'id' | 'title' | 'dialogue' | 'character
   videoApiLatencyKeyframes: "",
   videoDownloadLatencyKeyframes: "",
   videoResourceAllocationKeyframes: "",
-  startFrameKeyframes: "",
-  endFrameKeyframes: "",
-  endFrameDescriptionKeyframes: "",
-  startFrameSourceKeyframes: undefined,
-  isGeneratingStartFrameKeyframes: false,
-  isGeneratingEndFrameKeyframes: false,
-  step3ImageErrorKeyframes: "",
   audioCue: "",
   directorNotes: "",
   aiReviewStatus: "passed",
@@ -213,4 +190,30 @@ export interface TaskState {
   errorCode?: number;
   outputPath?: string;
   prompt?: string;
+}
+
+export interface ExperienceEntry {
+  id: string;
+  type: "image_review" | "video_review" | "system_error" | "api_error" | "workflow_error";
+  sceneId?: string;
+  projectId?: string;
+  originalPrompt?: string;
+  optimizedPrompt?: string;
+  critique?: string;
+  score?: number;
+  passed?: boolean;
+  userId: string;
+  timestamp: string;
+  errorName?: string;
+  errorMessage?: string;
+  errorStack?: string;
+  category?: string;
+  technical_failure?: boolean;
+  failureCategory?: string;
+  rootCause?: string;
+  isPromptRelated?: boolean;
+  actualProblem?: string;
+  aiImprovementSuggestion?: string;
+  resolution?: string;
+  permanentNote?: string;
 }

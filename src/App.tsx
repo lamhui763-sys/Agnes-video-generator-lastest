@@ -21,6 +21,7 @@ import {
   Users,
   Layers,
   Film,
+  BrainCircuit,
   Sliders,
   X,
   Eye,
@@ -53,18 +54,19 @@ import {
   Unlock
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import clsx from "clsx";
 import { Scene, Character, Project, TaskState, DEFAULT_SCENE } from "./types";
-import { normalizeSceneSpeech, MAX_SCENE_SECONDS, truncateSpokenText, getDisplaySubtitle } from "./lib/sceneSpeech";
 import VideoGallery from "./components/VideoGallery";
 import SceneItem from "./components/SceneItem";
 import AuthWrapper from "./components/AuthWrapper";
+import ExperienceLibrary from "./components/ExperienceLibrary";
 import { STYLE_PRESETS, NEGATIVE_PRESETS } from "./data";
 import { AITransmissionMonitor } from "./components/AITransmissionMonitor";
 import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from "./lib/firebase";
+import { logToExperienceLibrary } from "./lib/logger";
 import { getProjectSignature, normalizeProjectsList, copyTextToClipboard as copyTextToClipboardUtil } from "./lib/projectUtils";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { PrintModal } from "./components/PrintModal";
-import { WorkflowStepper } from "./components/WorkflowStepper";
 
 
 export default function App() {
@@ -145,18 +147,10 @@ export default function App() {
 
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const activeProject = projects.find(p => p.id === activeProjectId) || null;
-  const [activeTab, setActiveTab] = useState<"novel" | "characters" | "scenes" | "scenes_ext" | "scenes_keyframes" | "gallery">("scenes");
+  const [activeTab, setActiveTab] = useState<"novel" | "characters" | "scenes" | "scenes_ext" | "gallery" | "experience">("scenes");
   
   // Settings & Custom API Keys
-  // Built-in default after Agnes platform key reset (old cpk-CJxrCSyi... was revoked → 401 无效的令牌)
-  const DEFAULT_AGNES_API_KEY = "cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J";
-  const REVOKED_AGNES_API_KEYS = [
-    "cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8",
-  ];
-  const isRevokedAgnesKey = (key: string) =>
-    REVOKED_AGNES_API_KEYS.some((r) => key === r || key.startsWith(r.slice(0, 18)));
-
-  const [customApiKey, setCustomApiKey] = useState<string>(DEFAULT_AGNES_API_KEY);
+  const [customApiKey, setCustomApiKey] = useState<string>("cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J");
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState<boolean>(false);
   
@@ -509,17 +503,11 @@ export default function App() {
       }
     }
 
-    // Auto-migrate revoked / reset Agnes keys from browser cache (fixes 401 无效的令牌)
-    if (savedKey && !isRevokedAgnesKey(savedKey.trim())) {
+    if (savedKey && savedKey !== "cpk-CJxrCSyiu9BWsE1yzwrPX2REloaU8cgoPeGH4daMV6NcVSm8") {
       setCustomApiKey(savedKey);
     } else {
-      if (savedKey && isRevokedAgnesKey(savedKey.trim())) {
-        console.warn("[Toonflow] Detected revoked Agnes API key in localStorage. Migrating to new default key.");
-      }
-      setCustomApiKey(DEFAULT_AGNES_API_KEY);
-      try {
-        localStorage.setItem("agnes_custom_api_key", DEFAULT_AGNES_API_KEY);
-      } catch (e) {}
+      setCustomApiKey("cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J");
+      localStorage.setItem("agnes_custom_api_key", "cpk-oTHuYiCUe46ZJGyd6xcAmNKiP3DjxcUeiIuqEF9saqLZrq8J");
     }
 
     if (savedProjects) {
@@ -893,17 +881,10 @@ export default function App() {
     saveProjects([defaultProject]);
   };
 
-  // Sync saved key to localStorage (block writing revoked keys)
+  // Sync saved key to localStorage
   const handleSaveApiKey = (key: string) => {
-    const trimmed = (key || "").trim();
-    if (isRevokedAgnesKey(trimmed)) {
-      setCustomApiKey(DEFAULT_AGNES_API_KEY);
-      localStorage.setItem("agnes_custom_api_key", DEFAULT_AGNES_API_KEY);
-      showToast("偵測到已失效的舊 Agnes 金鑰，已自動更新為目前有效的預設金鑰。", "info");
-      return;
-    }
-    setCustomApiKey(trimmed);
-    localStorage.setItem("agnes_custom_api_key", trimmed);
+    setCustomApiKey(key);
+    localStorage.setItem("agnes_custom_api_key", key);
   };
 
   const [copiedSceneId, setCopiedSceneId] = useState<string | null>(null);
@@ -1041,8 +1022,14 @@ export default function App() {
           showToast("劇本生成成功！", "success");
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      logToExperienceLibrary({
+        errorName: "NovelGenerationError",
+        errorMessage: err.message || String(err),
+        category: "novel_generation",
+        projectId: activeProjectId || undefined
+      });
       alert("生成失敗，請稍後再試。");
     } finally {
       setIsGeneratingNovel(false);
@@ -1284,7 +1271,6 @@ export default function App() {
   };
 
   // Helper to precisely estimate the spoken duration in seconds based on Traditional/Simplified Chinese characters and pauses in BOTH dialogue and narration
-  // Product rule: hard cap at MAX_SCENE_SECONDS (5s) for Agnes stability
   const estimateDialogueDuration = (dialogue: string, narration: string = ""): number => {
     const diagDur = estimateTextDuration(dialogue);
     const narrDur = estimateTextDuration(narration);
@@ -1296,270 +1282,7 @@ export default function App() {
     }
     
     // Cap strictly between 3 and 5 seconds to guarantee maximum stability for Agnes video rendering
-    return Math.max(3, Math.min(MAX_SCENE_SECONDS, maxDur));
-  };
-
-  /** Apply dialogue-first / EN soft-subtitle / ≤5s policy before video generation or after split. */
-  const applySpeechPolicyToScene = (scene: Scene): Scene => {
-    const n = normalizeSceneSpeech({
-      dialogue: scene.dialogue,
-      narration: scene.narration,
-      character: scene.character,
-      durationSeconds: scene.durationSeconds,
-      subtitleEn: scene.subtitleEn,
-      actionPrompt: scene.actionPrompt,
-      visualPrompt: scene.visualPrompt,
-    });
-    return {
-      ...scene,
-      dialogue: n.dialogue || "",
-      narration: n.narration || "",
-      subtitleEn: n.subtitleEn || "",
-      durationSeconds: n.durationSeconds ?? 4,
-      actionPrompt: n.actionPrompt || scene.actionPrompt,
-      visualPrompt: n.visualPrompt || scene.visualPrompt,
-    };
-  };
-
-  // ---------- Keyframes dual-frame helpers (P0, scenes_keyframes only) ----------
-  const getKeyframesStartFrame = (s: Scene): string =>
-    (s.startFrameKeyframes || s.imageUrlKeyframes || "").trim();
-  const getKeyframesEndFrame = (s: Scene): string =>
-    (s.endFrameKeyframes || "").trim();
-
-  /** Mandatory visual locks from character sheet — prevents QA loop when model drops signature props. */
-  const buildCharacterLockBlock = (scene: Scene): string => {
-    if (!activeProject) return "";
-    const clean = (scene.character || "").trim().toLowerCase();
-    if (!clean || clean === "旁白" || clean === "narrator") return "";
-    const c = activeProject.characters.find((x) => (x.name || "").trim().toLowerCase() === clean);
-    if (!c) return "";
-    const bits = [
-      c.name ? `Character name: ${c.name}` : "",
-      c.description ? `MUST match description: ${c.description}` : "",
-      c.clothing ? `MUST wear: ${c.clothing}` : "",
-      c.age ? `Age: ${c.age}` : "",
-      c.personality ? `Personality vibe: ${c.personality}` : "",
-    ].filter(Boolean);
-    if (!bits.length) return "";
-    return ` [MANDATORY CHARACTER IDENTITY LOCK — do not omit any signature props, prosthetics, goggles, weapons, containers, or chest ports]: ${bits.join(". ")}.`;
-  };
-
-  /** After Step4 fail: rewrite prompt so next draw fixes missing features (not just redraw same prompt). */
-  const reviseKeyframesPromptFromReview = async (
-    scene: Scene,
-    critique: string,
-    attempt: number
-  ): Promise<{ visualPrompt: string; negativePrompt: string }> => {
-    const lock = buildCharacterLockBlock(scene);
-    const base = scene.step2OptimizedPrompt || scene.visualPrompt || "";
-    // Local hard patch always applied (works even if AI revise API fails)
-    const hardFix = [
-      base,
-      lock,
-      `[QA FAIL FIX attempt ${attempt}] Previous image was rejected for: ${critique.slice(0, 500)}`,
-      "RE-DRAW REQUIREMENTS: Every missing prop listed in the QA critique MUST be clearly visible and large enough to read.",
-      "If QA mentioned mechanical left arm / prosthetic / brass / pistons — draw a heavy brass mechanical LEFT arm with pistons, hydraulics, steam vents (not a normal flesh arm).",
-      "If QA mentioned glass container / blood crystal / 紅寶石 / 容器 — character MUST hold a transparent glass vial with a glowing pulsating red crystal.",
-      "If QA mentioned goggles / 護目鏡 — tactical goggles covering eyes.",
-      "If QA mentioned rooftop / rain / industrial — night rain industrial rooftop, wet metal, copper antennas.",
-      "Completely clean image, no text, no subtitles, no watermark.",
-    ].join(" ");
-
-    let visualPrompt = hardFix;
-    let negativePrompt =
-      (scene.negativePrompt || "") +
-      ", missing mechanical arm, flesh left arm instead of prosthetic, missing goggles, missing glass vial, missing red crystal, wrong chest gem instead of unlit port, clean modern street instead of industrial rooftop, extra fingers, deformed hands";
-
-    try {
-      const characterObj = activeProject?.characters.find(
-        (c) => (c.name || "").trim().toLowerCase() === (scene.character || "").trim().toLowerCase()
-      );
-      const res = await fetch("/api/optimize-prompt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: hardFix.slice(0, 3500),
-          artStyle: activeProject?.artStyle || "",
-          character: scene.character || "",
-          characterDescription: characterObj?.description || "",
-          context: `Image QA failed. Rewrite a STRONGER English visual prompt that forces ALL missing elements from this critique into the frame: ${critique.slice(0, 800)}`,
-          customApiKey: customApiKey || undefined,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.optimizedPrompt) {
-          visualPrompt = `${data.optimizedPrompt}${lock} [QA-driven rewrite attempt ${attempt}]`;
-        }
-        if (data.negativePrompt) {
-          negativePrompt = data.negativePrompt + ", missing mechanical prosthetic left arm, missing glass container with red crystal, missing tactical goggles";
-        }
-      }
-    } catch (e) {
-      console.warn("[Toonflow] Prompt revise API failed, using hard-fix prompt", e);
-    }
-
-    return { visualPrompt, negativePrompt };
-  };
-
-  /** Call /api/generate-image and return URL (used only by keyframes Step3 dual-frame). */
-  const generateKeyframesStillUrl = async (scene: Scene, visualPrompt: string): Promise<string> => {
-    if (!activeProject) throw new Error("No active project");
-    const cleanSceneChar = (scene.character || "").trim().toLowerCase();
-    const characterObj = activeProject.characters.find(
-      (c) => (c.name || "").trim().toLowerCase() === cleanSceneChar
-    );
-    let charDesc = characterObj?.description || "";
-    if (characterObj?.clothing) charDesc += `. Ensure wearing: ${characterObj.clothing}.`;
-    // Always bake identity lock into the prompt sent to the image API
-    const lockedPrompt = `${visualPrompt}${buildCharacterLockBlock(scene)}`;
-    const characterImages =
-      characterObj?.uploadedAvatarUrls && characterObj.uploadedAvatarUrls.length > 0
-        ? characterObj.uploadedAvatarUrls
-        : characterObj?.uploadedAvatarUrl
-          ? [characterObj.uploadedAvatarUrl]
-          : characterObj?.avatarUrls || (characterObj?.avatarUrl ? [characterObj.avatarUrl] : []);
-
-    const res = await fetch("/api/generate-image", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: lockedPrompt,
-        negativePrompt: scene.negativePrompt,
-        artStyle: characterObj?.artStyle || activeProject.artStyle,
-        character: scene.character,
-        characterDescription: charDesc,
-        characterImages,
-        seed: characterObj?.seed,
-        engine: "agnes",
-        agnesImageMode: activeProject.agnesImageMode || "quality",
-        customApiKey: customApiKey || undefined,
-        mood: characterObj?.mood,
-      }),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      let errData: any = {};
-      try {
-        errData = JSON.parse(errText);
-      } catch {
-        /* ignore */
-      }
-      throw new Error(errData.error || errText || "關鍵幀繪圖 API 失敗");
-    }
-    const data = await res.json();
-    if (!data.imageUrl) throw new Error("繪圖 API 未回傳 imageUrl");
-    return data.imageUrl as string;
-  };
-
-  const buildKeyframesStartPrompt = (scene: Scene): string => {
-    const base = scene.step2OptimizedPrompt || scene.visualPrompt || scene.title || "cinematic storyboard still";
-    return `${base}. Opening still of this shot, establish pose and framing for animation start. Completely clean image, no text, no subtitles, no watermark.`;
-  };
-  const buildKeyframesEndPrompt = (scene: Scene, prevEndDesc?: string): string => {
-    const base = scene.step2OptimizedPrompt || scene.visualPrompt || scene.title || "cinematic storyboard still";
-    const cont = prevEndDesc
-      ? ` Continuity from previous end frame intent: ${prevEndDesc}.`
-      : "";
-    const action = scene.actionPrompt ? ` Action progressed to end state: ${scene.actionPrompt}.` : "";
-    return `${base}.${action}${cont} Ending still of this shot: same character identity and clothing, slightly progressed pose suitable as the next shot opening. Completely clean image, no text, no subtitles, no watermark.`;
-  };
-
-  /** Re-run dual-frame image gen for one scene (used after Step4 fail with revised prompts). */
-  const regenerateKeyframesDualFrames = async (sceneId: string, index: number): Promise<void> => {
-    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-    const curProj = curProjList.find((p) => p.id === activeProjectId);
-    if (!curProj) throw new Error("專案不存在");
-    const fresh = curProj.scenes.find((s) => s.id === sceneId);
-    if (!fresh) throw new Error("分鏡不存在");
-    const prev = index > 0 ? curProj.scenes[index - 1] : null;
-
-    if (index === 0) {
-      const [startUrl, endUrl] = await Promise.all([
-        generateKeyframesStillUrl(fresh, buildKeyframesStartPrompt(fresh)),
-        generateKeyframesStillUrl(fresh, buildKeyframesEndPrompt(fresh)),
-      ]);
-      updateActiveProject((prevP) => ({
-        scenes: prevP.scenes.map((s) =>
-          s.id === sceneId
-            ? {
-                ...s,
-                startFrameKeyframes: startUrl,
-                endFrameKeyframes: endUrl,
-                imageUrlKeyframes: startUrl,
-                startFrameSourceKeyframes: "generated",
-                isGeneratingImageKeyframes: false,
-              }
-            : s
-        ),
-      }));
-      try {
-        const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-        const updated = list.map((p) =>
-          p.id === activeProjectId
-            ? {
-                ...p,
-                scenes: p.scenes.map((s) =>
-                  s.id === sceneId
-                    ? {
-                        ...s,
-                        startFrameKeyframes: startUrl,
-                        endFrameKeyframes: endUrl,
-                        imageUrlKeyframes: startUrl,
-                        startFrameSourceKeyframes: "generated" as const,
-                      }
-                    : s
-                ),
-              }
-            : p
-        );
-        localStorage.setItem("toonflow_projects", JSON.stringify(updated));
-      } catch { /* ignore */ }
-    } else {
-      const prevEnd = prev ? getKeyframesEndFrame(prev) : "";
-      if (!prevEnd) throw new Error("上鏡無尾幀，無法重繪");
-      const endUrl = await generateKeyframesStillUrl(
-        fresh,
-        buildKeyframesEndPrompt(fresh, prev?.endFrameDescriptionKeyframes)
-      );
-      updateActiveProject((prevP) => ({
-        scenes: prevP.scenes.map((s) =>
-          s.id === sceneId
-            ? {
-                ...s,
-                startFrameKeyframes: prevEnd,
-                imageUrlKeyframes: prevEnd,
-                endFrameKeyframes: endUrl,
-                startFrameSourceKeyframes: "inherited_prev_end",
-                isGeneratingImageKeyframes: false,
-              }
-            : s
-        ),
-      }));
-      try {
-        const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-        const updated = list.map((p) =>
-          p.id === activeProjectId
-            ? {
-                ...p,
-                scenes: p.scenes.map((s) =>
-                  s.id === sceneId
-                    ? {
-                        ...s,
-                        startFrameKeyframes: prevEnd,
-                        imageUrlKeyframes: prevEnd,
-                        endFrameKeyframes: endUrl,
-                        startFrameSourceKeyframes: "inherited_prev_end" as const,
-                      }
-                    : s
-                ),
-              }
-            : p
-        );
-        localStorage.setItem("toonflow_projects", JSON.stringify(updated));
-      } catch { /* ignore */ }
-    }
+    return Math.max(3, Math.min(5, maxDur));
   };
 
   // Render function for Toonflow Global Storyboard Director Chatbot
@@ -1590,12 +1313,12 @@ export default function App() {
             </div>
           ) : (
             storyboardChatMessages.map((msg, idx) => (
-              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[85%] rounded-2xl p-3 text-sm ${
+              <div key={idx} className={ `flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={ `max-w-[85%] rounded-2xl p-3 text-sm ${
                   msg.role === 'user' 
                     ? 'bg-pink-600 text-white rounded-tr-none shadow-lg shadow-pink-600/10' 
                     : 'bg-indigo-950/40 border border-indigo-800/50 text-indigo-100 rounded-tl-none shadow-lg'
-                }`}>
+                }` }>
                   {msg.role === 'ai' && (
                     <div className="text-[10px] font-bold mb-1 opacity-80 uppercase flex items-center gap-1 text-pink-400">
                       <Sparkles className="w-3.5 h-3.5 text-pink-400 animate-pulse" />
@@ -1710,34 +1433,26 @@ export default function App() {
       if (data.scenes && data.scenes.length > 0) {
         // Map to internal scene structures
         const formattedScenes: Scene[] = data.scenes.map((s: any, idx: number) => {
-          // Server already applied speech policy; re-apply client-side for safety (dialogue-first, ≤5s, EN subtitle)
-          const normalized = normalizeSceneSpeech({
-            dialogue: s.dialogue || "",
-            narration: s.narration || "",
-            character: s.character || "旁白",
-            durationSeconds: s.durationSeconds,
-            subtitleEn: s.subtitleEn || "",
-            actionPrompt: s.actionPrompt || "",
-            visualPrompt: s.visualPrompt || "",
-          });
-          const estimatedDuration = estimateDialogueDuration(normalized.dialogue || "", normalized.narration || "");
-          const finalDuration = Math.min(
-            MAX_SCENE_SECONDS,
-            typeof normalized.durationSeconds === "number" ? normalized.durationSeconds : estimatedDuration
-          );
+          // Automatically estimate speaking/pacing duration based on dialogue and narration character counts more precisely
+          const dialogueText = s.dialogue || "";
+          const estimatedDuration = estimateDialogueDuration(dialogueText, s.narration || "");
+
+          // Use server-provided duration only if valid, otherwise fallback to our estimated duration
+          const finalDuration = s.durationSeconds && typeof s.durationSeconds === 'number'
+            ? s.durationSeconds
+            : estimatedDuration;
 
           return {
             ...DEFAULT_SCENE,
             ...s,
             id: `scene_${Date.now()}_${idx}`,
             title: s.title || `分鏡場景 ${idx + 1}`,
-            dialogue: normalized.dialogue || "",
-            narration: normalized.narration || "",
-            subtitleEn: normalized.subtitleEn || s.subtitleEn || "",
-            character: normalized.character || s.character || "旁白",
-            visualPrompt: normalized.visualPrompt || s.visualPrompt || "",
+            dialogue: dialogueText,
+            narration: s.narration || "",
+            character: s.character || "旁白",
+            visualPrompt: s.visualPrompt || "",
             negativePrompt: s.negativePrompt || "",
-            actionPrompt: normalized.actionPrompt || s.actionPrompt || "",
+            actionPrompt: s.actionPrompt || "",
             durationSeconds: finalDuration,
             audioCue: s.audioCue || "",
             directorNotes: s.directorNotes || "",
@@ -1881,6 +1596,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: rawInput,
+          sceneId: scene.id,
           artStyle: charObj?.artStyle || activeProject.artStyle,
           character: scene.character,
           characterDescription: charObj?.description || "",
@@ -2021,12 +1737,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // Storyboard Image Generation (calls Gemini-3.1-flash-image)
-  // fieldMode: force which image field to write (needed by full-auto / sequential pipelines regardless of active tab)
-  const handleGenerateImage = async (
-    sceneId: string,
-    engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes',
-    fieldMode?: 'standard' | 'ext' | 'keyframes'
-  ) => {
+  const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -2035,13 +1746,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     } catch(e) {}
     if (!freshActiveProject) return;
     
-    const resolvedMode = fieldMode ?? (
-      activeTab === "scenes_ext" ? "ext" :
-      activeTab === "scenes_keyframes" ? "keyframes" :
-      "standard"
-    );
-    const isGenField = resolvedMode === "ext" ? "isGeneratingImageExt" : (resolvedMode === "keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
-    const imageField = resolvedMode === "ext" ? "imageUrlExt" : (resolvedMode === "keyframes" ? "imageUrlKeyframes" : "imageUrl");
+    const isGenField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
+    const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
 
     // Update loading state
     updateActiveProject((prev) => ({
@@ -2231,19 +1937,11 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       updateActiveProject((prev) => ({
         scenes: prev.scenes.map(s => {
           if (s.id === sceneId) {
-            const next: Scene = {
-              ...s,
-              [imageField]: data.imageUrl,
-              [isGenField]: false,
-            } as Scene;
-            // Keyframes tab: single-click generate maps to start frame (end needs dual Step3)
-            if (imageField === "imageUrlKeyframes") {
-              next.startFrameKeyframes = data.imageUrl;
-              if (!next.startFrameSourceKeyframes) {
-                next.startFrameSourceKeyframes = "generated";
-              }
-            }
-            return next;
+            return { 
+              ...s, 
+              [imageField]: data.imageUrl, 
+              [isGenField]: false 
+            };
           }
           return s;
         })
@@ -2274,6 +1972,17 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         }));
         return;
       }
+      
+      // Manual error logging for experience library
+      logToExperienceLibrary({
+        errorName: "ImageGenerationError",
+        errorMessage: e.message || String(e),
+        errorStack: e.stack,
+        category: "image_generation",
+        projectId: activeProjectId || undefined,
+        sceneId: sceneId
+      });
+
       // fallback if error
       showToast(`分鏡繪圖生成失敗：${e.message || "與繪圖伺服器連接時發生錯誤"}`, "error");
       updateActiveProject((prev) => ({
@@ -2383,7 +2092,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       });
 
       if (!res.ok) {
-        throw new Error("審核伺服器連接失敗");
+        const errText = await res.text().catch(() => "Unknown error");
+        throw new Error(`審核伺服器連接失敗: ${errText}`);
       }
 
       const review = await res.json();
@@ -2430,6 +2140,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
     } catch (err: any) {
       console.warn("[Toonflow QC Warning] Scene review failed, activating local fallback:", err);
+      logToExperienceLibrary({
+        errorName: "SceneReviewError",
+        errorMessage: err.message || String(err),
+        errorStack: err.stack,
+        category: "scene_review",
+        projectId: activeProjectId || undefined,
+        sceneId: sceneId
+      });
       showToast("✅ 分鏡審核完成：啟用本地極速安全校驗！", "success");
       updateActiveProject((prev) => ({
         scenes: prev.scenes.map(s => {
@@ -2613,6 +2331,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     let endImageUrl: string | undefined = undefined;
     let startImageUrlForTransition: string | undefined = undefined;
 
+    // Retrieve targets for video gen
+    const targetScene = activeProject.scenes.find(s => s.id === sceneId);
+    if (!targetScene) return;
+
     if (sceneId.startsWith("scene_transition_")) {
       if (index > 0) {
         const prevScene = activeProject.scenes[index - 1];
@@ -2631,11 +2353,22 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         }
         endImageUrl = foundEndImage;
       }
+    } else if (activeTab === "scenes_keyframes") {
+      startImageUrlForTransition = targetScene.imageUrlKeyframes || targetScene.imageUrl || targetScene.imageUrlExt;
+      if (!startImageUrlForTransition) {
+        alert("請先完成本分鏡的繪圖以作為首幀！");
+        return;
+      }
+      if (index < activeProject.scenes.length - 1) {
+        const nextScene = activeProject.scenes[index + 1];
+        const foundEndImage = nextScene.imageUrlKeyframes || nextScene.imageUrl || nextScene.imageUrlExt;
+        if (!foundEndImage) {
+          alert(`請先完成下一分鏡「${nextScene.title}」的繪圖，以作為本分鏡影片的結尾影格（尾幀）！`);
+          return;
+        }
+        endImageUrl = foundEndImage;
+      }
     }
-
-    // Update specific scene video state to generating
-    const targetScene = activeProject.scenes.find(s => s.id === sceneId);
-    if (!targetScene) return;
 
     updateActiveProject((prev) => ({
       scenes: prev.scenes.map(s => {
@@ -2661,58 +2394,35 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             return cName === targetCharLower || cName.includes(targetCharLower) || targetCharLower.includes(cName);
           })
         : undefined;
-      // Product speech policy: (1) narration→dialogue when possible (2) else EN soft subtitle (3) ≤5s
-      const speechScene = applySpeechPolicyToScene(targetScene);
-      if (
-        speechScene.dialogue !== targetScene.dialogue ||
-        speechScene.narration !== targetScene.narration ||
-        speechScene.subtitleEn !== targetScene.subtitleEn ||
-        speechScene.durationSeconds !== targetScene.durationSeconds
-      ) {
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map((s) => (s.id === sceneId ? { ...s, ...speechScene } : s)),
-        }));
-      }
-
       const charDesc = characterObj?.description || "";
-      const hasSpokenDialogue = !!(speechScene.dialogue && speechScene.dialogue.trim() && !/^[（(]/.test(speechScene.dialogue.trim()));
-      const isInnerDialogue = !!(speechScene.dialogue && /^[（(]/.test(speechScene.dialogue.trim()));
-      const dialogueAddon = hasSpokenDialogue
-        ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${truncateSpokenText(speechScene.dialogue)}". The video must be completely clean with ABSOLUTELY NO burned-in SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).`
-        : " No character is talking, no lip movement. Mouth closed and completely still.";
-      // Pure narration: closed mouth; English subtitles are soft-overlaid in the player (not burned into Agnes frames)
-      const narrationAddon = speechScene.narration
-        ? ` (Silent atmospheric scene with closed mouth. English soft subtitles will be shown in the player UI only — do NOT burn any text into the video frames. No character is talking, no lip movement).`
-        : isInnerDialogue
-          ? ` (Inner monologue mood, closed mouth, thoughtful expression, no lip movement, clean video no burned-in text).`
-          : "";
-      const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
-      const transitionAddon = speechScene.transitionPrompt ? ` Transition action: ${speechScene.transitionPrompt}. ` : (targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ");
+      const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
+      const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
+      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
+      const transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
+      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
 
       try {
         const url = force ? "/api/generate?force=true" : "/api/generate";
-        const cappedDuration = Math.min(MAX_SCENE_SECONDS, Math.max(3, speechScene.durationSeconds || 4));
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             prompt: enhancedPrompt,
-            visualPrompt: speechScene.visualPrompt || targetScene.visualPrompt,
+            visualPrompt: targetScene.visualPrompt,
             negativePrompt: targetScene.negativePrompt,
-            actionPrompt: speechScene.actionPrompt || targetScene.actionPrompt,
+            actionPrompt: targetScene.actionPrompt,
             transitionPrompt: targetScene.transitionPrompt,
-            dialogue: speechScene.dialogue || "",
-            narration: speechScene.narration || "",
+            dialogue: targetScene.dialogue,
+            narration: targetScene.narration,
             directorNotes: targetScene.directorNotes,
-            character: speechScene.character || targetScene.character,
+            character: targetScene.character,
             characterDescription: charDesc,
             artStyle: characterObj?.artStyle || activeProject.artStyle,
             imageUrl: startImageUrlForTransition || (targetScene as any)[imageField] || undefined,
             endImageUrl: endImageUrl,
             customApiKey: customApiKey || undefined,
-            durationSeconds: cappedDuration,
+            durationSeconds: targetScene.durationSeconds,
             agnesVideoMode: activeProject.agnesVideoMode || "quality",
             useFreezeAndMove: targetScene.step5Mode === "transition" || targetScene.useFreezeAndMove,
             useMidpointSplit: targetScene.useMidpointSplit,
@@ -2957,19 +2667,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             return cName === targetCharLower || cName.includes(targetCharLower) || targetCharLower.includes(cName);
           })
         : undefined;
-      const speechScene = applySpeechPolicyToScene(targetScene);
       const charDesc = characterObj?.description || "";
-      const hasSpokenDialogue = !!(speechScene.dialogue && speechScene.dialogue.trim() && !/^[（(]/.test(speechScene.dialogue.trim()));
-      const dialogueAddon = hasSpokenDialogue
-        ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${truncateSpokenText(speechScene.dialogue)}". The video must be completely clean with ABSOLUTELY NO burned-in SUBTITLES).`
-        : " No character is talking, no lip movement. Mouth closed and completely still.";
-      const narrationAddon = speechScene.narration
-        ? ` (Silent atmospheric scene, closed mouth. Soft English subtitles in player only — do NOT burn text into frames.)`
-        : "";
-      const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
-      const transitionAddon = speechScene.transitionPrompt ? ` Transition action: ${speechScene.transitionPrompt}. ` : (targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ");
+      const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
+      const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
+      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
+      const transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
+      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
 
       // If index > 0, we pass the previous scene's videoUrlExt as extendFromVideoUrl
       const prevScene = (index > 0) ? freshActiveProject.scenes[index - 1] : undefined;
@@ -2988,20 +2692,20 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
          headers: { "Content-Type": "application/json" },
          body: JSON.stringify({
            prompt: enhancedPrompt,
-           visualPrompt: speechScene.visualPrompt || targetScene.visualPrompt,
-           actionPrompt: speechScene.actionPrompt || targetScene.actionPrompt,
+           visualPrompt: targetScene.visualPrompt,
+           actionPrompt: targetScene.actionPrompt,
            transitionPrompt: targetScene.transitionPrompt,
-           dialogue: speechScene.dialogue || "",
-           narration: speechScene.narration || "",
+           dialogue: targetScene.dialogue,
+           narration: targetScene.narration,
            directorNotes: targetScene.directorNotes,
-           character: speechScene.character || targetScene.character,
+           character: targetScene.character,
            characterDescription: charDesc,
            artStyle: characterObj?.artStyle || freshActiveProject.artStyle,
            imageUrl: targetScene.imageUrlExt || undefined,
            endImageUrl: endImageUrl,
            extendFromVideoUrl: prevVideoUrl,
            customApiKey: customApiKey || undefined,
-           durationSeconds: Math.min(MAX_SCENE_SECONDS, Math.max(3, speechScene.durationSeconds || 4)),
+           durationSeconds: targetScene.durationSeconds,
            agnesVideoMode: freshActiveProject.agnesVideoMode || "quality",
            sceneIndex: index,
            sceneType: "ext",
@@ -3032,7 +2736,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               "videoLogsExt", 
               "isGeneratingVideoExt", 
               "videoErrorExt", 
-              "videoErrorCodeExt", 
+              "videoErrorExtCode", 
               () => handleGenerateVideoExtended(sceneId, index)
             );
             if (handled) {
@@ -3067,7 +2771,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                          videoProgressExt: "100%",
                          videoLogsExt: [...logs, "[SYSTEM] Video generated and mapped successfully!"],
                          videoErrorExt: statusData.error,
-                         videoErrorCodeExt: statusData.errorCode
+                         videoErrorExtCode: statusData.errorCode
                        };
                      } else if (status === "failed") {
                        clearInterval(intervalId);
@@ -3076,7 +2780,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                          ...s,
                          isGeneratingVideoExt: false,
                          videoErrorExt: statusData.error || "Generation process failed",
-                         videoErrorCodeExt: statusData.errorCode,
+                         videoErrorExtCode: statusData.errorCode,
                          videoLogsExt: logs,
                          isRetryingPolicy: false
                        };
@@ -3162,9 +2866,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           continue;
         }
 
-        // Generate the image first if missing (force Ext field regardless of active tab)
+        // Generate the image first if missing
         if (!scene.imageUrlExt) {
-          await handleGenerateImage(scene.id, 'agnes', 'ext');
+          await handleGenerateImage(scene.id, 'agnes');
           // Wait for React to process the state update and localStorage
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
@@ -3322,8 +3026,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     }
   };
 
-  // Agnes Video Generation with keyframes:
-  // start = this shot's startFrame (or inherited prev end); end = this shot's endFrame (NOT next shot's image)
+  // Agnes Video Generation with keyframes (start frame is this scene's image, end frame is next scene's image)
   const handleGenerateVideoKeyframes = async (sceneId: string, index: number) => {
     let freshActiveProject = activeProject;
     try {
@@ -3336,45 +3039,25 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     const targetScene = freshActiveProject.scenes.find(s => s.id === sceneId);
     if (!targetScene) return;
 
-    // P0: prefer dual-frame fields; migrate legacy single imageUrlKeyframes → start
-    let startImageUrl = getKeyframesStartFrame(targetScene);
-    if (!startImageUrl && index > 0) {
-      const prev = freshActiveProject.scenes[index - 1];
-      const prevEnd = getKeyframesEndFrame(prev);
-      if (prevEnd) {
-        startImageUrl = prevEnd;
-        updateActiveProject((prevP) => ({
-          scenes: prevP.scenes.map((s) =>
-            s.id === sceneId
-              ? {
-                  ...s,
-                  startFrameKeyframes: prevEnd,
-                  imageUrlKeyframes: prevEnd,
-                  startFrameSourceKeyframes: "inherited_prev_end",
-                }
-              : s
-          ),
-        }));
-      }
-    }
+    const startImageUrl = targetScene.imageUrlKeyframes || targetScene.imageUrl || targetScene.imageUrlExt;
     if (!startImageUrl) {
-      startImageUrl = targetScene.imageUrlKeyframes || targetScene.imageUrl || targetScene.imageUrlExt || "";
-    }
-    if (!startImageUrl) {
-      alert("請先完成本分鏡的首幀（或繼承上鏡尾幀）！");
+      alert("請先完成本分鏡的繪圖或智慧自動銜接！");
       return;
     }
 
-    let endImageUrl = getKeyframesEndFrame(targetScene);
-    if (!endImageUrl) {
-      // Legacy fallback: only if user never ran dual-frame Step3
-      endImageUrl = startImageUrl;
-      showToast("本鏡尚無獨立尾幀，暫時以首幀作為尾幀（建議重新跑 Step3 生成尾幀）。", "info");
+    let endImageUrl: string | undefined = undefined;
+    if (index < activeProject.scenes.length - 1) {
+      const nextScene = activeProject.scenes[index + 1];
+      const foundEndImage = nextScene.imageUrlKeyframes || nextScene.imageUrl || nextScene.imageUrlExt;
+      if (!foundEndImage) {
+        alert(`請先完成下一分鏡「${nextScene.title}」的繪圖，以作為本分鏡影片的結尾影格！`);
+        return;
+      }
+      endImageUrl = foundEndImage;
     }
 
-    // Product rules: dialogue-first, EN soft subtitle if pure narration, hard-cap ≤5s
-    const speechScene = applySpeechPolicyToScene(targetScene);
-    const finalDurationSeconds = Math.min(MAX_SCENE_SECONDS, Math.max(3, speechScene.durationSeconds || 4));
+    // Calculate transition duration - respect user set duration directly rather than forcing a long fixed duration
+    const finalDurationSeconds = targetScene.durationSeconds;
 
     // Update specific scene video state to generating
     updateActiveProject((prev) => ({
@@ -3382,18 +3065,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         if (s.id === sceneId) {
           return { 
             ...s, 
-            ...speechScene,
-            startFrameKeyframes: s.startFrameKeyframes || startImageUrl,
-            endFrameKeyframes: s.endFrameKeyframes || endImageUrl,
-            imageUrlKeyframes: s.imageUrlKeyframes || startImageUrl,
             durationSeconds: finalDurationSeconds,
             isGeneratingVideoKeyframes: true, 
             videoProgressKeyframes: "0%",
-            videoLogsKeyframes: [
-              "[SYSTEM] Initiating Agnes Keyframes Video (this-shot start → this-shot end)...",
-              `[SYSTEM] Start frame: ${startImageUrl.slice(0, 80)}...`,
-              `[SYSTEM] End frame: ${endImageUrl.slice(0, 80)}...`,
-            ],
+            videoLogsKeyframes: ["[SYSTEM] Initiating Agnes Start-End Keyframes Video call..."],
             policyRetryCount: s.isRetryingPolicy ? s.policyRetryCount : 0,
             isRetryingPolicy: s.isRetryingPolicy || false
           };
@@ -3403,7 +3078,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     }));
 
     try {
-      const targetCharLower = (speechScene.character || targetScene.character || "").trim().toLowerCase();
+      const targetCharLower = (targetScene.character || "").trim().toLowerCase();
       const characterObj = targetCharLower && targetCharLower !== "旁白" && targetCharLower !== "narrator"
         ? activeProject.characters.find(c => {
             const cName = (c.name || "").trim().toLowerCase();
@@ -3411,33 +3086,30 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           })
         : undefined;
       const charDesc = characterObj?.description || "";
-      const hasSpokenDialogue = !!(speechScene.dialogue && speechScene.dialogue.trim() && !/^[（(]/.test(speechScene.dialogue.trim()));
-      const dialogueAddon = hasSpokenDialogue
-        ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${truncateSpokenText(speechScene.dialogue)}". Completely clean video, NO burned-in subtitles).`
-        : " No character is talking, no lip movement. Mouth closed and completely still.";
-      const narrationAddon = speechScene.narration
-        ? ` (Silent atmospheric scene, closed mouth. Soft English subtitles in player only — do NOT burn text into frames.)`
-        : "";
-      const actionAddon = speechScene.actionPrompt ? ` Action and movement: ${speechScene.actionPrompt}. ` : " ";
-      // Continuity: animate FROM this start still TO this end still (not next scene's image)
+      const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
+      const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
+      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
       let transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : "";
-      transitionAddon += ` Start frame is locked. Animate smoothly toward the end-frame still of THIS shot. Keep character identity and clothing consistent.`;
+      if (endImageUrl && index < activeProject.scenes.length - 1) {
+        const nextScene = activeProject.scenes[index + 1];
+        transitionAddon += ` The character smoothly moves and transitions from the current state into the end frame's state: [${nextScene.visualPrompt}]. Make sure to animate the logical physical action connecting these two states (e.g., standing up, walking, turning around, changing pose).`;
+      }
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      const enhancedPrompt = `${speechScene.visualPrompt || targetScene.visualPrompt}.${actionAddon}${dialogueAddon}${narrationAddon}${transitionAddon}${notesAddon} ABSOLUTELY NO BURNED-IN SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${speechScene.character || targetScene.character}, Description: ${charDesc}.`;
+      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${dialogueAddon}${narrationAddon}${transitionAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}.`;
 
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: enhancedPrompt,
-          visualPrompt: speechScene.visualPrompt || targetScene.visualPrompt,
+          visualPrompt: targetScene.visualPrompt,
           negativePrompt: targetScene.negativePrompt,
-          actionPrompt: speechScene.actionPrompt || targetScene.actionPrompt,
+          actionPrompt: targetScene.actionPrompt,
           transitionPrompt: targetScene.transitionPrompt,
-          dialogue: speechScene.dialogue || "",
-          narration: speechScene.narration || "",
+          dialogue: targetScene.dialogue,
+          narration: targetScene.narration,
           directorNotes: targetScene.directorNotes,
-          character: speechScene.character || targetScene.character,
+          character: targetScene.character,
           characterDescription: charDesc,
           artStyle: characterObj?.artStyle || activeProject.artStyle,
           imageUrl: startImageUrl || undefined,
@@ -3832,53 +3504,41 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       setFullAutoLogs(prev => [...prev, "🧹 正在清除背景運算鎖，確保全自動生成線路完全暢通..."]);
       await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
 
-      // 3. Sequential 7-step Workflow Execution for each Scene!
+      // 3. New 7-step Decoupled Workflow Execution
       setFullAutoLogs(prev => [
         ...prev,
         `🔒 [嚴格鎖設定狀態]：當前為 ${strictWorkflowLock ? "🔒 開啟 (Strict Lock)" : "🔓 關閉 (Lenient Mode)"}。`,
-        "🎥 正在啟動七步工作流大師引擎，將對每個分鏡進行完整的 [接收建議 ➔ 提示詞優化 ➔ 關鍵幀繪製 ➔ 物理合理審查 ➔ 運鏡合成 ➔ 流暢度稽核 ➔ 連續性傳導] 閉環..."
+        "🎥 正在啟動最新分鏡劇本首尾幀 7 步 Check List 大師工作流..."
       ]);
 
-      // Full-auto 7-step pipeline always uses keyframes fields (independent of UI tab)
-      const isGenImgField = "isGeneratingImageKeyframes" as const;
-      const imageField = "imageUrlKeyframes" as const;
+      const isGenImgField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
+      const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
       
-      const isGenVidField = "isGeneratingVideoKeyframes" as const;
-      const videoField = "videoUrlKeyframes" as const;
-      const progressField = "videoProgressKeyframes" as const;
-      const errorField = "videoErrorKeyframes" as const;
+      const isGenVidField = activeTab === "scenes_ext" ? "isGeneratingVideoExt" : (activeTab === "scenes_keyframes" ? "isGeneratingVideoKeyframes" : "isGeneratingVideo");
+      const videoField = activeTab === "scenes_ext" ? "videoUrlExt" : (activeTab === "scenes_keyframes" ? "videoUrlKeyframes" : "videoUrl");
+      const progressField = activeTab === "scenes_ext" ? "videoProgressExt" : (activeTab === "scenes_keyframes" ? "videoProgressKeyframes" : "videoProgress");
+      const errorField = activeTab === "scenes_ext" ? "videoErrorExt" : (activeTab === "scenes_keyframes" ? "videoErrorKeyframes" : "videoError");
 
+      // =========================================================================
+      // STEP 1 & 2: 接收所有鏡頭描述 + 優化所有鏡頭 Prompt
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 1 & 2] 正在為所有鏡頭接收連續性描述並優化 Prompt..."]);
       for (let i = 0; i < currentScenes.length; i++) {
         const scene = currentScenes[i];
-        setFullAutoLogs(prev => [...prev, `🎬 ==================== 正在處理分鏡 ${i + 1} 「${scene.title}」 ====================`]);
-
-        // ------------------------------------------
-        // STEP 1: AI 接收建議 (AI Receives Advice)
-        // ------------------------------------------
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 1 } : s)
         }));
         
-        // Fetch freshest previous scene to get step7AdviceForNext
         const preCheckProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
         const preCheckProj = preCheckProjList.find(p => p.id === activeProjectId);
         const freshPrevScene = i > 0 && preCheckProj ? preCheckProj.scenes[i - 1] : null;
         const prevAdvice = freshPrevScene?.step7AdviceForNext || "";
 
         updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step1PrevShotAdvice: prevAdvice } : s)
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, step1PrevShotAdvice: prevAdvice, workflowStep: 2, isOptimizingStep2: true } : s)
         }));
         
-        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ➡️ 步驟 1/7：成功接收前置分鏡對本分鏡的對齊銜接建議。`]);
-        await new Promise(r => setTimeout(r, 600));
-
-        // ------------------------------------------
-        // STEP 2: Prompt 優化 (AI Prompt Optimization)
-        // ------------------------------------------
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 2, isOptimizingStep2: true } : s)
-        }));
-        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🔮 步驟 2/7：AI 正在整合銜接建議並進行大片級提示詞優化...`]);
+        setFullAutoLogs(prev => [...prev, `⏳ [鏡頭 ${i + 1}] ➡️ 正在智能整合銜接建議並進行大片級提示詞優化...`]);
 
         let optimizedPrompt = scene.visualPrompt;
         let optimizedNegative = scene.negativePrompt || "";
@@ -3915,23 +3575,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             workflowStep: 2
           } : s)
         }));
-        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 2/7：提示詞優化完成，已將角色特徵及物理對齊寫入本分鏡配置！`]);
-        await new Promise(r => setTimeout(r, 600));
+        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 提示詞優化完成，已置入特徵與物理對齊參數！`]);
+        await new Promise(r => setTimeout(r, 300));
+      }
 
-        // ------------------------------------------
-        // STEP 3: 雙幀生成 (P0 Keyframes dual-frame)
-        // Shot1: generate Start + End in parallel
-        // Shot2+: inherit prev End as Start; only generate End
-        // ------------------------------------------
+      // =========================================================================
+      // STEP 3: 生成所有鏡頭的首幀（只生成首幀）
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 3] 正在生成所有分鏡的首幀（每個鏡頭只生成首幀）..."]);
+      for (let i = 0; i < currentScenes.length; i++) {
+        const scene = currentScenes[i];
         updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? {
-            ...s,
-            workflowStep: 3,
-            isGeneratingImageKeyframes: true,
-            isGeneratingStartFrameKeyframes: i === 0,
-            isGeneratingEndFrameKeyframes: true,
-            step3ImageErrorKeyframes: "",
-          } : s)
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
         }));
 
         let imageSuccess = false;
@@ -3940,176 +3595,74 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
         while (!imageSuccess && imgRetryCount < maxImgAttempts) {
           imgRetryCount++;
+          setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 正在繪製首幀極致畫面 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
+          await handleGenerateImage(scene.id, 'agnes');
+
           try {
-            // Fresh scene after step2 + prev for inheritance
-            const curProjList0 = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-            const curProj0 = curProjList0.find(p => p.id === activeProjectId);
-            const freshScene0 = curProj0?.scenes.find(s => s.id === scene.id) || scene;
-            const prevScene0 = i > 0 && curProj0 ? curProj0.scenes[i - 1] : null;
+            await new Promise<void>((resolve, reject) => {
+              let checkCount = 0;
+              const checkImgInterval = setInterval(() => {
+                checkCount++;
+                const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                const curProj = curProjList.find(p => p.id === activeProjectId);
+                const freshS = curProj?.scenes.find(s => s.id === scene.id);
 
-            if (i === 0) {
-              setFullAutoLogs(prev => [...prev, `[鏡頭 1] 🎨 步驟 3/7：並發生成【首幀 + 尾幀】(嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
-              const startPrompt = buildKeyframesStartPrompt(freshScene0);
-              const endPrompt = buildKeyframesEndPrompt(freshScene0);
-              const [startUrl, endUrl] = await Promise.all([
-                generateKeyframesStillUrl(freshScene0, startPrompt),
-                generateKeyframesStillUrl(freshScene0, endPrompt),
-              ]);
-              const endDesc = `End frame of shot 1 "${freshScene0.title}": progressed from opening still; same character/outfit.`;
-              updateActiveProject((prev) => ({
-                scenes: prev.scenes.map(s => s.id === scene.id ? {
-                  ...s,
-                  startFrameKeyframes: startUrl,
-                  endFrameKeyframes: endUrl,
-                  imageUrlKeyframes: startUrl,
-                  startFrameSourceKeyframes: "generated",
-                  endFrameDescriptionKeyframes: endDesc,
-                  isGeneratingImageKeyframes: false,
-                  isGeneratingStartFrameKeyframes: false,
-                  isGeneratingEndFrameKeyframes: false,
-                  step3ImageErrorKeyframes: "",
-                } : s)
-              }));
-              try {
-                const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const updatedList = curList.map(p => p.id === activeProjectId ? {
-                  ...p,
-                  scenes: p.scenes.map(s => s.id === scene.id ? {
-                    ...s,
-                    startFrameKeyframes: startUrl,
-                    endFrameKeyframes: endUrl,
-                    imageUrlKeyframes: startUrl,
-                    startFrameSourceKeyframes: "generated" as const,
-                    endFrameDescriptionKeyframes: endDesc,
-                    isGeneratingImageKeyframes: false,
-                    isGeneratingStartFrameKeyframes: false,
-                    isGeneratingEndFrameKeyframes: false,
-                  } : s)
-                } : p);
-                localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-              } catch (e) {}
-              setFullAutoLogs(prev => [...prev, `[鏡頭 1] ✅ 步驟 3/7：首幀 + 尾幀皆已生成（雙幀鏈建立）`]);
-              imageSuccess = true;
-            } else {
-              // Shot 2+: inherit previous end as start
-              const prevEnd = prevScene0 ? getKeyframesEndFrame(prevScene0) : "";
-              if (!prevEnd) {
-                throw new Error(`鏡頭 ${i + 1} 無法繼承首幀：上一個鏡頭沒有尾幀 endFrameKeyframes`);
-              }
-              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🔗 步驟 3/7：繼承鏡頭 ${i} 尾幀作為本鏡首幀；僅生成尾幀 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
-
-              updateActiveProject((prev) => ({
-                scenes: prev.scenes.map(s => s.id === scene.id ? {
-                  ...s,
-                  startFrameKeyframes: prevEnd,
-                  imageUrlKeyframes: prevEnd,
-                  startFrameSourceKeyframes: "inherited_prev_end",
-                  isGeneratingStartFrameKeyframes: false,
-                  isGeneratingEndFrameKeyframes: true,
-                  isGeneratingImageKeyframes: true,
-                } : s)
-              }));
-
-              const endPrompt = buildKeyframesEndPrompt(
-                freshScene0,
-                prevScene0?.endFrameDescriptionKeyframes || ""
-              );
-              const endUrl = await generateKeyframesStillUrl(freshScene0, endPrompt);
-              const endDesc = `End frame of shot ${i + 1} "${freshScene0.title}"; continues from inherited prev end; same identity/outfit.`;
-
-              updateActiveProject((prev) => ({
-                scenes: prev.scenes.map(s => s.id === scene.id ? {
-                  ...s,
-                  startFrameKeyframes: prevEnd,
-                  imageUrlKeyframes: prevEnd,
-                  endFrameKeyframes: endUrl,
-                  startFrameSourceKeyframes: "inherited_prev_end",
-                  endFrameDescriptionKeyframes: endDesc,
-                  isGeneratingImageKeyframes: false,
-                  isGeneratingStartFrameKeyframes: false,
-                  isGeneratingEndFrameKeyframes: false,
-                  step3ImageErrorKeyframes: "",
-                } : s)
-              }));
-              try {
-                const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const updatedList = curList.map(p => p.id === activeProjectId ? {
-                  ...p,
-                  scenes: p.scenes.map(s => s.id === scene.id ? {
-                    ...s,
-                    startFrameKeyframes: prevEnd,
-                    imageUrlKeyframes: prevEnd,
-                    endFrameKeyframes: endUrl,
-                    startFrameSourceKeyframes: "inherited_prev_end" as const,
-                    endFrameDescriptionKeyframes: endDesc,
-                    isGeneratingImageKeyframes: false,
-                    isGeneratingStartFrameKeyframes: false,
-                    isGeneratingEndFrameKeyframes: false,
-                  } : s)
-                } : p);
-                localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-              } catch (e) {}
-              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 3/7：首幀=上鏡尾幀（已鎖定），尾幀已新生成`]);
-              imageSuccess = true;
-            }
-          } catch (imgErr: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 3/7 雙幀生成失敗 (嘗試 ${imgRetryCount}/${maxImgAttempts}): ${imgErr.message || imgErr}`]);
-            updateActiveProject((prev) => ({
-              scenes: prev.scenes.map(s => s.id === scene.id ? {
-                ...s,
-                step3ImageErrorKeyframes: imgErr?.message || String(imgErr),
-                isGeneratingImageKeyframes: false,
-                isGeneratingStartFrameKeyframes: false,
-                isGeneratingEndFrameKeyframes: false,
-              } : s)
-            }));
-            if (imgRetryCount >= maxImgAttempts) {
-              if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 3 連續出錯達上限，全自動製片暫停！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} Step3 失敗，已暫停。`, "error");
-                throw new Error("STRICT_LOCK_PAUSE");
-              } else {
-                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 步驟 3 失敗，套用備用首尾幀...`]);
-                const fallbackImg = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80";
-                let startFb = fallbackImg;
-                let source: Scene["startFrameSourceKeyframes"] = "forced_pass_fallback";
-                try {
-                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                  const curProj = curList.find(p => p.id === activeProjectId);
-                  if (i > 0 && curProj) {
-                    const pe = getKeyframesEndFrame(curProj.scenes[i - 1]);
-                    if (pe) {
-                      startFb = pe;
-                      source = "inherited_prev_end";
+                if (freshS) {
+                  if (!freshS[isGenImgField]) {
+                    clearInterval(checkImgInterval);
+                    if (freshS[imageField]) {
+                      resolve();
+                    } else {
+                      reject(new Error("影像生成完畢，但未回傳有效首幀網址。"));
                     }
                   }
-                } catch (e) {}
+                }
+                if (checkCount > 180) {
+                  clearInterval(checkImgInterval);
+                  reject(new Error("影像生成超時。"));
+                }
+              }, 1500);
+            });
+
+            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+            const curProj = curProjList.find(p => p.id === activeProjectId);
+            const freshS = curProj?.scenes.find(s => s.id === scene.id);
+
+            if (freshS && freshS[imageField]) {
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 成功繪製首幀極致畫面！`]);
+              imageSuccess = true;
+            } else {
+              throw new Error("網址映射失敗");
+            }
+          } catch (imgErr: any) {
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 首幀生成失敗 (嘗試 ${imgRetryCount}/${maxImgAttempts}): ${imgErr.message || imgErr}`]);
+            if (imgRetryCount >= maxImgAttempts) {
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格安全鎖防護] 鏡頭 ${i + 1} 首幀重試達 10 次上限，全自動製片中斷，請手動介入調整！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 連續失敗，已暫停，無繞過。`, "error");
+                throw new Error("STRICT_LOCK_PAUSE");
+              } else {
+                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 首幀失敗，自動套用極速安全備用畫面...`]);
+                const fallbackImg = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80";
                 updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? {
-                    ...s,
-                    startFrameKeyframes: startFb,
-                    endFrameKeyframes: fallbackImg,
-                    imageUrlKeyframes: startFb,
-                    startFrameSourceKeyframes: source,
-                    isGeneratingImageKeyframes: false,
-                    isGeneratingStartFrameKeyframes: false,
-                    isGeneratingEndFrameKeyframes: false,
+                  scenes: prev.scenes.map(s => s.id === scene.id ? { 
+                    ...s, 
+                    imageUrl: fallbackImg, 
+                    imageUrlExt: fallbackImg, 
+                    imageUrlKeyframes: fallbackImg,
+                    isGeneratingImage: false,
+                    isGeneratingImageExt: false,
+                    isGeneratingImageKeyframes: false
                   } : s)
                 }));
                 try {
                   const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
                   const updatedList = curList.map(p => p.id === activeProjectId ? {
                     ...p,
-                    scenes: p.scenes.map(s => s.id === scene.id ? {
-                      ...s,
-                      startFrameKeyframes: startFb,
-                      endFrameKeyframes: fallbackImg,
-                      imageUrlKeyframes: startFb,
-                      startFrameSourceKeyframes: source,
-                    } : s)
+                    scenes: p.scenes.map(s => s.id === scene.id ? { ...s, imageUrl: fallbackImg, imageUrlExt: fallbackImg, imageUrlKeyframes: fallbackImg } : s)
                   } : p);
                   localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-                } catch (e) {}
+                } catch(e) {}
                 imageSuccess = true;
               }
             } else {
@@ -4117,14 +3670,17 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             }
           }
         }
+      }
 
-        // ------------------------------------------
-        // STEP 4: 圖片審查 (AI Image Review)
-        // ------------------------------------------
+      // =========================================================================
+      // STEP 4: AI 檢查所有首幀是否合理 + 故事連貫性
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 4] AI 正在檢查所有首幀合理性與故事連貫性..."]);
+      for (let i = 0; i < currentScenes.length; i++) {
+        const scene = currentScenes[i];
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 4, isReviewingStep4: true } : s)
         }));
-        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🔍 步驟 4/7：AI 畫面物理合理性與人物一致性校驗中...`]);
 
         let reviewSuccess = false;
         let reviewRetryCount = 0;
@@ -4132,7 +3688,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
         while (!reviewSuccess && reviewRetryCount < maxReviewAttempts) {
           reviewRetryCount++;
-          
           try {
             const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
             const curProj = curProjList.find(p => p.id === activeProjectId);
@@ -4144,23 +3699,44 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                // Prefer dual-frame start; fall back to legacy imageUrlKeyframes
-                imageUrl: getKeyframesStartFrame(freshS) || freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes,
-                endImageUrl: getKeyframesEndFrame(freshS) || undefined,
+                imageUrl: freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes,
                 visualPrompt: freshS.visualPrompt,
                 characterDescription: characterObj?.description || "",
-                startFrameSource: freshS.startFrameSourceKeyframes || "",
+                sceneId: scene.id,
+                projectId: activeProjectId
               })
             });
 
             if (!resReview.ok) throw new Error("審核 API 響應錯誤");
             const reviewData = await resReview.json();
             const score = reviewData.score || 85;
-            const text = reviewData.critique || "構圖流暢，角色特徵契合，建議前往下一步。";
+            const text = reviewData.critique || "構圖流暢，首幀角色特徵契合，故事連貫性佳。";
             const passed = reviewData.passed !== undefined ? reviewData.passed : true;
 
             if (!passed && strictWorkflowLock) {
-              throw new Error(`畫面審核未通過（分數：${score}/100）。建議：${text}`);
+              // Auto-improve prompt if AI provided one
+              if (reviewData.optimizedVisualPrompt) {
+                setFullAutoLogs(prev => [...prev, `✨ [AI 智慧優化] 偵測到畫面邏輯缺陷，正在自動重構並強化提示詞...`]);
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    visualPrompt: reviewData.optimizedVisualPrompt
+                  } : s)
+                }));
+                
+                try {
+                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const updatedList = curList.map(p => p.id === activeProjectId ? {
+                    ...p,
+                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      visualPrompt: reviewData.optimizedVisualPrompt
+                    } : s)
+                  } : p);
+                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                } catch(e) {}
+              }
+              throw new Error(`首幀審核未通過（分數：${score}/100）。建議：${text}`);
             }
 
             updateActiveProject((prev) => ({
@@ -4174,7 +3750,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               } : s)
             }));
 
-            // Sync to localStorage
             try {
               const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
               const updatedList = curList.map(p => p.id === activeProjectId ? {
@@ -4189,26 +3764,25 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
             } catch(e) {}
 
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 4/7：畫面審核核查通過！分數：${score}/100`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 物理合理性與人物一致性審核通過！分數：${score}/100`]);
             reviewSuccess = true;
           } catch (err: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 4/7 畫面審核未通過 (嘗試 ${reviewRetryCount}/${maxReviewAttempts}): ${err.message || err}`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 4 首幀審核不通過 (嘗試 ${reviewRetryCount}/${maxReviewAttempts}): ${err.message || err}`]);
             if (reviewRetryCount >= maxReviewAttempts) {
               if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 4 畫面審核連續未通過達 10 次上限，全自動製片暫停！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 畫面審核未通過，工作流暫停。`, "error");
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格安全鎖防護] 鏡頭 ${i + 1} 步驟 4 審查未通過，工作流中斷，等待手動調整！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 物理審查失敗，已安全暫停。`, "error");
                 throw new Error("STRICT_LOCK_PAUSE");
               } else {
                 updateActiveProject((prev) => ({
                   scenes: prev.scenes.map(s => s.id === scene.id ? {
                     ...s,
                     step4ImageReviewScore: 70,
-                    step4ImageReviewText: "（容錯模式強制通過）畫面審核強制作為合格處理。",
+                    step4ImageReviewText: "（容錯模式強制通過）強制作為合格處理。",
                     step4Passed: true,
                     isReviewingStep4: false
                   } : s)
                 }));
-                // sync to localStorage
                 try {
                   const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
                   const updatedList = curList.map(p => p.id === activeProjectId ? {
@@ -4216,7 +3790,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     scenes: p.scenes.map(s => s.id === scene.id ? {
                       ...s,
                       step4ImageReviewScore: 70,
-                      step4ImageReviewText: "（容錯模式強制通過）畫面審核強制作為合格處理。",
+                      step4ImageReviewText: "（容錯模式強制通過）強制作為合格處理。",
                       step4Passed: true
                     } : s)
                   } : p);
@@ -4225,53 +3799,50 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 reviewSuccess = true;
               }
             } else {
-              // Auto-revise prompt from QA critique, then re-run dual-frame keyframes generation
-              const critiqueText = String(err?.message || err || "");
-              setFullAutoLogs(prev => [...prev, `🧠 [鏡頭 ${i + 1}] 審核未過 → AI 正在根據缺失特徵改寫 Prompt 並重繪雙幀（非同一提示盲重試）...`]);
-              try {
-                const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const curProj = curList.find(p => p.id === activeProjectId);
-                const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
-                const revised = await reviseKeyframesPromptFromReview(freshS, critiqueText, reviewRetryCount);
-                updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? {
-                    ...s,
-                    visualPrompt: revised.visualPrompt,
-                    step2OptimizedPrompt: revised.visualPrompt,
-                    negativePrompt: revised.negativePrompt,
-                    step4ImageReviewText: critiqueText,
-                  } : s)
-                }));
-                try {
-                  const list2 = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                  const updated2 = list2.map(p => p.id === activeProjectId ? {
-                    ...p,
-                    scenes: p.scenes.map(s => s.id === scene.id ? {
-                      ...s,
-                      visualPrompt: revised.visualPrompt,
-                      step2OptimizedPrompt: revised.visualPrompt,
-                      negativePrompt: revised.negativePrompt,
-                    } : s)
-                  } : p);
-                  localStorage.setItem("toonflow_projects", JSON.stringify(updated2));
-                } catch { /* ignore */ }
-
-                setFullAutoLogs(prev => [...prev, `✏️ [鏡頭 ${i + 1}] Prompt 已強化角色鎖定特徵，開始重繪首/尾幀...`]);
-                await regenerateKeyframesDualFrames(scene.id, i);
-                setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 雙幀重繪完成，重新進入審核...`]);
-              } catch (redrawErr: any) {
-                setFullAutoLogs(prev => [...prev, `⚠️ [鏡頭 ${i + 1}] 改寫/重繪失敗：${redrawErr?.message || redrawErr}`]);
+              if (strictWorkflowLock) {
+                setFullAutoLogs(prev => [...prev, `🔄 由於物理審核未通過，將於 2 秒後重新繪製首幀...`]);
+                await new Promise(r => setTimeout(r, 2000));
+                await handleGenerateImage(scene.id, 'agnes');
+                await new Promise<void>((resolve) => {
+                  const checkImgInterval = setInterval(() => {
+                    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const curProj = curProjList.find(p => p.id === activeProjectId);
+                    const freshS = curProj?.scenes.find(s => s.id === scene.id);
+                    if (freshS && !freshS[isGenImgField]) {
+                      clearInterval(checkImgInterval);
+                      resolve();
+                    }
+                  }, 2000);
+                });
               }
-              await new Promise(r => setTimeout(r, 800));
+              await new Promise(r => setTimeout(r, 1000));
             }
           }
         }
+      }
 
-        // ------------------------------------------
-        // STEP 5: 影片生成 (Keyframes start→end ONLY)
-        // ------------------------------------------
+      // =========================================================================
+      // STEP 5: 用戶確認所有首幀
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 5] 用戶確認所有首幀（全自動製片中：已自動獲取並確認所有首幀）..."]);
+      await new Promise(r => setTimeout(r, 800));
+
+      // =========================================================================
+      // STEP 6: 按順序生成影片（每個鏡頭用自己首幀開始，自動銜接下一分鏡首幀作為尾幀）
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 6] 按順序生成影片（每個鏡頭使用其專屬首幀開始，並自動將下一鏡頭之首幀指定為尾幀，流暢對齊中）..."]);
+      
+      // Pull freshest scenes from state/localStorage to ensure we have generated image URLs!
+      const freshProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+      const freshProj = freshProjList.find(p => p.id === activeProjectId);
+      if (freshProj) {
+        currentScenes = freshProj.scenes;
+      }
+
+      for (let i = 0; i < currentScenes.length; i++) {
+        const scene = currentScenes[i];
         updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 5 } : s)
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 6 } : s)
         }));
 
         let videoSuccess = false;
@@ -4280,15 +3851,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
         while (!videoSuccess && vidRetryCount < maxVidAttempts) {
           vidRetryCount++;
-          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 📹 步驟 5/7：首尾幀影片合成（本鏡首幀→本鏡尾幀）(嘗試 ${vidRetryCount}/${maxVidAttempts})...`]);
+          setFullAutoLogs(prev => [...prev, `📹 [鏡頭 ${i + 1}] 正在呼叫 AI 導演合成影片 (嘗試 ${vidRetryCount}/${maxVidAttempts})...`]);
 
-          // Clear any backend locks
           await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
 
-          // IMPORTANT: keyframes pipeline must use handleGenerateVideoKeyframes (not standard handleGenerateVideo)
-          await handleGenerateVideoKeyframes(scene.id, i);
+          // Trigger video generation - this automatically determines and passes nextScene.imageUrl as endImageUrl!
+          await handleGenerateVideo(scene.id, true);
 
-          // Wait/Poll video completion
           try {
             await new Promise<void>((resolve, reject) => {
               let checkCount = 0;
@@ -4318,33 +3887,32 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     }
                   }
                 }
-                if (checkCount > 200) { // Timeout after ~10 minutes
+                if (checkCount > 200) {
                   clearInterval(checkVidInterval);
                   reject(new Error("影片渲染超時。"));
                 }
               }, 3000);
             });
 
-            // Read freshest URL
             const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
             const curProj = curProjList.find(p => p.id === activeProjectId);
             const freshS = curProj?.scenes.find(s => s.id === scene.id);
 
             if (freshS && freshS[videoField]) {
-              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 5/7：影片分鏡合成渲染成功！`]);
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 影片分鏡合成渲染成功！`]);
               videoSuccess = true;
             } else {
               throw new Error("影片網址映射錯誤");
             }
           } catch (vidErr: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 5/7 影片生成失敗 (嘗試 ${vidRetryCount}/${maxVidAttempts}): ${vidErr.message || vidErr}`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 影片生成失敗 (嘗試 ${vidRetryCount}/${maxVidAttempts}): ${vidErr.message || vidErr}`]);
             if (vidRetryCount >= maxVidAttempts) {
               if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 5 影片合成連續失敗達 10 次上限，全自動製片暫停！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片生成連續失敗 10 次，工作流已暫停。`, "error");
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格安全鎖防護] 鏡頭 ${i + 1} 影片合成連續出錯達 10 次上限，全自動製片暫停！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片生成連續失敗，工作流暫停。`, "error");
                 throw new Error("STRICT_LOCK_PAUSE");
               } else {
-                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 步驟 5 失敗，自動繞過...`]);
+                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 影片合成失敗，自動繞過...`]);
                 videoSuccess = true;
               }
             } else {
@@ -4352,149 +3920,17 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             }
           }
         }
+      }
 
-        // ------------------------------------------
-        // STEP 6: 影片審查 (AI Video Review)
-        // ------------------------------------------
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 6, isReviewingStep6: true } : s)
-        }));
-        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎬 步驟 6/7：AI 鏡頭流暢度與運鏡物理檢驗中...`]);
-
-        let videoReviewSuccess = false;
-        let vidReviewRetryCount = 0;
-        const maxVidReviewAttempts = strictWorkflowLock ? 10 : 3;
-
-        while (!videoReviewSuccess && vidReviewRetryCount < maxVidReviewAttempts) {
-          vidReviewRetryCount++;
-
-          try {
-            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-            const curProj = curProjList.find(p => p.id === activeProjectId);
-            const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
-            const previousScene = i > 0 ? (curProj?.scenes[i - 1] || null) : null;
-
-            const resVideoReview = await fetch("/api/workflow/review-video", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                scene: freshS,
-                previousScene
-              })
-            });
-
-            if (!resVideoReview.ok) throw new Error("審核 API 連接出錯");
-            const reviewData = await resVideoReview.json();
-            const score = reviewData.score || 90;
-            const text = reviewData.critique || "影片流暢度極高，運鏡自然銜接。";
-            const passed = reviewData.passed !== undefined ? reviewData.passed : true;
-
-            if (!passed && strictWorkflowLock) {
-              throw new Error(`影片審核未通過（分數：${score}/100）。原因：${text}`);
-            }
-
-            updateActiveProject((prev) => ({
-              scenes: prev.scenes.map(s => s.id === scene.id ? {
-                ...s,
-                step6VideoReviewScore: score,
-                step6VideoReviewText: text,
-                step6Passed: passed,
-                isReviewingStep6: false,
-                workflowStep: 6
-              } : s)
-            }));
-
-            // Sync to localStorage
-            try {
-              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-              const updatedList = curList.map(p => p.id === activeProjectId ? {
-                ...p,
-                scenes: p.scenes.map(s => s.id === scene.id ? {
-                  ...s,
-                  step6VideoReviewScore: score,
-                  step6VideoReviewText: text,
-                  step6Passed: passed
-                } : s)
-              } : p);
-              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-            } catch(e) {}
-
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 6/7：影片流暢度與運鏡物理稽核通過！分數：${score}/100`]);
-            videoReviewSuccess = true;
-          } catch (err: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 6/7 影片流暢度審核不通過 (嘗試 ${vidReviewRetryCount}/${maxVidReviewAttempts}): ${err.message || err}`]);
-            if (vidReviewRetryCount >= maxVidReviewAttempts) {
-              if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格鎖防護中斷] 鏡頭 ${i + 1} 步驟 6 影片審核連續未通過達 10 次上限，全自動製片暫停！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片審核未通過，工作流已暫停。`, "error");
-                throw new Error("STRICT_LOCK_PAUSE");
-              } else {
-                updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? {
-                    ...s,
-                    step6VideoReviewScore: 70,
-                    step6VideoReviewText: "（容錯模式強制通過）影片流暢度審核強制作為合格處理。",
-                    step6Passed: true,
-                    isReviewingStep6: false
-                  } : s)
-                }));
-                try {
-                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                  const updatedList = curList.map(p => p.id === activeProjectId ? {
-                    ...p,
-                    scenes: p.scenes.map(s => s.id === scene.id ? {
-                      ...s,
-                      step6VideoReviewScore: 70,
-                      step6VideoReviewText: "（容錯模式強制通過）影片流暢度審核強制作為合格處理。",
-                      step6Passed: true
-                    } : s)
-                  } : p);
-                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-                } catch(e) {}
-                videoReviewSuccess = true;
-              }
-            } else {
-              // Trigger re-generation of keyframes video (start→end of THIS shot)
-              if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🔄 由於影片審核未通過，重新為鏡頭 ${i + 1} 合成首尾幀影片...`]);
-                await handleGenerateVideoKeyframes(scene.id, i);
-                await new Promise<void>((resolve, reject) => {
-                  let checkCount = 0;
-                  const checkVidInterval = setInterval(() => {
-                    checkCount++;
-                    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                    const curProj = curProjList.find(p => p.id === activeProjectId);
-                    const freshS = curProj?.scenes.find(s => s.id === scene.id);
-
-                    if (freshS) {
-                      if (!freshS[isGenVidField]) {
-                        clearInterval(checkVidInterval);
-                        if (freshS[videoField]) {
-                          resolve();
-                        } else {
-                          reject(new Error("影片重新生成失敗。"));
-                        }
-                      }
-                    }
-                    if (checkCount > 100) {
-                      clearInterval(checkVidInterval);
-                      reject(new Error("影片重新生成超時。"));
-                    }
-                  }, 3000);
-                });
-              }
-              await new Promise(r => setTimeout(r, 1000));
-            }
-          }
-        }
-
-        // ------------------------------------------
-        // STEP 7: 連續性傳導 (Continuity Feedback/Advice Generation)
-        // ------------------------------------------
+      // =========================================================================
+      // STEP 7: 總結 + 下鏡頭建議（自動更新尾幀）
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 7] AI 正在為所有鏡頭進行畫面連續性特徵傳導分析、總結與更新下鏡頭建議..."]);
+      for (let i = 0; i < currentScenes.length; i++) {
+        const scene = currentScenes[i];
         updateActiveProject((prev) => ({
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7, isGeneratingStep7: true } : s)
         }));
-        setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🧠 步驟 7/7：AI 正在分析物理特徵，為下一個鏡頭提供連續性對齊傳導建議...`]);
 
         try {
           const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
@@ -4514,69 +3950,116 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
           if (resAdvice.ok) {
             const adviceData = await resAdvice.json();
-            const baseAdvice = adviceData.advice || "維持上一鏡頭中人物的服裝色彩與氛圍基調。";
-            // P0: always embed end-frame contract for next shot
-            const endUrl = getKeyframesEndFrame(freshS);
-            const endDesc = freshS.endFrameDescriptionKeyframes || `Shot ${i + 1} end still`;
-            const advice = [
-              baseAdvice,
-              `【下鏡首幀鎖定】必須使用本鏡尾幀作為開場。`,
-              endUrl ? `尾幀URL: ${endUrl}` : "尾幀URL: （未生成）",
-              `尾幀描述: ${endDesc}`,
-            ].join(" ");
+            const advice = adviceData.advice || "維持上一分鏡中主角與背景之色彩與基調。";
             updateActiveProject((prev) => ({
               scenes: prev.scenes.map(s => s.id === scene.id ? {
                 ...s,
                 step7AdviceForNext: advice,
-                endFrameDescriptionKeyframes: endDesc,
                 isGeneratingStep7: false,
                 workflowStep: 7
               } : s)
             }));
             
-            // Sync to localStorage
             try {
               const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
               const updatedList = curList.map(p => p.id === activeProjectId ? {
                 ...p,
-                scenes: p.scenes.map(s => s.id === scene.id ? {
-                  ...s,
-                  step7AdviceForNext: advice,
-                  endFrameDescriptionKeyframes: endDesc,
-                } : s)
+                scenes: p.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: advice } : s)
               } : p);
               localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
             } catch(e) {}
 
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7：已寫入下鏡建議（含尾幀資訊）`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7 連續性對齊建議已完美生成：${advice}`]);
           } else {
             throw new Error("連續性分析 API 響應錯誤");
           }
         } catch (adviceErr: any) {
-          console.warn("Advice step failed, fallback applied:", adviceErr);
-          const curProjListFb = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-          const curProjFb = curProjListFb.find(p => p.id === activeProjectId);
-          const freshFb = curProjFb?.scenes.find(s => s.id === scene.id) || scene;
-          const endUrl = getKeyframesEndFrame(freshFb);
-          const endDesc = freshFb.endFrameDescriptionKeyframes || "Keep costume and pose continuous.";
-          const fallbackAdvice = `維持上一分鏡角色一致服飾。【下鏡首幀鎖定】使用本鏡尾幀。尾幀URL: ${endUrl || "N/A"}。尾幀描述: ${endDesc}`;
+          console.warn("Advice generation failed, using fallback:", adviceErr);
+          const fallbackAdvice = "維持上一分鏡角色一致服飾與氛圍。";
           updateActiveProject((prev) => ({
             scenes: prev.scenes.map(s => s.id === scene.id ? {
               ...s,
               step7AdviceForNext: fallbackAdvice,
-              endFrameDescriptionKeyframes: endDesc,
               isGeneratingStep7: false,
               workflowStep: 7
             } : s)
           }));
-          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 7/7：已套用含尾幀鎖定的安全建議。`]);
+        }
+      }
+
+      // Proceed to Step 7
+
+
+      // =========================================================================
+      // STEP 7: 總結 + 下鏡頭建議（自動更新尾幀）
+      // =========================================================================
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 7] AI 正在為所有鏡頭進行畫面連續性特徵傳導分析、總結與更新下鏡頭建議..."]);
+      for (let i = 0; i < currentScenes.length; i++) {
+        const scene = currentScenes[i];
+        updateActiveProject((prev) => ({
+          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7, isGeneratingStep7: true } : s)
+        }));
+
+        try {
+          const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
+          const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+          const curProj = curProjList.find(p => p.id === activeProjectId);
+          const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+
+          const resAdvice = await fetch("/api/workflow/generate-step7-advice", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              currentScene: freshS,
+              nextScene,
+              customApiKey: customApiKey || undefined
+            })
+          });
+
+          if (resAdvice.ok) {
+            const adviceData = await resAdvice.json();
+            const advice = adviceData.advice || "維持上一分鏡中主角與背景之色彩與基調。";
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? {
+                ...s,
+                step7AdviceForNext: advice,
+                isGeneratingStep7: false,
+                workflowStep: 7
+              } : s)
+            }));
+            
+            try {
+              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+              const updatedList = curList.map(p => p.id === activeProjectId ? {
+                ...p,
+                scenes: p.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: advice } : s)
+              } : p);
+              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+            } catch(e) {}
+
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7 連續性對齊建議已完美生成：${advice}`]);
+          } else {
+            throw new Error("連續性分析 API 響應錯誤");
+          }
+        } catch (adviceErr: any) {
+          console.warn("Advice generation failed, using fallback:", adviceErr);
+          const fallbackAdvice = "維持上一分鏡角色一致服飾與氛圍。";
+          updateActiveProject((prev) => ({
+            scenes: prev.scenes.map(s => s.id === scene.id ? {
+              ...s,
+              step7AdviceForNext: fallbackAdvice,
+              isGeneratingStep7: false,
+              workflowStep: 7
+            } : s)
+          }));
+          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 7/7：已自動套用安全連續性對齊對應。`]);
         }
 
         // Calculate intermediate progress
         const percent = Math.floor(((i + 1) / currentScenes.length) * 80);
         setFullAutoProgress(`${percent}%`);
-        setFullAutoLogs(prev => [...prev, `🎉 鏡頭 ${i + 1} 的七步導演工作流已 100% 完美閉環！`]);
-        await new Promise(r => setTimeout(r, 1000));
+        setFullAutoLogs(prev => [...prev, `🎉 鏡頭 ${i + 1} 的連續性特徵傳導已 100% 完美更新！`]);
+        await new Promise(r => setTimeout(r, 600));
       }
 
       // 4. Final multi-clip video stitching
@@ -4606,12 +4089,31 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       const reader = stitchRes.body.getReader();
       const decoder = new TextDecoder();
       let finalStitchData: any = null;
+      let streamBuffer = "";
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        if (done) {
+          if (streamBuffer.trim()) {
+            try {
+              const data = JSON.parse(streamBuffer.trim());
+              if (data.type === 'log') {
+                setFullAutoLogs(prev => [...prev, data.log]);
+              } else if (data.type === 'result') {
+                finalStitchData = data;
+              } else if (data.type === 'error') {
+                throw new Error(data.error);
+              }
+            } catch (e) {
+              console.error("Error parsing remaining stream buffer:", e);
+            }
+          }
+          break;
+        }
+        
+        streamBuffer += decoder.decode(value, { stream: true });
+        const lines = streamBuffer.split('\n');
+        streamBuffer = lines.pop() || "";
         
         for (const line of lines) {
           if (!line.trim()) continue;
@@ -4621,6 +4123,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               setFullAutoLogs(prev => [...prev, data.log]);
             } else if (data.type === 'result') {
               finalStitchData = data;
+            } else if (data.type === 'error') {
+              throw new Error(data.error);
             }
           } catch (e) {
             console.error("Error parsing log line:", e);
@@ -4697,15 +4201,39 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      let streamBuffer = "";
       
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          if (streamBuffer.trim()) {
+            try {
+              const data = JSON.parse(streamBuffer.trim());
+              if (data.type === 'log') {
+                setFullAutoLogs(prev => [...prev, data.log]);
+                if (data.log.includes("下載")) setFullAutoProgress("25%");
+                else if (data.log.includes("提交")) setFullAutoProgress("50%");
+                else if (data.log.includes("完美完成")) setFullAutoProgress("100%");
+              } else if (data.type === 'result') {
+                setFinalStitchedVideoUrl(data.videoUrl);
+                updateActiveProject({ finalVideoUrl: data.videoUrl });
+                showToast("🎉 恭喜！手動拼接影片成功！", "success");
+              } else if (data.type === 'error') {
+                throw new Error(data.error);
+              }
+            } catch (e) {
+              console.error("Failed to parse final manual stream buffer:", e);
+            }
+          }
+          break;
+        }
         
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n').filter(Boolean);
+        streamBuffer += decoder.decode(value, { stream: true });
+        const lines = streamBuffer.split('\n');
+        streamBuffer = lines.pop() || "";
         
         for (const line of lines) {
+          if (!line.trim()) continue;
           try {
             const data = JSON.parse(line);
             if (data.type === 'log') {
@@ -4791,12 +4319,49 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   // Edit fields inline in scenes list
   const handleUpdateSceneField = (sceneId: string, field: keyof Scene, value: string | number | boolean) => {
     if (!activeProject) return;
-    const updated = activeProject.scenes.map(s => {
+    
+    const targetIndex = activeProject.scenes.findIndex(s => s.id === sceneId);
+    
+    const updated = activeProject.scenes.map((s, idx) => {
       if (s.id === sceneId) {
-        return { ...s, [field]: value };
+        const updatedScene = { ...s, [field]: value };
+        
+        // Chain Update / Invalidation logic for current scene when start frame changes
+        if (field === "imageUrlKeyframes") {
+          updatedScene.videoUrlKeyframes = undefined;
+          updatedScene.videoProgressKeyframes = "0%";
+          updatedScene.videoErrorKeyframes = undefined;
+          updatedScene.videoLogsKeyframes = undefined;
+          
+          updatedScene.step4Passed = undefined;
+          updatedScene.step4ImageReviewScore = undefined;
+          updatedScene.step4ImageReviewText = undefined;
+          updatedScene.step6Passed = undefined;
+          updatedScene.step6VideoReviewScore = undefined;
+          updatedScene.step6VideoReviewText = undefined;
+          updatedScene.workflowStep = 3; // Reset to step 3 for keyframes review
+        }
+        
+        return updatedScene;
       }
+      
+      // Invalidation logic for previous scene when its end frame (which is this scene's start frame) changes
+      if (field === "imageUrlKeyframes" && idx === targetIndex - 1) {
+        return {
+          ...s,
+          videoUrlKeyframes: undefined,
+          videoProgressKeyframes: "0%",
+          videoErrorKeyframes: undefined,
+          videoLogsKeyframes: undefined,
+          step6Passed: undefined,
+          step6VideoReviewScore: undefined,
+          step6VideoReviewText: undefined
+        };
+      }
+      
       return s;
     });
+    
     updateActiveProject({ scenes: updated });
   };
 
@@ -5176,6 +4741,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               prompt: rawInput,
+          sceneId: scene.id,
               artStyle: charObj.artStyle || activeProject.artStyle,
               character: charObj.name,
               characterDescription: `${charObj.description || ""}. Ensure wearing: ${charObj.clothing || ""}.`,
@@ -5787,7 +5353,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               <button
                 onClick={handleUndo}
                 disabled={undoStack.length === 0 && (!stableProjectRef.current || getProjectSignature(activeProject) === getProjectSignature(stableProjectRef.current))}
-                className={`p-1.5 rounded-md transition flex items-center gap-1 ${
+                className={ `p-1.5 rounded-md transition flex items-center gap-1 ${
                   undoStack.length > 0 || (stableProjectRef.current && activeProject && getProjectSignature(activeProject) !== getProjectSignature(stableProjectRef.current))
                     ? "text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
                     : "text-slate-600 cursor-not-allowed opacity-50"
@@ -5801,7 +5367,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
               <button
                 onClick={handleRedo}
                 disabled={redoStack.length === 0}
-                className={`p-1.5 rounded-md transition flex items-center gap-1 ${
+                className={ `p-1.5 rounded-md transition flex items-center gap-1 ${
                   redoStack.length > 0
                     ? "text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
                     : "text-slate-600 cursor-not-allowed opacity-50"
@@ -5986,7 +5552,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 <div className="flex flex-col gap-2.5 pt-2">
                   <button
                     onClick={() => setActiveTab("novel")}
-                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
                       activeTab === "novel"
                         ? "bg-gradient-to-r from-indigo-600 to-indigo-800 text-white border-indigo-500 shadow-lg shadow-indigo-600/20"
                         : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
@@ -6000,7 +5566,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                   <button
                     onClick={() => setActiveTab("characters")}
-                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
                       activeTab === "characters"
                         ? "bg-gradient-to-r from-pink-600 to-indigo-600 text-white border-pink-500 shadow-lg shadow-pink-600/20"
                         : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
@@ -6014,7 +5580,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                   <button
                     onClick={() => setActiveTab("scenes")}
-                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
                       activeTab === "scenes"
                         ? "bg-gradient-to-r from-cyan-600 to-blue-600 text-white border-cyan-500 shadow-lg shadow-cyan-600/20"
                         : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
@@ -6028,7 +5594,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                   <button
                     onClick={() => setActiveTab("scenes_ext")}
-                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
                       activeTab === "scenes_ext"
                         ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white border-emerald-500 shadow-lg shadow-emerald-600/20"
                         : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
@@ -6042,7 +5608,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
                   <button
                     onClick={() => setActiveTab("scenes_keyframes")}
-                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
                       activeTab === "scenes_keyframes"
                         ? "bg-gradient-to-r from-purple-600 to-indigo-600 text-white border-purple-500 shadow-lg shadow-purple-600/20"
                         : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
@@ -6055,7 +5621,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                   </button>
                   <button
                     onClick={() => setActiveTab("gallery")}
-                    className={`w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
                       activeTab === "gallery"
                         ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white border-emerald-500 shadow-lg shadow-emerald-600/20"
                         : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
@@ -6064,6 +5630,19 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     <span className="flex items-center gap-2">
                       <Film className="w-4 h-4 text-emerald-400" />
                       <span>已生成影片庫 📽️</span>
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("experience")}
+                    className={ `w-full py-3.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-between gap-1.5 cursor-pointer border ${
+                      activeTab === "experience"
+                        ? "bg-gradient-to-r from-orange-600 to-red-600 text-white border-orange-500 shadow-lg shadow-orange-600/20"
+                        : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border-slate-850 hover:border-slate-800"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <BrainCircuit className="w-4 h-4 text-orange-400" />
+                      <span>AI 經驗圖書館 📚</span>
                     </span>
                   </button>
                 </div>
@@ -6149,11 +5728,11 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                   setSelectedNovelAgents([...selectedNovelAgents, agent.id]);
                                 }
                               }}
-                              className={`py-2 px-3 border rounded-lg text-xs font-medium transition flex items-center justify-center gap-2 cursor-pointer ${
+                              className={ `py-2 px-3 border rounded-lg text-xs font-medium transition flex items-center justify-center gap-2 cursor-pointer ${
                                 isSelected ? agent.activeColor : `${agent.color} hover:bg-slate-800/40`
                               }`}
                             >
-                              <div className={`w-2 h-2 rounded-full ${isSelected ? 'bg-current animate-pulse' : 'bg-slate-600'}`} />
+                              <div className={ `w-2 h-2 rounded-full ${isSelected ? 'bg-current animate-pulse' : 'bg-slate-600'}`} />
                               {agent.name}
                             </button>
                           );
@@ -6247,8 +5826,8 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           </div>
                         ) : (
                           chatMessages.map((msg, idx) => (
-                            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                              <div className={`max-w-[85%] rounded-2xl p-3 text-sm ${
+                            <div key={idx} className={ `flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                              <div className={ `max-w-[85%] rounded-2xl p-3 text-sm ${
                                 msg.role === 'user' 
                                   ? 'bg-indigo-600 text-white rounded-tr-none' 
                                   : msg.agent === 'agnes' 
@@ -6261,7 +5840,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                               }`}>
                                 {msg.role === 'ai' && (
                                   <div className="text-[10px] font-bold mb-1 opacity-80 uppercase flex items-center gap-1">
-                                    <span className={`w-1.5 h-1.5 rounded-full ${
+                                    <span className={ `w-1.5 h-1.5 rounded-full ${
                                       msg.agent === 'agnes' 
                                         ? 'bg-pink-400' 
                                         : msg.agent === 'mistral'
@@ -6325,11 +5904,11 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                       setSelectedChatAgents([...selectedChatAgents, agent.id]);
                                     }
                                   }}
-                                  className={`py-1 px-2.5 border rounded-md text-[10px] font-medium transition flex items-center gap-1.5 cursor-pointer ${
+                                  className={ `py-1 px-2.5 border rounded-md text-[10px] font-medium transition flex items-center gap-1.5 cursor-pointer ${
                                     isSelected ? agent.activeColor : `${agent.color} hover:bg-slate-800/40`
                                   }`}
                                 >
-                                  <div className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-current animate-pulse' : 'bg-slate-600'}`} />
+                                  <div className={ `w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-current animate-pulse' : 'bg-slate-600'}`} />
                                   {agent.name}
                                 </button>
                               );
@@ -6556,7 +6135,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           return (
                                             <div 
                                               key={idx} 
-                                              className={`relative group/ref aspect-square rounded-lg overflow-hidden border cursor-pointer transition-all ${
+                                              className={ `relative group/ref aspect-square rounded-lg overflow-hidden border cursor-pointer transition-all ${
                                                 isPrimary ? 'border-emerald-500 ring-2 ring-emerald-950 scale-[0.98]' : 'border-slate-800 hover:border-slate-600 hover:scale-105'
                                               }`}
                                               onClick={() => {
@@ -6866,7 +6445,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                                 <span>{trait.label}</span>
                                               </span>
                                               <span
-                                                className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${
+                                                className={ `text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${
                                                   isAligned
                                                     ? "bg-emerald-950/40 border-emerald-900/60 text-emerald-400"
                                                     : "bg-amber-950/40 border-amber-900/60 text-amber-400"
@@ -6953,7 +6532,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                           onClick={() => handleAnalyzeCharacterTarget(char)}
                                           className="py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg border border-slate-700 transition cursor-pointer z-30 flex items-center gap-1"
                                         >
-                                          <RefreshCw className={`w-3 h-3 ${analyzingTargetId === char.id ? "animate-spin" : ""}`} />
+                                          <RefreshCw className={ `w-3 h-3 ${analyzingTargetId === char.id ? "animate-spin" : ""}`} />
                                           <span>重新分析原著</span>
                                         </button>
                                         <button
@@ -7127,7 +6706,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-850">
                           <button
                             onClick={() => updateActiveProject({ disassemblyEngine: "mistral" })}
-                            className={`py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                            className={ `py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                               activeProject.disassemblyEngine === "mistral"
                                 ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow"
                                 : "text-slate-500 hover:text-slate-300"
@@ -7138,7 +6717,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           </button>
                           <button
                             onClick={() => updateActiveProject({ disassemblyEngine: "zhipu" })}
-                            className={`py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                            className={ `py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                               activeProject.disassemblyEngine === "zhipu"
                                 ? "bg-pink-500/20 text-pink-300 border border-pink-500/30 shadow"
                                 : "text-slate-500 hover:text-slate-300"
@@ -7182,7 +6761,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <div className="grid grid-cols-2 gap-2">
                             <button
                               onClick={() => updateActiveProject({ drawingChannel: "flux" })}
-                              className={`p-2.5 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2.5 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 activeProject.drawingChannel === "flux"
                                   ? "bg-slate-950 border-pink-500/50 text-pink-400 shadow-lg shadow-pink-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7193,7 +6772,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             </button>
                             <button
                               onClick={() => updateActiveProject({ drawingChannel: "sd" })}
-                              className={`p-2.5 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2.5 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 activeProject.drawingChannel === "sd"
                                   ? "bg-slate-950 border-pink-500/50 text-pink-400 shadow-lg shadow-pink-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7248,7 +6827,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               type="button"
                               onClick={() => updateActiveProject({ agnesImageMode: "fast" })}
-                              className={`p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 (activeProject.agnesImageMode || "quality") === "fast"
                                   ? "bg-emerald-950/40 border-emerald-500/50 text-emerald-400 shadow-lg shadow-emerald-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7260,7 +6839,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               type="button"
                               onClick={() => updateActiveProject({ agnesImageMode: "balanced" })}
-                              className={`p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 (activeProject.agnesImageMode || "quality") === "balanced"
                                   ? "bg-indigo-950/40 border-indigo-500/50 text-indigo-400 shadow-lg shadow-indigo-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7272,7 +6851,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               type="button"
                               onClick={() => updateActiveProject({ agnesImageMode: "quality" })}
-                              className={`p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 (activeProject.agnesImageMode || "quality") === "quality"
                                   ? "bg-pink-950/40 border-pink-500/50 text-pink-400 shadow-lg shadow-pink-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7294,7 +6873,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               type="button"
                               onClick={() => updateActiveProject({ agnesVideoMode: "fast" })}
-                              className={`p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 (activeProject.agnesVideoMode || "quality") === "fast"
                                   ? "bg-emerald-950/40 border-emerald-500/50 text-emerald-400 shadow-lg shadow-emerald-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7306,7 +6885,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               type="button"
                               onClick={() => updateActiveProject({ agnesVideoMode: "balanced" })}
-                              className={`p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 (activeProject.agnesVideoMode || "quality") === "balanced"
                                   ? "bg-indigo-950/40 border-indigo-500/50 text-indigo-400 shadow-lg shadow-indigo-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7318,7 +6897,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               type="button"
                               onClick={() => updateActiveProject({ agnesVideoMode: "quality" })}
-                              className={`p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                              className={ `p-2 rounded-xl border text-[11px] font-bold text-center transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                                 (activeProject.agnesVideoMode || "quality") === "quality"
                                   ? "bg-pink-950/40 border-pink-500/50 text-pink-400 shadow-lg shadow-pink-500/5"
                                   : "bg-slate-950/60 border-slate-850 text-slate-500 hover:text-slate-400 hover:border-slate-800"
@@ -7422,7 +7001,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <button
                             id="global-strict-lock-btn-1"
                             onClick={handleToggleStrictWorkflowLock}
-                            className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
+                            className={ `py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
                               strictWorkflowLock
                                 ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-950/50"
                                 : "bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-800"
@@ -7441,7 +7020,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         </div>
                       </div>
 
-                      {/* Scene Cards Loop */}
+                                            {/* Scene Cards Loop */}
                       <div className="space-y-6">
                         {activeProject.scenes.map((scene, index) => {
                           const matchingChar = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === (scene.character || "").trim().toLowerCase());
@@ -7474,399 +7053,21 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 fullAutoProgress={fullAutoProgress}
                                 fullAutoLogs={fullAutoLogs}
                                 onFullAutoProduce={handleFullAutoVideoProduction}
-
+                                sceneType="standard"
                               />
-                              {scene.videoUrl && (
-                                  <div className="space-y-1.5 mt-2">
-                                    <div className="flex items-center justify-between">
-                                      <label className="text-[10px] font-mono text-emerald-400 font-bold uppercase block flex items-center gap-1">
-                                        Agnes AI Video Generated
-                                      </label>
-                                    </div>
-                                    <div className="relative group overflow-hidden rounded-lg border border-slate-800 aspect-video bg-black">
-                                      {/* Video player placeholder */}
-                                      <div className="text-white">Video Player for {scene.videoUrl}</div>
-                                    </div>
-                                  </div>
-                              )}
-
-
-                              {scene.videoError && !scene.isGeneratingVideo && (
-                                <div className="space-y-4 mt-2">
-                                  {/* Failed Logs */}
-                                  <div className="bg-slate-950/80 border border-slate-800 rounded-xl overflow-hidden">
-                                    <div className="flex items-center justify-between bg-slate-900/50 px-3 py-2 border-b border-slate-800">
-                                      <div className="flex items-center gap-2">
-                                        <ChevronRight className="w-4 h-4 text-slate-500" />
-                                        <span className="text-xs font-mono text-slate-400 leading-tight">agnes_video.py<br/>console logs</span>
-                                      </div>
-                                      <button 
-                                        onClick={() => {
-                                          const logsText = (scene.videoLogs || []).join('\n') + `\n[SYSTEM] Agnes video task failed: ${scene.videoError}` + (scene.videoErrorCode ? `\n[SYSTEM] Failed with exit code ${scene.videoErrorCode}` : '');
-                                          copyTextToClipboard(logsText, scene.id + "_failed");
-                                        }}
-                                        className={`flex items-center gap-1 text-[10px] transition cursor-pointer ${copiedSceneId === (scene.id + "_failed") ? "text-emerald-400 font-semibold" : "text-slate-500 hover:text-slate-300"}`}
-                                      >
-                                        <Copy className="w-3 h-3" />
-                                        <span>{copiedSceneId === (scene.id + "_failed") ? "已複製！" : "Copy"}</span>
-                                      </button>
-                                    </div>
-                                    <div className="p-3 bg-black/60 font-mono text-[10px] text-slate-300 h-40 overflow-y-auto space-y-2 whitespace-pre-wrap break-all">
-                                      {(scene.videoLogs || []).map((l, i) => (
-                                        <div key={i} className={l.includes("[ERROR]") || l.includes("failed") ? "text-red-400" : ""}>{l}</div>
-                                      ))}
-                                      <div className="text-red-400 mt-2">
-                                        [SYSTEM] Agnes video task failed: {scene.videoError}
-                                        {scene.videoErrorCode && `\n[SYSTEM] Failed with exit code ${scene.videoErrorCode}`}
-                                      </div>
-                                    </div>
-                                  </div>
-                                  
-                                  <div className="bg-red-950/40 border border-red-900/30 rounded-xl p-3 text-left space-y-2">
-                                    <p className="text-[10px] font-bold text-red-300 flex items-center gap-1">
-                                      <AlertCircle className="w-3.5 h-3.5 text-red-400" />
-                                      Agnes Video Render Failed {scene.videoErrorCode ? `(Code: ${scene.videoErrorCode})` : ""}
-                                    </p>
-                                    <button
-                                      onClick={() => handleResetVideoTask()}
-                                      className="px-2.5 py-1 bg-red-900 hover:bg-red-800 text-[10px] font-bold text-white rounded-lg transition flex items-center gap-1 cursor-pointer shadow"
-                                      title="清除卡住的生成鎖，重新開始生成"
-                                    >
-                                      <RefreshCw className="w-3 h-3" />
-                                      <span>重置影片生成鎖 (Reset Lock)</span>
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* AI Quality Control & Continuity Review Section */}
-                              <div className="bg-slate-950/60 border border-slate-850 rounded-xl p-3.5 space-y-2 text-left">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1 text-indigo-400">
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                    <span>AI 影視級鏡頭與連續性校驗報告</span>
-                                  </span>
-                                  {scene.aiReviewStatus === "passed" && (
-                                    <span className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[9px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-                                      已通過 (Passed)
-                                    </span>
-                                  )}
-                                  {scene.aiReviewStatus === "needs_refinement" && (
-                                    <span className="bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[9px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                                      <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-                                      已自動重構優化 (Refined)
-                                    </span>
-                                  )}
-                                  {scene.aiReviewStatus === "reviewing" && (
-                                    <span className="bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 text-[9px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
-                                      <RefreshCw className="w-3 h-3 animate-spin" />
-                                      審核中...
-                                    </span>
-                                  )}
-                                  {!scene.aiReviewStatus && (
-                                    <span className="bg-slate-800 text-slate-400 text-[9px] font-bold px-2 py-0.5 rounded-full">
-                                      待審核 (Pending)
-                                    </span>
-                                  )}
-                                </div>
-
-                                {scene.aiReviewCritique ? (
-                                  <div className="space-y-2">
-                                    <p className="text-[11px] text-slate-300 leading-relaxed bg-black/40 p-2.5 rounded-lg border border-slate-850/60">
-                                      {scene.aiReviewCritique}
-                                    </p>
-                                    <div className="grid grid-cols-3 gap-1 text-[9px] font-mono">
-                                      <div className={`p-1.5 rounded text-center border ${scene.aiReviewAlignmentCheck ? 'bg-emerald-950/20 border-emerald-900/30 text-emerald-400' : 'bg-slate-900/40 border-slate-800 text-slate-500'}`}>
-                                        原著對齊: {scene.aiReviewAlignmentCheck ? "合規" : "未校驗"}
-                                      </div>
-                                      <div className={`p-1.5 rounded text-center border ${scene.aiReviewLogicCheck ? 'bg-emerald-950/20 border-emerald-900/30 text-emerald-400' : 'bg-slate-900/40 border-slate-800 text-slate-500'}`}>
-                                        畫面邏輯: {scene.aiReviewLogicCheck ? "流暢" : "未校驗"}
-                                      </div>
-                                      <div className={`p-1.5 rounded text-center border ${scene.aiReviewContinuityCheck ? 'bg-emerald-950/20 border-emerald-900/30 text-emerald-400' : 'bg-slate-900/40 border-slate-800 text-slate-500'}`}>
-                                        銜接流暢: {scene.aiReviewContinuityCheck ? "通順" : "未校驗"}
-                                      </div>
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <p className="text-[10px] text-slate-500 italic">每當圖片或影片生成後，AI 會在此自動顯示審核與連續性流暢報告。</p>
-                                )}
-
-                                <div className="flex items-center gap-2 pt-1">
-                                  <button
-                                    onClick={() => handleReviewScene(scene.id, 'image')}
-                                    disabled={scene.isReviewing}
-                                    className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-850 text-slate-300 hover:text-white border border-slate-800 rounded-lg text-[10px] font-bold transition flex items-center justify-center gap-1 cursor-pointer"
-                                  >
-                                    <Search className="w-3 h-3 text-indigo-400" />
-                                    <span>手動重新審核本鏡頭</span>
-                                  </button>
-                                </div>
-                              </div>
-
-                              {/* Multi Action buttons */}
-                              <div className="flex flex-col gap-2">
-                                {scene.id.startsWith("scene_transition_") ? (
-                                  <button
-                                    onClick={() => handleGenerateImage(scene.id, 'gemini')}
-                                    disabled={scene.isGeneratingImage}
-                                    className="w-full py-2.5 bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-500 hover:to-cyan-500 text-white text-[11px] font-bold rounded-lg border border-teal-500/30 hover:border-teal-400 transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-teal-950/20 z-30"
-                                    title="一鍵提取上一場景最後一幀作為本銜接場景首幀，並設定下一場景作為過渡尾幀"
-                                  >
-                                    {scene.isGeneratingImage ? (
-                                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                    ) : (
-                                      <Link2 className="w-4 h-4 text-teal-200" />
-                                    )}
-                                    <span>🔗 智慧自動銜接：提取上鏡最後一幀</span>
-                                  </button>
-                                ) : (
-                                  <div className="grid grid-cols-2 gap-2">
-                                    <button
-                                      onClick={() => handleGenerateImage(scene.id, 'nanobanana')}
-                                      className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                    >
-                                      {scene.isGeneratingImage ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-yellow-400" />}
-                                      <span>Nano 繪圖</span>
-                                    </button>
-                                    <button
-                                      onClick={() => handleGenerateImage(scene.id, 'gemini')}
-                                      className="w-full py-2 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 text-[9px] font-bold rounded-lg border border-indigo-900 hover:border-indigo-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                    >
-                                      {scene.isGeneratingImage ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-indigo-400" />}
-                                      <span>Gemini 繪圖</span>
-                                    </button>
-                                    <button
-                                      onClick={() => handleGenerateImage(scene.id, 'agnes')}
-                                      className="w-full py-2 bg-pink-950 hover:bg-pink-900 text-pink-300 text-[9px] font-bold rounded-lg border border-pink-900 hover:border-pink-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                    >
-                                      {scene.isGeneratingImage ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-pink-400" />}
-                                      <span>Agnes 繪圖</span>
-                                    </button>
-                                    <button
-                                      onClick={() => handleGenerateImage(scene.id, 'mistral')}
-                                      className="w-full py-2 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                    >
-                                      {scene.isGeneratingImage ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-orange-400" />}
-                                      <span>Mistral 繪圖</span>
-                                    </button>
-                                  </div>
-                                )}
-                                {scene.isGeneratingImage && (
-                                  <div className="flex flex-col gap-1.5 items-center justify-center p-2 bg-slate-900/80 rounded-lg border border-red-500/30 animate-pulse">
-                                    <div className="text-[10px] text-slate-400 font-medium">
-                                      AI 正在生成插圖中...
-                                    </div>
-                                    <div className="flex gap-2 w-full">
-                                      <button
-                                        onClick={() => handleStopGenerateImage(scene.id)}
-                                        className="flex-1 py-1.5 bg-red-600/90 hover:bg-red-500 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                      >
-                                        <StopCircle className="w-3.5 h-3.5" />
-                                        <span>停止</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'agnes')}
-                                        className="flex-1 py-1.5 bg-pink-700/90 hover:bg-pink-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                        <span>Agnes</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'mistral')}
-                                        className="flex-1 py-1.5 bg-orange-700/90 hover:bg-orange-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                        <span>Mistral</span>
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                                {scene.isGeneratingVideo && (
-                                  <div className="flex flex-col gap-2 w-full mt-2 mb-2">
-                                    <AITransmissionMonitor progress={scene.videoProgress || "0%"} type="Standard" logs={scene.videoLogs} />
-                                    <div className="flex gap-2 w-full">
-                                      <button
-                                        onClick={() => handleStopGenerateVideo(scene.id)}
-                                        className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
-                                      >
-                                        <StopCircle className="w-3.5 h-3.5" />
-                                        <span>🛑 停止影片生成</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleResetVideoTask()}
-                                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5" />
-                                        <span>取消/重置</span>
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                                <div className="flex gap-2">
-                                  <button
-                                    onClick={() => {
-                                      if (scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes) {
-                                        if (confirm("偵測到生成狀態卡住？點擊確定強制重置生成狀態。")) {
-                                          updateActiveProject(prev => ({
-                                            scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, isGeneratingVideo: false, isGeneratingVideoExt: false, isGeneratingVideoKeyframes: false } : s)
-                                          }));
-                                        }
-                                      } else {
-                                        handleGenerateVideo(scene.id);
-                                      }
-                                    }}
-                                    disabled={!scene.imageUrl}
-                                    className={`flex-1 py-2.5 text-xs font-semibold rounded-lg border transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                                      !scene.imageUrl 
-                                        ? "bg-slate-950 text-slate-600 border-slate-900 cursor-not-allowed opacity-55" 
-                                        : (scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes)
-                                          ? "bg-amber-900/50 text-amber-200 border-amber-800"
-                                          : "bg-gradient-to-tr from-pink-600 to-indigo-600 text-white hover:opacity-95 border-transparent shadow"
-                                    }`}
-                                    title={!scene.imageUrl ? "請先完成分鏡繪圖再生成影片" : (scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes ? "生成卡住？點擊重置" : "調用影片模型生成 5秒 影片")}
-                                  >
-                                    <Video className="w-4 h-4" />
-                                    <span>{scene.isGeneratingVideo || scene.isGeneratingVideoExt || scene.isGeneratingVideoKeyframes ? "⚠️ 生成中 (重置)" : "🎬 一鍵 AI 影片"}</span>
-                                  </button>
-
-                                  <label
-                                    htmlFor={`upload-scene-img-${scene.id}`}
-                                    className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white text-xs font-semibold rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
-                                    title="從您的電腦上傳自訂分鏡插圖"
-                                  >
-                                    <Upload className="w-4 h-4 text-indigo-400" />
-                                    <span>上傳照片</span>
-                                  </label>
-                                </div>
-                                {index < activeProject.scenes.length - 1 && (
-                                  <button
-                                    onClick={() => handleInsertTransitionScene(index)}
-                                    className="w-full py-2.5 text-xs font-semibold rounded-lg border transition flex items-center justify-center gap-1.5 cursor-pointer bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white mt-2"
-                                    title="AI 會自動偵測相鄰兩個分鏡之間的敘事斷層，並生成一個額外的過渡場景"
-                                  >
-                                    <Plus className="w-4 h-4" />
-                                    <span>插入自動銜接場景</span>
-                                  </button>
-                                )}
-                              </div>
-
-                            {/* Inline Scene Chatbot */}
-                            <div className="md:col-span-12 mt-6 border-t border-slate-800/80 pt-6 space-y-4">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <div className="p-1.5 bg-indigo-500/10 border border-indigo-500/20 rounded-lg">
-                                    <MessageSquare className="w-4 h-4 text-indigo-400" />
-                                  </div>
-                                  <div>
-                                    <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                                      分鏡智慧協調助理
-                                      <span className="text-[9px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded-full font-mono font-medium">Chat & Modify</span>
-                                    </h4>
-                                    <p className="text-[10px] text-slate-500 mt-0.5">就該分鏡主題解答、翻譯，或下達指令即時修改此分鏡的所有內容。</p>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* Chat messages container */}
-                              <div className="bg-slate-950/80 border border-slate-850 rounded-xl p-4 flex flex-col gap-3 min-h-[100px] max-h-[250px] overflow-y-auto custom-scrollbar">
-                                {(!sceneChats[scene.id] || sceneChats[scene.id].length === 0) ? (
-                                  <div className="flex flex-col items-center justify-center py-4 text-center space-y-3">
-                                    <p className="text-[11px] text-slate-500 italic">尚未與本分鏡助理進行過對話。你可以點擊以下預設指令快速進行：</p>
-                                    <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
-                                      {[
-                                        { text: "💡 幫我將台詞改得更有情感張力，並同步更新英文 PROMPT", action: "請幫我把台詞對白改得更有情感張力、口語化且吸引人，並依據此情感同步優化繪圖英文描述提示詞 (PROMPT) 與動作描述 (ACTION PROMPT)。" },
-                                        { text: "👩 解決雙男角/雙女角問題：在 PROMPT 中明確設定主角與女主角的性別與長相", action: "我的場景中有男主角（陳默）和女主角（林芊），但 AI 繪圖生成了兩個男生。請幫我修改英文 PROMPT，在裡面明確標記：Chen Mo 為帥氣年輕男性 (handsome young Chinese male)、Lin Qian 為長髮美麗女性 (beautiful young Chinese female with long hair)，以修正雙男角問題，並保持角色服裝一致。" },
-                                        { text: "🎬 幫我優化鏡頭運動 (Action Prompt) 與導演註記", action: "請幫我精進本分鏡的「影片動作描述提示詞 (ACTION PROMPT)」與「導演註記 (DIRECTOR'S NOTES)」，加入更專業的電影級運鏡技巧、燈光氛圍、冷暖色調與情感特寫指示。" },
-                                        { text: "🎵 設計更有臨場感的環境音效與背景音樂描述", action: "請針對此場景的氣氛，幫我設計更生動、具有電影臨場感的「音效與背景音樂 / 鏡頭音訊 (audioCue)」描述。" }
-                                      ].map((btn, bIdx) => (
-                                        <button
-                                          key={bIdx}
-                                          onClick={() => {
-                                            setSceneChatInputs(prev => ({ ...prev, [scene.id]: btn.action }));
-                                          }}
-                                          className="text-[10px] text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg transition-all text-left cursor-pointer active:scale-95"
-                                        >
-                                          {btn.text}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  sceneChats[scene.id].map((msg, mIdx) => (
-                                    <div key={mIdx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                      <div className={`max-w-[85%] rounded-2xl p-3 text-xs ${
-                                        msg.role === 'user'
-                                          ? 'bg-indigo-600 text-white rounded-tr-none shadow-md shadow-indigo-600/10'
-                                          : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
-                                      }`}>
-                                        {msg.role === 'ai' && (
-                                          <div className="text-[9px] font-bold mb-1 text-indigo-400 uppercase flex items-center gap-1">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-                                            分鏡助理
-                                          </div>
-                                        )}
-                                        <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                                      </div>
-                                    </div>
-                                  ))
-                                )}
-
-                                {isSceneChatting[scene.id] && (
-                                  <div className="flex justify-start">
-                                    <div className="bg-slate-900 border border-slate-800 rounded-2xl rounded-tl-none p-3 text-xs text-slate-400 flex items-center gap-2">
-                                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                                      <span>AI 導演正針對此分鏡重新佈置並即時更新設定中...</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* Chat input box */}
-                              <div className="flex gap-2">
-                                <textarea
-                                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition placeholder:text-slate-600 font-sans min-h-[44px] max-h-[100px] resize-y custom-scrollbar"
-                                  placeholder="對此分鏡下達修改、翻譯指令，或直接發問（例：請幫我將台詞改為德語並更新 PROMPT）..."
-                                  value={sceneChatInputs[scene.id] || ""}
-                                  onChange={(e) => setSceneChatInputs(prev => ({ ...prev, [scene.id]: e.target.value }))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
-                                      e.preventDefault();
-                                      if ((sceneChatInputs[scene.id] || "").trim() && !isSceneChatting[scene.id]) {
-                                        handleChatScene(scene.id);
-                                      }
-                                    }
-                                  }}
-                                />
-                                <button
-                                  onClick={() => handleChatScene(scene.id)}
-                                  disabled={isSceneChatting[scene.id] || !(sceneChatInputs[scene.id] || "").trim()}
-                                  className="px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800/50 text-white disabled:text-slate-500 font-bold rounded-xl text-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed shadow-md shadow-indigo-600/10"
-                                >
-                                  {isSceneChatting[scene.id] ? (
-                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                  )}
-                                  <span>傳送</span>
-                                </button>
-                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
-
+                          );
+                        })}
+                      </div>
                         {activeProject.scenes.length === 0 && (
                           <div className="text-center p-12 border border-dashed border-slate-800 rounded-2xl text-slate-500 text-xs">
                             此專案尚未拆解分鏡。請在上方原著小說頁面輸入劇本文字，並按下「一鍵 AI 拆解分鏡」生成豐富的故事劇本！
                           </div>
                         )}
-                      </div>
+                                            </div>
                     </div>
                   </div>
-                </div>
               )}
-
               {/* ============ TAB: STORYBOARD SCENES EXTENSION & AI HUB ============ */}
               {activeTab === "scenes_ext" && (
                 <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
@@ -7883,7 +7084,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-850">
                           <button
                             onClick={() => updateActiveProject({ disassemblyEngine: "mistral" })}
-                            className={`py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                            className={ `py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                               activeProject.disassemblyEngine === "mistral"
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow"
                                 : "text-slate-500 hover:text-slate-300"
@@ -7894,7 +7095,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           </button>
                           <button
                             onClick={() => updateActiveProject({ disassemblyEngine: "zhipu" })}
-                            className={`py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                            className={ `py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                               activeProject.disassemblyEngine === "zhipu"
                                 ? "bg-pink-500/20 text-pink-300 border border-pink-500/30 shadow"
                                 : "text-slate-500 hover:text-slate-300"
@@ -7926,7 +7127,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-850">
                             <button
                               onClick={() => updateActiveProject({ drawingChannel: "flux" })}
-                              className={`py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                              className={ `py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                                 activeProject.drawingChannel === "flux"
                                   ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow"
                                   : "text-slate-500 hover:text-slate-300"
@@ -7936,7 +7137,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             </button>
                             <button
                               onClick={() => updateActiveProject({ drawingChannel: "sd" })}
-                              className={`py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                              className={ `py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                                 activeProject.drawingChannel === "sd"
                                   ? "bg-purple-500/20 text-purple-300 border border-purple-500/30 shadow"
                                   : "text-slate-500 hover:text-slate-300"
@@ -8009,7 +7210,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <button
                             id="strict-workflow-lock-btn-ext"
                             onClick={handleToggleStrictWorkflowLock}
-                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer select-none shrink-0 border ${
+                            className={ `px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer select-none shrink-0 border ${
                               strictWorkflowLock
                                 ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-900/40"
                                 : "bg-slate-850 hover:bg-slate-800 text-slate-300 border-slate-700"
@@ -8061,7 +7262,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <button
                             id="global-strict-lock-btn-2"
                             onClick={handleToggleStrictWorkflowLock}
-                            className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
+                            className={ `py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
                               strictWorkflowLock
                                 ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-950/50"
                                 : "bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-800"
@@ -8085,676 +7286,55 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         {activeProject.scenes.map((scene, index) => {
                           const matchingChar = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === (scene.character || "").trim().toLowerCase());
                           return (
-                            <div key={scene.id} className="space-y-4">
+                            <div key={scene.id} className="space-y-2">
                               {index > 0 && (
                                 <div className="flex items-center space-x-2 pl-6 text-emerald-400 text-[10px] font-bold font-mono">
                                   <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                                   <span>🧬 首影格將由「分鏡 {index}」的結尾最後一影格自動延續 (無縫過渡啟用)</span>
-                                  </div>
+                                </div>
                               )}
-
-                            <div className="px-1">
-                              <WorkflowStepper
-                                workflowStep={scene.workflowStep || 1}
-                                title={`延長模式 · 分鏡 ${index + 1}「${scene.title}」七步進度`}
-                                subtitle={
-                                  scene.isGeneratingVideoExt
-                                    ? `影片延長中 ${scene.videoProgressExt || ""}`
-                                    : scene.videoUrlExt
-                                      ? "已有延長影片"
-                                      : "等待生成 / 審核"
-                                }
-                                accent="emerald"
+                              <SceneItem 
+                                scene={scene}
+                                index={index}
+                                activeProjectCharacters={activeProject.characters}
+                                handleUpdateSceneField={handleUpdateSceneField}
+                                handleDeleteScene={handleDeleteScene}
+                                handleDragStart={handleDragStart}
+                                handleDragOver={handleDragOver}
+                                handleDragEnd={handleDragEnd}
+                                handleDrop={handleDrop}
+                                draggedIndex={draggedIndex}
+                                draggedOverIndex={draggedOverIndex}
+                                matchingChar={matchingChar}
+                                handleApplyStylePreset={handleApplyStylePreset}
+                                handleImageDragOver={handleImageDragOver}
+                                handleImageDrop={handleImageDrop}
+                                handleUploadSceneImage={handleUploadSceneImage}
+                                handleGenerateVideo={handleGenerateVideo}
+                                handleGenerateImage={handleGenerateImage}
+                                scenes={activeProject.scenes}
+                                activeProjectId={activeProject.id}
+                                setProjects={setProjects}
+                                showToast={showToast}
+                                isFullAutoProducing={isFullAutoProducing}
+                                fullAutoProgress={fullAutoProgress}
+                                fullAutoLogs={fullAutoLogs}
+                                onFullAutoProduce={handleFullAutoVideoProduction}
+                                sceneType="ext"
                               />
                             </div>
-
-                            <div 
-                              draggable
-                              onDragStart={(e) => handleDragStart(e, index)}
-                              onDragOver={(e) => handleDragOver(e, index)}
-                              onDragEnd={handleDragEnd}
-                              onDrop={(e) => handleDrop(e, index)}
-                              className={`bg-slate-900/60 border rounded-2xl p-6 shadow-xl backdrop-blur-md grid grid-cols-1 md:grid-cols-12 gap-6 relative group transition-all duration-200 ${
-                                draggedIndex === index 
-                                  ? "opacity-35 border-emerald-500/50 scale-[0.98] shadow-inner" 
-                                  : draggedOverIndex === index 
-                                  ? "border-emerald-400 bg-slate-900/90 shadow-emerald-500/10 shadow-2xl scale-[1.01] ring-2 ring-emerald-500/20" 
-                                  : "border-slate-800 hover:border-slate-750"
-                              }`}
-                            >
-                              {/* Delete specific scene */}
-                              <button
-                                onClick={() => handleDeleteScene(scene.id)}
-                                className="absolute top-4 right-4 p-1.5 bg-slate-950 hover:bg-red-950/80 border border-slate-800 rounded-lg text-slate-500 hover:text-red-400 transition"
-                                title="刪除此分鏡"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-
-                              {/* Left Col: Scene Text Configurations (Inputs) */}
-                              <div className="md:col-span-7 flex flex-col space-y-4">
-                                <div className="flex items-center space-x-2">
-                                  <div 
-                                    className="p-1 text-slate-500 hover:text-slate-300 hover:bg-slate-800/40 rounded cursor-grab active:cursor-grabbing transition"
-                                    title="拖曳調整場景順序"
-                                  >
-                                    <GripVertical className="w-4 h-4" />
-                                  </div>
-                                  <span className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                    分鏡延長 {index + 1}
-                                  </span>
-                                  {scene.durationSeconds && (
-                                    <span className="bg-purple-500/10 border border-purple-500/30 text-purple-400 font-mono text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                                      <Clock className="w-3 h-3" />
-                                      {scene.durationSeconds}s
-                                    </span>
-                                  )}
-                                  <input
-                                    type="text"
-                                    className="bg-transparent text-sm font-bold text-white border-b border-transparent hover:border-slate-850 focus:border-emerald-500 focus:outline-none w-full pb-0.5 transition"
-                                    value={scene.title}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "title", e.target.value)}
-                                  />
-                                </div>
-
-                                {/* Character select and Duration */}
-                                <div className="grid grid-cols-2 gap-4">
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">出場角色</label>
-                                    <input
-                                      type="text"
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition"
-                                      value={scene.character}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "character", e.target.value)}
-                                    />
-                                  </div>
-                                  <div className="space-y-1">
-                                    <div className="flex justify-between items-center mb-0.5">
-                                      <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">視頻時長 (秒)</label>
-                                      {scene.durationSeconds !== estimateDialogueDuration(scene.dialogue, scene.narration) && (
-                                        <button
-                                          onClick={() => handleUpdateSceneField(scene.id, "durationSeconds", estimateDialogueDuration(scene.dialogue, scene.narration))}
-                                          className="text-[9px] text-pink-400 hover:text-pink-300 font-bold underline cursor-pointer bg-pink-500/10 px-1.5 py-0.5 rounded transition flex items-center gap-0.5"
-                                          title={`依台詞與旁白自動計算最合適時長: ${estimateDialogueDuration(scene.dialogue, scene.narration)} 秒`}
-                                        >
-                                          <span>💡 建議 {estimateDialogueDuration(scene.dialogue, scene.narration)}s</span>
-                                        </button>
-                                      )}
-                                    </div>
-                                    <input
-                                      type="number"
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition"
-                                      value={scene.durationSeconds || ""}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "durationSeconds", parseInt(e.target.value as string))}
-                                    />
-                                  </div>
-                                </div>
-
-                                {/* Subtitle / Dialogue / Audio Cue Split */}
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">台詞對白 (Dialogue)</label>
-                                    <textarea
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-yellow-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
-                                      value={scene.dialogue}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "dialogue", e.target.value)}
-                                      placeholder="角色在此場景說的對白"
-                                    />
-                                  </div>
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">場景旁白 (Narration)</label>
-                                    <textarea
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
-                                      value={scene.narration || ""}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
-                                      placeholder="此場景的背景氛圍旁白"
-                                    />
-                                  </div>
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">🎵 氛圍音效與背景音樂 (鏡頭音訊)</label>
-                                    <textarea
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-pink-500 transition min-h-[60px]"
-                                      value={scene.audioCue || ""}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "audioCue", e.target.value)}
-                                      placeholder="例如：窗外淅淅瀝瀝的下雨聲，或者是雨停後的寂靜無雨聲。"
-                                    />
-                                  </div>
-                                </div>
-
-                                <div className="space-y-1">
-                                  <div className="flex justify-between items-center mb-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">AI 繪圖英文描述提示詞 (Prompt)</label>
-                                    <div className="flex items-center gap-3">
-                                      <div className="flex items-center gap-1.5">
-                                        <span className="text-[9px] text-slate-500 font-bold">🪄 預設庫:</span>
-                                        <select
-                                          onChange={(e) => {
-                                            if (e.target.value) {
-                                              handleApplyStylePreset(scene.id, e.target.value);
-                                              e.target.value = "";
-                                            }
-                                          }}
-                                          className="bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-[9px] text-indigo-400 font-bold focus:outline-none focus:border-indigo-500 cursor-pointer"
-                                          defaultValue=""
-                                        >
-                                          <option value="" disabled>-- 快速套用視覺風格 --</option>
-                                          {STYLE_PRESETS.map((p) => (
-                                            <option key={p.value} value={p.value}>{p.name}</option>
-                                          ))}
-                                        </select>
-                                      </div>
-                                      <div className="flex gap-2">
-                                        <button
-                                          onClick={() => handleTranslatePrompt(scene.id, 'gemini')}
-                                          className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold underline cursor-pointer"
-                                          title="調用 Gemini 翻譯為高品質英文繪圖提示詞"
-                                        >
-                                          ✨ Gemini 優化
-                                        </button>
-                                        <button
-                                          onClick={() => handleTranslatePrompt(scene.id, 'mistral')}
-                                          className="text-[9px] text-blue-400 hover:text-blue-300 font-bold underline cursor-pointer"
-                                          title="調用 Mistral AI 翻譯為高品質英文繪圖提示詞"
-                                        >
-                                          🔮 Mistral AI 優化
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[70px]"
-                                    value={scene.visualPrompt}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "visualPrompt", e.target.value)}
-                                    placeholder="英文提示詞，例如：A young Asian male standing on a balcony..."
-                                  />
-                                </div>
-
-                                {/* Action Prompt */}
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-mono text-slate-500 font-bold uppercase block">影片動作描述提示詞 (Action Prompt)</label>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[50px]"
-                                    value={scene.actionPrompt || ""}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "actionPrompt", e.target.value)}
-                                    placeholder="英文動作描述，例如：The girl hugs the cat tightly."
-                                  />
-                                </div>
-
-                                {/* Transition Prompt */}
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-mono text-slate-500 font-bold uppercase block">過渡到下個場景提示詞 (Transition Prompt)</label>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[40px]"
-                                    value={scene.transitionPrompt || ""}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "transitionPrompt", e.target.value)}
-                                    placeholder="英文過渡描述，例如：stands up and walks away."
-                                  />
-                                </div>
-
-                                {/* Director's Personal Notes */}
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-mono text-amber-500 font-bold uppercase flex items-center gap-1">
-                                    <span>🎬 導演註記 / 個人拍攝筆記 (Director's Notes)</span>
-                                  </label>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 transition min-h-[60px]"
-                                    value={scene.directorNotes || ""}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "directorNotes", e.target.value)}
-                                    placeholder="在此撰寫該分鏡的導演註記、燈光配置、運鏡細節或個人備忘筆記..."
-                                  />
-                                </div>
-                              </div>
-
-                              {/* Right Col: Video Production & Rendering */}
-                              <div className="md:col-span-5 flex flex-col space-y-4 justify-between bg-slate-950/40 p-4 rounded-xl border border-slate-850">
-                                <div className="space-y-3">
-                                  <span className="text-[10px] font-mono text-slate-500 font-bold tracking-wider uppercase block">
-                                    🎥 本地/雲端延伸渲染中心
-                                  </span>
-                                  
-                                  {/* Canvas preview */}
-                                  <div 
-                                    onDragOver={handleImageDragOver}
-                                    onDrop={(e) => handleImageDrop(e, scene.id, "imageUrlExt")}
-                                    onClick={() => {
-                                      if (!scene.videoUrlExt) {
-                                        document.getElementById(`upload-scene-img-ext-${scene.id}`)?.click();
-                                      }
-                                    }}
-                                    className={`relative w-full aspect-video bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-inner flex items-center justify-center ${!scene.videoUrlExt ? 'cursor-pointer group/img' : ''}`}
-                                    title={!scene.videoUrlExt ? "點擊或拖曳圖片至此處上傳自訂照片" : undefined}
-                                  >
-                                    <input 
-                                      type="file" 
-                                      id={`upload-scene-img-ext-${scene.id}`} 
-                                      accept="image/*" 
-                                      className="hidden" 
-                                      onChange={(e) => handleUploadSceneImage(e, scene.id, "imageUrlExt")} 
-                                    />
-
-                                    {scene.videoUrlExt ? (
-                                      <div className="relative w-full h-full" onClick={(e) => e.stopPropagation()}>
-                                        <ScrubbableVideoPlayer
-                                          src={scene.videoUrlExt}
-                                          className="w-full h-full object-cover"
-                                          subtitle={getDisplaySubtitle(scene) || undefined}
-                                        />
-                                        {getDisplaySubtitle(scene) ? (
-                                          <div className="absolute bottom-0 left-0 right-0 z-40 px-2 py-1.5 bg-black/85 text-center text-[11px] text-emerald-200 font-medium border-t border-emerald-500/30">
-                                            字幕: {getDisplaySubtitle(scene)}
-                                          </div>
-                                        ) : null}
-                                        <div className="absolute top-2 left-2 bg-black/80 backdrop-blur text-emerald-400 text-[9px] px-2 py-0.5 rounded-md border border-emerald-500/20 font-bold font-mono z-20">
-                                          已延長渲染
-                                        </div>
-                                        {/* Redo / Reset button */}
-                                        <div className="absolute top-2 right-2 flex gap-1 z-30">
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              e.preventDefault();
-                                              if (confirm("您確定要重置此場景的延長生成影片嗎？")) {
-                                                setProjects(prevProjects => {
-                                                  const updatedList = prevProjects.map(p => {
-                                                    if (p.id === activeProjectId) {
-                                                      const updatedScenes = p.scenes.map(s => {
-                                                        if (s.id === scene.id) {
-                                                          return {
-                                                            ...s,
-                                                            videoUrlExt: undefined,
-                                                            videoProgressExt: undefined,
-                                                            videoLogsExt: undefined,
-                                                            videoErrorExt: undefined
-                                                          };
-                                                        }
-                                                        return s;
-                                                      });
-                                                      return { ...p, scenes: updatedScenes };
-                                                    }
-                                                    return p;
-                                                  });
-                                                  try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); } catch (err) { console.error(err); }
-                                                  return updatedList;
-                                                });
-                                                showToast("已成功重置延長影片！您可以重新生成。", "success");
-                                              }
-                                            }}
-                                            className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-40 cursor-pointer active:scale-95"
-                                          >
-                                            <RefreshCw className="w-2.5 h-2.5" />
-                                            <span>重做/重置影片</span>
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ) : scene.imageUrlExt ? (
-                                      <div className="relative w-full h-full">
-                                        <img
-                                          src={scene.imageUrlExt}
-                                          alt="Storyboard preview"
-                                          className="w-full h-full object-cover transition-transform duration-[6000ms] ease-out transform scale-100 group-hover/img:scale-105"
-                                          referrerPolicy="no-referrer"
-                                        />
-                                        <div className="absolute top-2 left-2 bg-black/80 backdrop-blur text-yellow-400 text-[9px] px-2 py-0.5 rounded-md border border-yellow-500/20 font-bold font-mono z-20">
-                                          首幀就緒 (靜態圖)
-                                        </div>
-                                        {/* Hover overlay */}
-                                        <div className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover/img:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1.5">
-                                          <Upload className="w-5 h-5 text-indigo-400 animate-bounce" />
-                                          <span className="text-[11px] font-bold text-slate-200">點擊或拖曳更換自訂照片</span>
-                                        </div>
-                                        {/* Redo / Reset button */}
-                                        <div className="absolute top-2 right-2 flex gap-1 z-30">
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              e.preventDefault();
-                                              if (confirm("您確定要重置此場景的延長首幀與影片嗎？")) {
-                                                setProjects(prevProjects => {
-                                                  const updatedList = prevProjects.map(p => {
-                                                    if (p.id === activeProjectId) {
-                                                      const updatedScenes = p.scenes.map(s => {
-                                                        if (s.id === scene.id) {
-                                                          return {
-                                                            ...s,
-                                                            imageUrlExt: undefined,
-                                                            videoUrlExt: undefined,
-                                                            videoProgressExt: undefined,
-                                                            videoLogsExt: undefined,
-                                                            videoErrorExt: undefined
-                                                          };
-                                                        }
-                                                        return s;
-                                                      });
-                                                      return { ...p, scenes: updatedScenes };
-                                                    }
-                                                    return p;
-                                                  });
-                                                  try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); } catch (err) { console.error(err); }
-                                                  return updatedList;
-                                                });
-                                                showToast("已成功重置！您可以重新上傳/自動提取首幀，並重新生成影片。", "success");
-                                              }
-                                            }}
-                                            className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-40 cursor-pointer active:scale-95"
-                                          >
-                                            <RefreshCw className="w-2.5 h-2.5" />
-                                            <span>重做/重置此影鏡</span>
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="flex flex-col items-center space-y-1 text-slate-600 group-hover/img:text-slate-400 transition">
-                                        <div className="relative">
-                                          <Clapperboard className="w-8 h-8 group-hover/img:scale-110 transition-transform" />
-                                          <Upload className="w-3.5 h-3.5 text-indigo-500 absolute -bottom-1 -right-1 opacity-0 group-hover/img:opacity-100 transition-opacity" />
-                                        </div>
-                                        <span className="text-[10px]">無渲染畫布 (請先點選下方算圖)</span>
-                                        <span className="text-[9px] text-slate-550 hidden group-hover/img:block mt-1">或點擊、拖曳在此上傳您的照片</span>
-                                      </div>
-                                    )}
-
-                                    {scene.isGeneratingVideoExt && (
-                                      <div className="absolute inset-0 bg-emerald-950/20 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
-                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold bg-emerald-950/90 text-emerald-400 border border-emerald-500/30 shadow-lg animate-pulse">
-                                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                                          <span>COMPILING DIGITAL PREVIEW...</span>
-                                        </span>
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  {scene.isGeneratingVideoExt && (
-                                    <div className="flex flex-col gap-2 w-full mt-2 mb-2">
-                                      <AITransmissionMonitor progress={scene.videoProgressExt || "0%"} type="Extended" logs={scene.videoLogsExt} />
-                                      <div className="flex gap-2 w-full">
-                                        <button
-                                          onClick={() => handleStopGenerateVideo(scene.id)}
-                                          className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
-                                        >
-                                          <StopCircle className="w-3.5 h-3.5" />
-                                          <span>🛑 停止影片生成</span>
-                                        </button>
-                                        <button
-                                          onClick={() => handleResetVideoTask()}
-                                          className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
-                                        >
-                                          <RefreshCw className="w-3.5 h-3.5" />
-                                          <span>取消/重置</span>
-                                        </button>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  {/* Error message */}
-                                  {scene.videoErrorExt && (
-                                    <div className="p-3 bg-red-950/40 border border-red-900/30 rounded-xl text-red-400 text-[10px] space-y-1 font-mono leading-relaxed select-text">
-                                      <div className="font-bold flex items-center gap-1">
-                                        <AlertCircle className="w-3.5 h-3.5" />
-                                        <span>延伸渲染出錯 (代碼 {scene.videoErrorCodeExt || "N/A"})</span>
-                                      </div>
-                                      <p>{scene.videoErrorExt}</p>
-                                      {scene.videoLogsExt && scene.videoLogsExt.length > 0 && (
-                                        <details className="mt-1">
-                                          <summary className="cursor-pointer font-bold text-[9px] text-slate-400">查看完整渲染日誌</summary>
-                                          <div className="mt-1 bg-black/80 p-2 rounded text-[8px] max-h-28 overflow-y-auto text-left leading-normal text-red-300">
-                                            {scene.videoLogsExt.map((ll, idx) => <div key={idx}>{ll}</div>)}
-                                          </div>
-                                        </details>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  {/* Playback & Download triggers */}
-                                  <div className="space-y-2">
-                                    {scene.videoUrlExt && (
-                                      <a
-                                        href={`/api/download?url=${encodeURIComponent(scene.videoUrlExt)}`}
-                                        className="w-full py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold rounded-lg transition shadow-md shadow-emerald-900/20 flex items-center justify-center gap-1.5 cursor-pointer border border-emerald-500/30"
-                                        download={`toonflow-scene-${index + 1}-extended.mp4`}
-                                      >
-                                        <Download className="w-3.5 h-3.5" />
-                                        <span>📥 下載已延長之 MP4 影片</span>
-                                      </a>
-                                    )}
-                                    {scene.imageUrlExt && (
-                                      <button
-                                        onClick={() => {
-                                          setSelectedSceneForSimulation(scene);
-                                          setIsPlayingSimulation(true);
-                                        }}
-                                        className="w-full py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white text-[10px] font-bold rounded-lg border border-slate-800 transition flex items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        <Eye className="w-3.5 h-3.5 text-pink-400" />
-                                        <span>🎥 實時 3D 運鏡與台詞預覽 (免費)</span>
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-
-                                {/* Multi Action buttons */}
-                                <div className="flex flex-col gap-2">
-                                  {scene.id.startsWith("scene_transition_") ? (
-                                    <button
-                                      onClick={() => handleGenerateImage(scene.id, 'gemini')}
-                                      disabled={scene.isGeneratingImageExt}
-                                      className="w-full py-2.5 bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-500 hover:to-cyan-500 text-white text-[11px] font-bold rounded-lg border border-teal-500/30 hover:border-teal-400 transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-teal-950/20 z-30"
-                                      title="一鍵提取上一場景最後一幀作為本銜接場景首幀，並設定下一場景作為過渡尾幀"
-                                    >
-                                      {scene.isGeneratingImageExt ? (
-                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                      ) : (
-                                        <Link2 className="w-4 h-4 text-teal-200" />
-                                      )}
-                                      <span>🔗 智慧自動銜接：提取上鏡最後一幀</span>
-                                    </button>
-                                  ) : (
-                                    <div className="grid grid-cols-2 gap-2">
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'nanobanana')}
-                                        className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageExt ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-yellow-400" />}
-                                        <span>Nano 繪圖</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'gemini')}
-                                        className="w-full py-2 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 text-[9px] font-bold rounded-lg border border-indigo-900 hover:border-indigo-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageExt ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-indigo-400" />}
-                                        <span>Gemini 繪圖</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'agnes')}
-                                        className="w-full py-2 bg-pink-950 hover:bg-pink-900 text-pink-300 text-[9px] font-bold rounded-lg border border-pink-900 hover:border-pink-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageExt ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-pink-400" />}
-                                        <span>Agnes 繪圖</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'mistral')}
-                                        className="w-full py-2 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageExt ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-orange-400" />}
-                                        <span>Mistral 繪圖</span>
-                                      </button>
-                                    </div>
-                                  )}
-                                  {scene.isGeneratingImageExt && (
-                                    <div className="flex flex-col gap-1.5 items-center justify-center p-2 bg-slate-900/80 rounded-lg border border-red-500/30 animate-pulse">
-                                      <div className="text-[10px] text-slate-400 font-medium">
-                                        AI 正在生成插圖中...
-                                      </div>
-                                      <div className="flex gap-2 w-full">
-                                        <button
-                                          onClick={() => handleStopGenerateImage(scene.id)}
-                                          className="flex-1 py-1.5 bg-red-600/90 hover:bg-red-500 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                        >
-                                          <StopCircle className="w-3.5 h-3.5" />
-                                          <span>停止</span>
-                                        </button>
-                                        <button
-                                          onClick={() => handleGenerateImage(scene.id, 'agnes')}
-                                          className="flex-1 py-1.5 bg-pink-700/90 hover:bg-pink-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                        >
-                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                          <span>Agnes</span>
-                                        </button>
-                                        <button
-                                          onClick={() => handleGenerateImage(scene.id, 'mistral')}
-                                          className="flex-1 py-1.5 bg-orange-700/90 hover:bg-orange-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                        >
-                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                          <span>Mistral</span>
-                                        </button>
-                                      </div>
-                                    </div>
-                                  )}
-                                  <div className="flex gap-2">
-                                    <button
-                                      onClick={() => handleGenerateVideoExtended(scene.id, index)}
-                                      disabled={scene.isGeneratingVideoExt || !scene.imageUrlExt}
-                                      className={`flex-1 py-2.5 text-xs font-semibold rounded-lg border transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                                        !scene.imageUrlExt 
-                                          ? "bg-slate-950 text-slate-600 border-slate-900 cursor-not-allowed opacity-55" 
-                                          : "bg-gradient-to-tr from-emerald-600 to-teal-600 text-white hover:opacity-95 border-transparent shadow"
-                                      }`}
-                                      title={!scene.imageUrlExt ? "請先完成分鏡繪圖再生成影片" : "與上一幕最後一影格無縫連貫生成 5秒 影片"}
-                                    >
-                                      <Video className="w-4 h-4" />
-                                      <span>🎬 一鍵 AI 延伸影片</span>
-                                    </button>
-
-                                    <label
-                                      htmlFor={`upload-scene-img-ext-${scene.id}`}
-                                      className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white text-xs font-semibold rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
-                                      title="從您的電腦上傳自訂分鏡插圖"
-                                    >
-                                      <Upload className="w-4 h-4 text-emerald-400" />
-                                      <span>上傳照片</span>
-                                    </label>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Inline Scene Chatbot */}
-                            <div className="md:col-span-12 mt-6 border-t border-slate-800/80 pt-6 space-y-4">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <div className="p-1.5 bg-indigo-500/10 border border-indigo-500/20 rounded-lg">
-                                    <MessageSquare className="w-4 h-4 text-indigo-400" />
-                                  </div>
-                                  <div>
-                                    <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                                      分鏡智慧協調助理
-                                      <span className="text-[9px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded-full font-mono font-medium">Chat & Modify</span>
-                                    </h4>
-                                    <p className="text-[10px] text-slate-500 mt-0.5">就該分鏡主題解答、翻譯，或下達指令即時修改此分鏡的所有內容。</p>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* Chat messages container */}
-                              <div className="bg-slate-950/80 border border-slate-850 rounded-xl p-4 flex flex-col gap-3 min-h-[100px] max-h-[250px] overflow-y-auto custom-scrollbar">
-                                {(!sceneChats[scene.id] || sceneChats[scene.id].length === 0) ? (
-                                  <div className="flex flex-col items-center justify-center py-4 text-center space-y-3">
-                                    <p className="text-[11px] text-slate-500 italic">尚未與本分鏡助理進行過對話。你可以點擊以下預設指令快速進行：</p>
-                                    <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
-                                      {[
-                                        { text: "💡 幫我將台詞改得更有情感張力，並同步更新英文 PROMPT", action: "請幫我把台詞對白改得更有情感張力、口語化且吸引人，並依據此情感同步優化繪圖英文描述提示詞 (PROMPT) 與動作描述 (ACTION PROMPT)。" },
-                                        { text: "👩 解決雙男角/雙女角問題：在 PROMPT 中明確設定主角與女主角的性別與長相", action: "我的場景中有男主角（陳默）和女主角（林芊），但 AI 繪圖生成了兩個男生。請幫我修改英文 PROMPT，在裡面明確標記：Chen Mo 為帥氣年輕男性 (handsome young Chinese male)、Lin Qian 為長髮美麗女性 (beautiful young Chinese female with long hair)，以修正雙男角問題，並保持角色服裝一致。" },
-                                        { text: "🎬 幫我優化鏡頭運動 (Action Prompt) 與導演註記", action: "請幫我精進本分鏡的「影片動作描述提示詞 (ACTION PROMPT)」與「導演註記 (DIRECTOR'S NOTES)」，加入更專業的電影級運鏡技巧、燈光氛圍、冷暖色調與情感特寫指示。" },
-                                        { text: "🎵 設計更有臨場感的環境音效與背景音樂描述", action: "請針對此場景的氣氛，幫我設計更生動、具有電影臨場感的「音效與背景音樂 / 鏡頭音訊 (audioCue)」描述。" }
-                                      ].map((btn, bIdx) => (
-                                        <button
-                                          key={bIdx}
-                                          type="button"
-                                          onClick={() => {
-                                            setSceneChatInputs(prev => ({ ...prev, [scene.id]: btn.action }));
-                                          }}
-                                          className="text-[10px] text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg transition-all text-left cursor-pointer active:scale-95"
-                                        >
-                                          {btn.text}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  sceneChats[scene.id].map((msg, mIdx) => (
-                                    <div key={mIdx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                      <div className={`max-w-[85%] rounded-2xl p-3 text-xs ${
-                                        msg.role === 'user'
-                                          ? 'bg-indigo-600 text-white rounded-tr-none shadow-md shadow-indigo-600/10'
-                                          : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
-                                      }`}>
-                                        {msg.role === 'ai' && (
-                                          <div className="text-[9px] font-bold mb-1 text-indigo-400 uppercase flex items-center gap-1">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-                                            分鏡助理
-                                          </div>
-                                        )}
-                                        <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                                      </div>
-                                    </div>
-                                  ))
-                                )}
-
-                                {isSceneChatting[scene.id] && (
-                                  <div className="flex justify-start">
-                                    <div className="bg-slate-900 border border-slate-800 rounded-2xl rounded-tl-none p-3 text-xs text-slate-400 flex items-center gap-2">
-                                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                                      <span>AI 導演正針對此分鏡重新佈置並即時更新設定中...</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* Chat input box */}
-                              <div className="flex gap-2">
-                                <textarea
-                                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition placeholder:text-slate-600 font-sans min-h-[44px] max-h-[100px] resize-y custom-scrollbar"
-                                  placeholder="對此分鏡下達修改、翻譯指令，或直接發問（例：請幫我將台詞改為德語並更新 PROMPT）..."
-                                  value={sceneChatInputs[scene.id] || ""}
-                                  onChange={(e) => setSceneChatInputs(prev => ({ ...prev, [scene.id]: e.target.value }))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
-                                      e.preventDefault();
-                                      if ((sceneChatInputs[scene.id] || "").trim() && !isSceneChatting[scene.id]) {
-                                        handleChatScene(scene.id);
-                                      }
-                                    }
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => handleChatScene(scene.id)}
-                                  disabled={isSceneChatting[scene.id] || !(sceneChatInputs[scene.id] || "").trim()}
-                                  className="px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800/50 text-white disabled:text-slate-500 font-bold rounded-xl text-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed shadow-md shadow-indigo-600/10"
-                                >
-                                  {isSceneChatting[scene.id] ? (
-                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                  )}
-                                  <span>傳送</span>
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                        {activeProject.scenes.length === 0 && (
+                          );
+                        })}
+                      </div>
+                      {activeProject.scenes.length === 0 && (
                           <div className="text-center p-12 border border-dashed border-slate-800 rounded-2xl text-slate-500 text-xs">
                             此專案尚未拆解分鏡。請在上方原著小說頁面輸入劇本文字，並按下「一鍵 AI 拆解分鏡」生成豐富的故事劇本！
                           </div>
                         )}
-                      </div>
+                                            </div>
                     </div>
                   </div>
-                </div>
               )}
-
               {/* ============ TAB: STORYBOARD SCENES KEYFRAMES & AI HUB ============ */}
               {activeTab === "scenes_keyframes" && (
                 <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
@@ -8771,7 +7351,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                         <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-850">
                           <button
                             onClick={() => updateActiveProject({ disassemblyEngine: "mistral" })}
-                            className={`py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                            className={ `py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                               activeProject.disassemblyEngine === "mistral"
                                 ? "bg-purple-500/20 text-purple-300 border border-purple-500/30 shadow"
                                 : "text-slate-500 hover:text-slate-300"
@@ -8782,7 +7362,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           </button>
                           <button
                             onClick={() => updateActiveProject({ disassemblyEngine: "zhipu" })}
-                            className={`py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                            className={ `py-2 px-3 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                               activeProject.disassemblyEngine === "zhipu"
                                 ? "bg-pink-500/20 text-pink-300 border border-pink-500/30 shadow"
                                 : "text-slate-500 hover:text-slate-300"
@@ -8814,7 +7394,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-850">
                             <button
                               onClick={() => updateActiveProject({ drawingChannel: "flux" })}
-                              className={`py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                              className={ `py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                                 activeProject.drawingChannel === "flux"
                                   ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow"
                                   : "text-slate-500 hover:text-slate-300"
@@ -8824,7 +7404,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             </button>
                             <button
                               onClick={() => updateActiveProject({ drawingChannel: "sd" })}
-                              className={`py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                              className={ `py-2 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
                                 activeProject.drawingChannel === "sd"
                                   ? "bg-purple-500/20 text-purple-300 border border-purple-500/30 shadow"
                                   : "text-slate-500 hover:text-slate-300"
@@ -8900,7 +7480,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <button
                             id="strict-workflow-lock-btn-key"
                             onClick={handleToggleStrictWorkflowLock}
-                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer select-none shrink-0 border ${
+                            className={ `px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer select-none shrink-0 border ${
                               strictWorkflowLock
                                 ? "bg-purple-600 hover:bg-purple-500 text-white border-purple-500 shadow-md shadow-purple-900/40"
                                 : "bg-slate-850 hover:bg-slate-800 text-slate-300 border-slate-700"
@@ -8919,13 +7499,13 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       <div className="flex flex-col sm:flex-row gap-2.5 shrink-0 items-center">
                         <button
                           onClick={handleClearAllKeyframes}
-                          className={`py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20 border ${
+                          className={ `py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20 border ${
                             isConfirmingClear
                               ? "bg-red-600 border-red-500 text-white animate-pulse"
                               : "bg-slate-900 border-red-500/40 hover:bg-red-950/20 text-red-400"
                           }`}
                         >
-                          <Trash2 className={`w-3.5 h-3.5 ${isConfirmingClear ? "text-white" : "text-red-400"}`} />
+                          <Trash2 className={ `w-3.5 h-3.5 ${isConfirmingClear ? "text-white" : "text-red-400"}`} />
                           <span>{isConfirmingClear ? "⚠️ 再次點擊以確認清除！" : "一鍵清除已生成 (重頭再來)"}</span>
                         </button>
 
@@ -8966,7 +7546,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                             <button
                               id="strict-workflow-lock-btn"
                               onClick={handleToggleStrictWorkflowLock}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none shrink-0 border ${
+                              className={ `px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none shrink-0 border ${
                                 strictWorkflowLock
                                   ? "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-900/40"
                                   : "bg-slate-800 hover:bg-slate-750 text-slate-300 border-slate-700"
@@ -9093,7 +7673,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                           <button
                             id="global-strict-lock-btn-3"
                             onClick={handleToggleStrictWorkflowLock}
-                            className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
+                            className={ `py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer select-none border shrink-0 ${
                               strictWorkflowLock
                                 ? "bg-purple-600 hover:bg-purple-500 text-white border-purple-500 shadow-md shadow-purple-950/50"
                                 : "bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-800"
@@ -9115,876 +7695,73 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       {/* Scene Cards Loop */}
                       <div className="space-y-6">
                         {activeProject.scenes.map((scene, index) => {
-                          const nextScene = index < activeProject.scenes.length - 1 ? activeProject.scenes[index + 1] : undefined;
-                          // P0: start/end are THIS shot's dual frames (not next shot's image)
-                          const startImageUrl =
-                            scene.startFrameKeyframes ||
-                            scene.imageUrlKeyframes ||
-                            scene.imageUrlExt ||
-                            scene.imageUrl ||
-                            "";
-                          const endImageUrl = scene.endFrameKeyframes || "";
+                          const matchingChar = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === (scene.character || "").trim().toLowerCase());
                           return (
-                          <div key={scene.id} className="space-y-4">
-                            {index === 0 ? (
-                              <div className="flex items-center space-x-2 pl-6 text-purple-400 text-[10px] font-bold font-mono">
-                                <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
-                                <span>🧬 鏡頭1：並發生成【首幀 + 尾幀】；影片 = 本鏡首幀 → 本鏡尾幀</span>
-                              </div>
-                            ) : (
-                              <div className="flex items-center space-x-2 pl-6 text-cyan-400 text-[10px] font-bold font-mono">
-                                <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
-                                <span>🔗 鏡頭{index + 1}：首幀 = 上鏡尾幀（鎖定）｜僅生成新尾幀｜影片 = 本鏡首→尾</span>
-                              </div>
-                            )}
-
-                            <div className="px-1">
-                              <WorkflowStepper
-                                workflowStep={scene.workflowStep || 1}
-                                title={`分鏡 ${index + 1}「${scene.title}」七步工作流進度`}
-                                subtitle={
-                                  scene.workflowStep === 4
-                                    ? `圖審 ${scene.step4ImageReviewScore || 0}/100 ${scene.step4Passed ? "✓" : "…"}`
-                                    : scene.workflowStep === 6
-                                      ? `片審 ${scene.step6VideoReviewScore || 0}/100 ${scene.step6Passed ? "✓" : "…"}`
-                                      : scene.startFrameSourceKeyframes === "inherited_prev_end"
-                                        ? "首幀=上鏡尾幀（鎖定）"
-                                        : "首尾幀雙幀鏈"
-                                }
-                                accent="purple"
+                            <div key={scene.id} className="space-y-2">
+                              {index < activeProject.scenes.length - 1 ? (
+                                <div className="flex items-center space-x-2 pl-6 text-purple-400 text-[10px] font-bold font-mono">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+                                  <span>🧬 首影格為「分鏡 {index + 1} 圖片」，尾影格將自動指定為「分鏡 {index + 2} 圖片」(首尾轉換過渡啟用)</span>
+                                </div>
+                              ) : (
+                                <div className="flex items-center space-x-2 pl-6 text-purple-400 text-[10px] font-bold font-mono">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+                                  <span>🧬 結尾分鏡：首影格為「分鏡 {index + 1} 圖片」，無後續分鏡作為尾影格 (將自動過渡至故事結尾)</span>
+                                </div>
+                              )}
+                              <SceneItem 
+                                scene={scene}
+                                index={index}
+                                activeProjectCharacters={activeProject.characters}
+                                handleUpdateSceneField={handleUpdateSceneField}
+                                handleDeleteScene={handleDeleteScene}
+                                handleDragStart={handleDragStart}
+                                handleDragOver={handleDragOver}
+                                handleDragEnd={handleDragEnd}
+                                handleDrop={handleDrop}
+                                draggedIndex={draggedIndex}
+                                draggedOverIndex={draggedOverIndex}
+                                matchingChar={matchingChar}
+                                handleApplyStylePreset={handleApplyStylePreset}
+                                handleImageDragOver={handleImageDragOver}
+                                handleImageDrop={handleImageDrop}
+                                handleUploadSceneImage={handleUploadSceneImage}
+                                handleGenerateVideo={handleGenerateVideo}
+                                handleGenerateImage={handleGenerateImage}
+                                scenes={activeProject.scenes}
+                                activeProjectId={activeProject.id}
+                                setProjects={setProjects}
+                                showToast={showToast}
+                                isFullAutoProducing={isFullAutoProducing}
+                                fullAutoProgress={fullAutoProgress}
+                                fullAutoLogs={fullAutoLogs}
+                                onFullAutoProduce={handleFullAutoVideoProduction}
+                                sceneType="keyframes"
                               />
                             </div>
-                            <div 
-                              draggable
-                              onDragStart={(e) => handleDragStart(e, index)}
-                              onDragOver={(e) => handleDragOver(e, index)}
-                              onDragEnd={handleDragEnd}
-                              onDrop={(e) => handleDrop(e, index)}
-                              className={`bg-slate-900/60 border rounded-2xl p-6 shadow-xl backdrop-blur-md grid grid-cols-1 md:grid-cols-12 gap-6 relative group transition-all duration-200 ${
-                                draggedIndex === index 
-                                  ? "opacity-35 border-purple-500/50 scale-[0.98] shadow-inner" 
-                                  : draggedOverIndex === index 
-                                  ? "border-purple-400 bg-slate-900/90 shadow-purple-500/10 shadow-2xl scale-[1.01] ring-2 ring-purple-500/20" 
-                                  : "border-slate-800 hover:border-slate-750"
-                              }`}
-                            >
-                              {/* Delete specific scene */}
-                              <button
-                                onClick={() => handleDeleteScene(scene.id)}
-                                className="absolute top-4 right-4 p-1.5 bg-slate-950 hover:bg-red-950/80 border border-slate-800 rounded-lg text-slate-500 hover:text-red-400 transition"
-                                title="刪除此分鏡"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-
-                              {/* Left Col: Scene Text Configurations (Inputs) */}
-                              <div className="md:col-span-7 flex flex-col space-y-4">
-                                <div className="flex items-center space-x-2">
-                                  <div 
-                                    className="p-1 text-slate-500 hover:text-slate-300 hover:bg-slate-800/40 rounded cursor-grab active:cursor-grabbing transition"
-                                    title="拖曳調整場景順序"
-                                  >
-                                    <GripVertical className="w-4 h-4" />
-                                  </div>
-                                  <span className="bg-purple-500/10 border border-purple-500/30 text-purple-400 font-mono text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                    分鏡首尾幀 {index + 1}
-                                  </span>
-                                  {scene.durationSeconds && (
-                                    <span className="bg-purple-500/10 border border-purple-500/30 text-purple-400 font-mono text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                                      <Clock className="w-3 h-3" />
-                                      {scene.durationSeconds}s
-                                    </span>
-                                  )}
-                                  <input
-                                    type="text"
-                                    className="bg-transparent text-sm font-bold text-white border-b border-transparent hover:border-slate-850 focus:border-purple-500 focus:outline-none w-full pb-0.5 transition"
-                                    value={scene.title}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "title", e.target.value)}
-                                  />
-                                </div>
-
-                                {/* Character select and Duration */}
-                                <div className="grid grid-cols-2 gap-4">
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">出場角色</label>
-                                    <input
-                                      type="text"
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition"
-                                      value={scene.character}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "character", e.target.value)}
-                                    />
-                                  </div>
-                                  <div className="space-y-1">
-                                    <div className="flex justify-between items-center mb-0.5">
-                                      <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">視頻時長 (秒)</label>
-                                      {scene.durationSeconds !== estimateDialogueDuration(scene.dialogue, scene.narration) && (
-                                        <button
-                                          onClick={() => handleUpdateSceneField(scene.id, "durationSeconds", estimateDialogueDuration(scene.dialogue, scene.narration))}
-                                          className="text-[9px] text-pink-400 hover:text-pink-300 font-bold underline cursor-pointer bg-pink-500/10 px-1.5 py-0.5 rounded transition flex items-center gap-0.5"
-                                          title={`依台詞與旁白自動計算最合適時長: ${estimateDialogueDuration(scene.dialogue, scene.narration)} 秒`}
-                                        >
-                                          <span>💡 建議 {estimateDialogueDuration(scene.dialogue, scene.narration)}s</span>
-                                        </button>
-                                      )}
-                                    </div>
-                                    <input
-                                      type="number"
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition"
-                                      value={scene.durationSeconds || ""}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "durationSeconds", parseInt(e.target.value as string))}
-                                    />
-                                  </div>
-                                </div>
-
-                                {/* Subtitle / Dialogue / Audio Cue Split */}
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">台詞對白 (Dialogue)</label>
-                                    <textarea
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-yellow-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
-                                      value={scene.dialogue}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "dialogue", e.target.value)}
-                                      placeholder="角色在此場景說的對白"
-                                    />
-                                  </div>
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">場景旁白 (Narration)</label>
-                                    <textarea
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 transition min-h-[60px]"
-                                      value={scene.narration || ""}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "narration", e.target.value)}
-                                      placeholder="此場景的背景氛圍旁白"
-                                    />
-                                  </div>
-                                  <div className="space-y-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">🎵 氛圍音效與背景音樂 (鏡頭音訊)</label>
-                                    <textarea
-                                      className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-pink-500 transition min-h-[60px]"
-                                      value={scene.audioCue || ""}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "audioCue", e.target.value)}
-                                      placeholder="例如：窗外淅淅瀝瀝的下雨聲，或者是雨停後的寂靜無雨聲。"
-                                    />
-                                  </div>
-                                </div>
-
-                                <div className="space-y-1">
-                                  <div className="flex justify-between items-center mb-1">
-                                    <label className="text-[10px] font-mono text-slate-500 font-bold uppercase block">AI 繪圖英文描述提示詞 (Prompt)</label>
-                                    <div className="flex items-center gap-3">
-                                      <div className="flex items-center gap-1.5">
-                                        <span className="text-[9px] text-slate-500 font-bold">🪄 預設庫:</span>
-                                        <select
-                                          onChange={(e) => {
-                                            if (e.target.value) {
-                                              handleApplyStylePreset(scene.id, e.target.value);
-                                              e.target.value = "";
-                                            }
-                                          }}
-                                          className="bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-[9px] text-indigo-400 font-bold focus:outline-none focus:border-indigo-500 cursor-pointer"
-                                          defaultValue=""
-                                        >
-                                          <option value="" disabled>-- 快速套用視覺風格 --</option>
-                                          {STYLE_PRESETS.map((p) => (
-                                            <option key={p.value} value={p.value}>{p.name}</option>
-                                          ))}
-                                        </select>
-                                      </div>
-                                      <div className="flex gap-2">
-                                        <button
-                                          onClick={() => handleTranslatePrompt(scene.id, 'gemini')}
-                                          className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold underline cursor-pointer"
-                                          title="調用 Gemini 翻譯為高品質英文繪圖提示詞"
-                                        >
-                                          ✨ Gemini 優化
-                                        </button>
-                                        <button
-                                          onClick={() => handleTranslatePrompt(scene.id, 'mistral')}
-                                          className="text-[9px] text-blue-400 hover:text-blue-300 font-bold underline cursor-pointer"
-                                          title="調用 Mistral AI 翻譯為高品質英文繪圖提示詞"
-                                        >
-                                          🔮 Mistral AI 優化
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[70px]"
-                                    value={scene.visualPrompt}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "visualPrompt", e.target.value)}
-                                    placeholder="英文提示詞，例如：A young Asian male standing on a balcony..."
-                                  />
-                                </div>
-
-                                {/* Action Prompt */}
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-mono text-slate-500 font-bold uppercase block">影片動作描述提示詞 (Action Prompt)</label>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[50px]"
-                                    value={scene.actionPrompt || ""}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "actionPrompt", e.target.value)}
-                                    placeholder="英文動作描述，例如：The girl hugs the cat tightly."
-                                  />
-                                </div>
-
-                                {/* Transition Prompt */}
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-mono text-slate-500 font-bold uppercase block">過渡到下個場景提示詞 (Transition Prompt)</label>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition min-h-[40px]"
-                                    value={scene.transitionPrompt || ""}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "transitionPrompt", e.target.value)}
-                                    placeholder="英文過渡描述，例如：stands up and walks away."
-                                  />
-                                </div>
-
-                                {/* Transition Strategy Options */}
-                                <div className="space-y-2 mt-2">
-                                  <label className="text-[9px] font-mono text-slate-500 font-bold uppercase block">過渡動作策略 (Motion Strategy)</label>
-                                  <div className="flex gap-2">
-                                    <button 
-                                      onClick={() => handleUpdateSceneField(scene.id, "useFreezeAndMove", false)}
-                                      className={`flex-1 py-1.5 px-2 rounded-md text-[10px] font-mono border transition-colors ${scene.useFreezeAndMove !== true ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:bg-slate-800'}`}
-                                    >
-                                      流暢連續運動 (預設，建議3秒/75幀)
-                                    </button>
-                                    <button 
-                                      onClick={() => handleUpdateSceneField(scene.id, "useFreezeAndMove", true)}
-                                      className={`flex-1 py-1.5 px-2 rounded-md text-[10px] font-mono border transition-colors ${scene.useFreezeAndMove === true ? 'bg-amber-500/20 border-amber-500/50 text-amber-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:bg-slate-800'}`}
-                                    >
-                                      凍結定格過渡 (防崩)
-                                    </button>
-                                  </div>
-                                  <label className="flex items-center gap-2 cursor-pointer group mt-2">
-                                    <input 
-                                      type="checkbox"
-                                      checked={scene.useMidpointSplit === true}
-                                      onChange={(e) => handleUpdateSceneField(scene.id, "useMidpointSplit", e.target.checked)}
-                                      className="form-checkbox bg-slate-900 border-slate-700 rounded text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-950 w-3 h-3"
-                                    />
-                                    <span className="text-[10px] font-mono text-slate-400 group-hover:text-slate-300 transition">啟用雙段安全過渡 (中段拆分)</span>
-                                  </label>
-                                </div>
-
-                                {/* Director's Personal Notes */}
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-mono text-amber-500 font-bold uppercase flex items-center gap-1">
-                                    <span>🎬 導演註記 / 個人拍攝筆記 (Director's Notes)</span>
-                                  </label>
-                                  <textarea
-                                    className="w-full bg-slate-950 border border-slate-850 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 transition min-h-[60px]"
-                                    value={scene.directorNotes || ""}
-                                    onChange={(e) => handleUpdateSceneField(scene.id, "directorNotes", e.target.value)}
-                                    placeholder="在此撰寫該分鏡的導演註記、燈光配置、運鏡細節 or 個人備忘筆記..."
-                                  />
-                                </div>
-                              </div>
-
-                              {/* Right Col: Video Production & Rendering */}
-                              <div className="md:col-span-5 flex flex-col space-y-4 justify-between bg-slate-950/40 p-4 rounded-xl border border-slate-850">
-                                <div className="space-y-3">
-                                  <span className="text-[10px] font-mono text-slate-500 font-bold tracking-wider uppercase block">
-                                    🎥 首尾影格渲染中心
-                                  </span>
-                                  
-                                  {/* Canvas preview */}
-                                  <div 
-                                    onDragOver={handleImageDragOver}
-                                    onDrop={(e) => handleImageDrop(e, scene.id, "imageUrlKeyframes")}
-                                    onClick={() => {
-                                      if (!scene.videoUrlKeyframes && !startImageUrl) {
-                                        document.getElementById(`upload-scene-img-kf-${scene.id}`)?.click();
-                                      }
-                                    }}
-                                    className={`relative w-full aspect-video bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-inner flex items-center justify-center ${!scene.videoUrlKeyframes && !startImageUrl ? 'cursor-pointer group/img' : ''}`}
-                                    title={!scene.videoUrlKeyframes && !startImageUrl ? "點擊或拖曳圖片至此處上傳自訂照片" : undefined}
-                                  >
-                                    <input 
-                                      type="file" 
-                                      id={`upload-scene-img-kf-${scene.id}`} 
-                                      accept="image/*" 
-                                      className="hidden" 
-                                      onChange={async (e) => {
-                                        await handleUploadSceneImage(e, scene.id, "imageUrlKeyframes");
-                                        // Keep dual-frame start in sync when user replaces start still
-                                        try {
-                                          const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                                          const p = list.find((x) => x.id === activeProjectId);
-                                          const s = p?.scenes.find((x) => x.id === scene.id);
-                                          if (s?.imageUrlKeyframes) {
-                                            updateActiveProject((prev) => ({
-                                              scenes: prev.scenes.map((sc) =>
-                                                sc.id === scene.id
-                                                  ? {
-                                                      ...sc,
-                                                      startFrameKeyframes: sc.imageUrlKeyframes,
-                                                      startFrameSourceKeyframes:
-                                                        sc.startFrameSourceKeyframes === "inherited_prev_end"
-                                                          ? "inherited_prev_end"
-                                                          : "generated",
-                                                    }
-                                                  : sc
-                                              ),
-                                            }));
-                                          }
-                                        } catch { /* ignore */ }
-                                      }}
-                                    />
-
-                                    {scene.videoUrlKeyframes ? (
-                                      <div className="relative w-full h-full" onClick={(e) => e.stopPropagation()}>
-                                        <ScrubbableVideoPlayer
-                                          src={scene.videoUrlKeyframes}
-                                          className="w-full h-full object-cover"
-                                          subtitle={getDisplaySubtitle(scene) || undefined}
-                                        />
-                                        {getDisplaySubtitle(scene) ? (
-                                          <div className="absolute bottom-0 left-0 right-0 z-40 px-2 py-1.5 bg-black/85 text-center text-[11px] text-emerald-200 font-medium border-t border-emerald-500/30">
-                                            字幕: {getDisplaySubtitle(scene)}
-                                          </div>
-                                        ) : null}
-                                        {/* Redo / Reset button */}
-                                        <div className="absolute top-2 right-2 flex gap-1 z-30">
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              e.preventDefault();
-                                              if (confirm("您確定要重置此場景的首尾過渡影片嗎？")) {
-                                                setProjects(prevProjects => {
-                                                  const updatedList = prevProjects.map(p => {
-                                                    if (p.id === activeProjectId) {
-                                                      const updatedScenes = p.scenes.map(s => {
-                                                        if (s.id === scene.id) {
-                                                          return {
-                                                            ...s,
-                                                            videoUrlKeyframes: undefined,
-                                                            videoProgressKeyframes: undefined,
-                                                            videoLogsKeyframes: undefined,
-                                                            videoErrorKeyframes: undefined
-                                                          };
-                                                        }
-                                                        return s;
-                                                      });
-                                                      return { ...p, scenes: updatedScenes };
-                                                    }
-                                                    return p;
-                                                  });
-                                                  try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); } catch (err) { console.error(err); }
-                                                  return updatedList;
-                                                });
-                                                showToast("已成功重置過渡影片！您可以重新生成。", "success");
-                                              }
-                                            }}
-                                            className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-40 cursor-pointer active:scale-95"
-                                          >
-                                            <RefreshCw className="w-2.5 h-2.5" />
-                                            <span>重做/重置影片</span>
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ) : startImageUrl ? (
-                                      <div className="relative w-full h-full flex bg-black overflow-hidden">
-                                        {/* Start Frame (Left Half) */}
-                                        <div 
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            document.getElementById(`upload-scene-img-kf-${scene.id}`)?.click();
-                                          }}
-                                          onDragOver={handleImageDragOver}
-                                          onDrop={(e) => {
-                                            e.stopPropagation();
-                                            handleImageDrop(e, scene.id, "imageUrlKeyframes");
-                                          }}
-                                          className="flex-1 relative h-full border-r border-slate-800 cursor-pointer group/start overflow-hidden"
-                                        >
-                                          <img
-                                            src={startImageUrl}
-                                            alt="Start Frame"
-                                            className="w-full h-full object-cover opacity-80 group-hover/start:opacity-40 transition-opacity duration-200"
-                                            referrerPolicy="no-referrer"
-                                          />
-                                          <div className="absolute top-2 left-2 bg-black/80 backdrop-blur text-purple-400 text-[9px] px-2 py-0.5 rounded-md border border-purple-500/30 font-bold font-mono z-20 shadow-sm shadow-purple-900/50">
-                                            🎬 首幀 (START)
-                                          </div>
-                                          {scene.startFrameSourceKeyframes === "inherited_prev_end" && (
-                                            <div className="absolute bottom-2 left-2 right-2 z-20 bg-cyan-950/90 border border-cyan-400/40 text-cyan-200 text-[8px] font-bold px-1.5 py-1 rounded text-center leading-tight">
-                                              上鏡尾幀 → 本鏡首幀（已鎖定）
-                                            </div>
-                                          )}
-                                          {scene.startFrameSourceKeyframes === "generated" && (
-                                            <div className="absolute bottom-2 left-2 z-20 bg-purple-950/90 border border-purple-400/30 text-purple-200 text-[8px] font-bold px-1.5 py-0.5 rounded">
-                                              本鏡生成首幀
-                                            </div>
-                                          )}
-                                          {scene.startFrameSourceKeyframes === "forced_pass_fallback" && (
-                                            <div className="absolute bottom-2 left-2 z-20 bg-amber-950/90 border border-amber-400/40 text-amber-200 text-[8px] font-bold px-1.5 py-0.5 rounded">
-                                              降級首幀
-                                            </div>
-                                          )}
-                                          
-                                          {/* Hover overlay for Start */}
-                                          <div className="absolute inset-0 opacity-0 group-hover/start:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1 bg-black/60 z-10">
-                                            <Upload className="w-4 h-4 text-purple-400 animate-bounce" />
-                                            <span className="text-[10px] font-bold text-slate-100 bg-purple-950/80 border border-purple-500/30 px-2 py-0.5 rounded-full">
-                                              {scene.startFrameSourceKeyframes === "inherited_prev_end" ? "手動覆蓋鎖定首幀" : "更換首幀圖片"}
-                                            </span>
-                                          </div>
-                                        </div>
-                                        
-                                        {/* End Frame (Right Half) — THIS shot's endFrameKeyframes */}
-                                        <div 
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            document.getElementById(`upload-scene-img-kf-end-${scene.id}`)?.click();
-                                          }}
-                                          onDragOver={handleImageDragOver}
-                                          onDrop={(e) => {
-                                            e.stopPropagation();
-                                            // Upload into this scene's end frame via custom handler path
-                                            handleImageDrop(e, scene.id, "imageUrlKeyframes");
-                                          }}
-                                          className="flex-1 relative h-full overflow-hidden cursor-pointer group/end"
-                                        >
-                                          <input
-                                            type="file"
-                                            id={`upload-scene-img-kf-end-${scene.id}`}
-                                            accept="image/*"
-                                            className="hidden"
-                                            onChange={async (e) => {
-                                              // Reuse upload then map to endFrameKeyframes
-                                              const file = e.target.files?.[0];
-                                              if (!file) return;
-                                              try {
-                                                const reader = new FileReader();
-                                                const dataUrl: string = await new Promise((resolve, reject) => {
-                                                  reader.onload = () => resolve(reader.result as string);
-                                                  reader.onerror = reject;
-                                                  reader.readAsDataURL(file);
-                                                });
-                                                const up = await fetch("/api/upload-image", {
-                                                  method: "POST",
-                                                  headers: { "Content-Type": "application/json" },
-                                                  body: JSON.stringify({ base64Data: dataUrl }),
-                                                });
-                                                const upData = up.ok ? await up.json() : { imageUrl: dataUrl };
-                                                const url = upData.imageUrl || dataUrl;
-                                                updateActiveProject((prev) => ({
-                                                  scenes: prev.scenes.map((s) =>
-                                                    s.id === scene.id
-                                                      ? { ...s, endFrameKeyframes: url }
-                                                      : s
-                                                  ),
-                                                }));
-                                                // Also set next shot start if exists
-                                                if (nextScene) {
-                                                  updateActiveProject((prev) => ({
-                                                    scenes: prev.scenes.map((s) =>
-                                                      s.id === nextScene.id
-                                                        ? {
-                                                            ...s,
-                                                            startFrameKeyframes: url,
-                                                            imageUrlKeyframes: url,
-                                                            startFrameSourceKeyframes: "inherited_prev_end",
-                                                          }
-                                                        : s
-                                                    ),
-                                                  }));
-                                                }
-                                                showToast("已更新本鏡尾幀" + (nextScene ? "，並同步為下鏡首幀" : ""), "success");
-                                              } catch (err: any) {
-                                                showToast("尾幀上傳失敗：" + (err.message || err), "error");
-                                              }
-                                              e.target.value = "";
-                                            }}
-                                          />
-                                          {endImageUrl ? (
-                                            <img
-                                              src={endImageUrl}
-                                              alt="End Frame"
-                                              className="w-full h-full object-cover opacity-80 group-hover/end:opacity-40 transition-opacity duration-200"
-                                              referrerPolicy="no-referrer"
-                                            />
-                                          ) : (
-                                            <div className="w-full h-full flex flex-col items-center justify-center bg-slate-900/80 text-slate-600 gap-1">
-                                              <span className="text-[10px] font-mono">尾幀未就緒</span>
-                                              <span className="text-[8px] text-slate-500">全自動 Step3 會生成</span>
-                                            </div>
-                                          )}
-                                          <div className="absolute top-2 right-2 bg-black/80 backdrop-blur text-emerald-400 text-[9px] px-2 py-0.5 rounded-md border border-emerald-500/30 font-bold font-mono z-20 shadow-sm shadow-emerald-900/50">
-                                            尾幀 (END) 🏁
-                                          </div>
-                                          {endImageUrl && nextScene && (
-                                            <div className="absolute bottom-2 left-2 right-2 z-20 bg-emerald-950/90 border border-emerald-400/30 text-emerald-200 text-[8px] font-bold px-1.5 py-1 rounded text-center leading-tight">
-                                              將作為下鏡首幀
-                                            </div>
-                                          )}
-
-                                          <div className="absolute inset-0 opacity-0 group-hover/end:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-1 bg-black/60 z-10">
-                                            <Upload className="w-4 h-4 text-emerald-400 animate-bounce" />
-                                            <span className="text-[10px] font-bold text-slate-100 bg-emerald-950/80 border border-emerald-500/30 px-2 py-0.5 rounded-full">更換本鏡尾幀</span>
-                                          </div>
-                                        </div>
-
-                                        {/* VS Badge */}
-                                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/80 backdrop-blur border border-slate-700 w-6 h-6 rounded-full flex items-center justify-center z-30 shadow-xl shadow-black">
-                                          <span className="text-[8px] font-bold text-slate-300 font-mono tracking-tighter">TO</span>
-                                        </div>
-
-                                        {/* Reset both frames button */}
-                                        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-35">
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              e.preventDefault();
-                                              if (confirm("您確定要重置此場景的首尾過渡影格設定與影片嗎？")) {
-                                                setProjects(prevProjects => {
-                                                  const updatedList = prevProjects.map(p => {
-                                                    if (p.id === activeProjectId) {
-                                                      const updatedScenes = p.scenes.map(s => {
-                                                        if (s.id === scene.id) {
-                                                          return {
-                                                            ...s,
-                                                            imageUrlKeyframes: undefined,
-                                                            videoUrlKeyframes: undefined,
-                                                            videoProgressKeyframes: undefined,
-                                                            videoLogsKeyframes: undefined,
-                                                            videoErrorKeyframes: undefined
-                                                          };
-                                                        }
-                                                        return s;
-                                                      });
-                                                      return { ...p, scenes: updatedScenes };
-                                                    }
-                                                    return p;
-                                                  });
-                                                  try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); } catch (err) { console.error(err); }
-                                                  return updatedList;
-                                                });
-                                                showToast("已重置首尾影格與影片設定！", "success");
-                                              }
-                                            }}
-                                            className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow-md flex items-center gap-1 border border-red-700/50 cursor-pointer active:scale-95 whitespace-nowrap"
-                                          >
-                                            <RefreshCw className="w-2.5 h-2.5" />
-                                            <span>重置首尾/重做</span>
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ) : (
-                                      <div className="flex flex-col items-center space-y-1 text-slate-600 group-hover/img:text-slate-400 transition">
-                                        <div className="relative">
-                                          <Clapperboard className="w-8 h-8 group-hover/img:scale-110 transition-transform" />
-                                          <Upload className="w-3.5 h-3.5 text-indigo-500 absolute -bottom-1 -right-1 opacity-0 group-hover/img:opacity-100 transition-opacity" />
-                                        </div>
-                                        <span className="text-[10px]">無渲染畫布 (請先點選下方算圖)</span>
-                                        <span className="text-[9px] text-slate-550 hidden group-hover/img:block mt-1">或點擊、拖曳在此上傳您的照片</span>
-                                      </div>
-                                    )}
-
-                                    {scene.isGeneratingVideoKeyframes && (
-                                      <div className="absolute inset-0 bg-purple-950/20 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
-                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold bg-purple-950/90 text-purple-400 border border-purple-500/30 shadow-lg animate-pulse">
-                                          <span className="w-2 h-2 rounded-full bg-purple-500 animate-ping" />
-                                          <span>COMPILING DIGITAL PREVIEW...</span>
-                                        </span>
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  {scene.isGeneratingVideoKeyframes && (
-                                    <div className="flex flex-col gap-2 w-full mt-2 mb-2">
-                                      <AITransmissionMonitor progress={scene.videoProgressKeyframes || "0%"} type="Keyframes" logs={scene.videoLogsKeyframes} />
-                                      <div className="flex gap-2 w-full">
-                                        <button
-                                          onClick={() => handleStopGenerateVideo(scene.id)}
-                                          className="flex-1 py-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 shadow-md border border-rose-500/50"
-                                        >
-                                          <StopCircle className="w-3.5 h-3.5" />
-                                          <span>🛑 停止影片生成</span>
-                                        </button>
-                                        <button
-                                          onClick={() => handleResetVideoTask()}
-                                          className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer active:scale-95 border border-slate-700"
-                                        >
-                                          <RefreshCw className="w-3.5 h-3.5" />
-                                          <span>取消/重置</span>
-                                        </button>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  {/* Error message */}
-                                  {scene.videoErrorKeyframes && (
-                                    <div className="p-3 bg-red-950/40 border border-red-900/30 rounded-xl text-red-400 text-[10px] space-y-1 font-mono leading-relaxed select-text">
-                                      <div className="font-bold flex items-center gap-1">
-                                        <AlertCircle className="w-3.5 h-3.5" />
-                                        <span>首尾轉換出錯 (代碼 {scene.videoErrorCodeKeyframes || "N/A"})</span>
-                                      </div>
-                                      <p>{scene.videoErrorKeyframes}</p>
-                                      {scene.videoLogsKeyframes && scene.videoLogsKeyframes.length > 0 && (
-                                        <details className="mt-1">
-                                          <summary className="cursor-pointer font-bold text-[9px] text-slate-400">查看完整渲染日誌</summary>
-                                          <div className="mt-1 bg-black/80 p-2 rounded text-[8px] max-h-28 overflow-y-auto text-left leading-normal text-red-300">
-                                            {scene.videoLogsKeyframes.map((ll, idx) => <div key={idx}>{ll}</div>)}
-                                          </div>
-                                        </details>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  {/* Playback & Download triggers */}
-                                  <div className="space-y-2">
-                                    {scene.videoUrlKeyframes && (
-                                      <a
-                                        href={`/api/download?url=${encodeURIComponent(scene.videoUrlKeyframes)}`}
-                                        className="w-full py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold rounded-lg transition shadow-md shadow-purple-900/20 flex items-center justify-center gap-1.5 cursor-pointer border border-purple-500/30"
-                                        download={`toonflow-scene-${index + 1}.mp4`}
-                                      >
-                                        <Download className="w-3.5 h-3.5" />
-                                        <span>📥 下載已生成之 MP4 影片</span>
-                                      </a>
-                                    )}
-                                    {scene.imageUrlKeyframes && (
-                                      <button
-                                        onClick={() => {
-                                          setSelectedSceneForSimulation(scene);
-                                          setIsPlayingSimulation(true);
-                                        }}
-                                        className="w-full py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white text-[10px] font-bold rounded-lg border border-slate-800 transition flex items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        <Eye className="w-3.5 h-3.5 text-purple-400" />
-                                        <span>🎥 實時首尾過渡與台詞預覽 (免費)</span>
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-
-                                {/* Multi Action buttons */}
-                                <div className="flex flex-col gap-2">
-                                  {scene.id.startsWith("scene_transition_") ? (
-                                    <button
-                                      onClick={() => handleGenerateImage(scene.id, 'gemini')}
-                                      disabled={scene.isGeneratingImageKeyframes}
-                                      className="w-full py-2.5 bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-500 hover:to-cyan-500 text-white text-[11px] font-bold rounded-lg border border-teal-500/30 hover:border-teal-400 transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-teal-950/20 z-30"
-                                      title="一鍵提取上一場景最後一幀作為本銜接場景首幀，並設定下一場景作為過渡尾幀"
-                                    >
-                                      {scene.isGeneratingImageKeyframes ? (
-                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                      ) : (
-                                        <Link2 className="w-4 h-4 text-teal-200" />
-                                      )}
-                                      <span>🔗 智慧自動銜接：提取上鏡最後一幀</span>
-                                    </button>
-                                  ) : (
-                                    <div className="grid grid-cols-2 gap-2">
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'nanobanana')}
-                                        className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageKeyframes ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-yellow-400" />}
-                                        <span>Nano 繪圖</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'gemini')}
-                                        className="w-full py-2 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 text-[9px] font-bold rounded-lg border border-indigo-900 hover:border-indigo-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageKeyframes ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-indigo-400" />}
-                                        <span>Gemini 繪圖</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'agnes')}
-                                        className="w-full py-2 bg-pink-950 hover:bg-pink-900 text-pink-300 text-[9px] font-bold rounded-lg border border-pink-900 hover:border-pink-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageKeyframes ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-pink-400" />}
-                                        <span>Agnes 繪圖</span>
-                                      </button>
-                                      <button
-                                        onClick={() => handleGenerateImage(scene.id, 'mistral')}
-                                        className="w-full py-2 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition flex flex-col items-center justify-center gap-1 cursor-pointer"
-                                      >
-                                        {scene.isGeneratingImageKeyframes ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-orange-400" />}
-                                        <span>Mistral 繪圖</span>
-                                      </button>
-                                    </div>
-                                  )}
-                                  {scene.isGeneratingImageKeyframes && (
-                                    <div className="flex flex-col gap-1.5 items-center justify-center p-2 bg-slate-900/80 rounded-lg border border-red-500/30 animate-pulse">
-                                      <div className="text-[10px] text-slate-400 font-medium">
-                                        AI 正在生成插圖中...
-                                      </div>
-                                      <div className="flex gap-2 w-full">
-                                        <button
-                                          onClick={() => handleStopGenerateImage(scene.id)}
-                                          className="flex-1 py-1.5 bg-red-600/90 hover:bg-red-500 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                        >
-                                          <StopCircle className="w-3.5 h-3.5" />
-                                          <span>停止</span>
-                                        </button>
-                                        <button
-                                          onClick={() => handleGenerateImage(scene.id, 'agnes')}
-                                          className="flex-1 py-1.5 bg-pink-700/90 hover:bg-pink-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                        >
-                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                          <span>Agnes</span>
-                                        </button>
-                                        <button
-                                          onClick={() => handleGenerateImage(scene.id, 'mistral')}
-                                          className="flex-1 py-1.5 bg-orange-700/90 hover:bg-orange-600 text-white text-[10px] font-bold rounded-md flex items-center justify-center gap-1 transition cursor-pointer z-30"
-                                        >
-                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '4s' }} />
-                                          <span>Mistral</span>
-                                        </button>
-                                      </div>
-                                    </div>
-                                  )}
-                                  <div className="flex gap-2">
-                                    <button
-                                      onClick={() => handleGenerateVideoKeyframes(scene.id, index)}
-                                      disabled={scene.isGeneratingVideoKeyframes || !startImageUrl}
-                                      className={`flex-1 py-2.5 text-xs font-semibold rounded-lg border transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                                        !startImageUrl 
-                                          ? "bg-slate-950 text-slate-600 border-slate-900 cursor-not-allowed opacity-55" 
-                                          : "bg-gradient-to-tr from-purple-600 to-indigo-600 text-white hover:opacity-95 border-transparent shadow"
-                                      }`}
-                                      title={!startImageUrl ? "請先完成分鏡繪圖再生成影片" : "以本分鏡與下一分鏡之相片作為首尾影格過渡生成 5秒 影片"}
-                                    >
-                                      <Video className="w-4 h-4" />
-                                      <span>🎬 一鍵 AI 首尾過渡影片</span>
-                                    </button>
-
-                                    <label
-                                      htmlFor={`upload-scene-img-kf-${scene.id}`}
-                                      className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white text-xs font-semibold rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
-                                      title="從您的電腦上傳自訂分鏡插圖"
-                                    >
-                                      <Upload className="w-4 h-4 text-purple-400" />
-                                      <span>上傳照片</span>
-                                    </label>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Inline Scene Chatbot */}
-                            <div className="md:col-span-12 mt-6 border-t border-slate-800/80 pt-6 space-y-4">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <div className="p-1.5 bg-indigo-500/10 border border-indigo-500/20 rounded-lg">
-                                    <MessageSquare className="w-4 h-4 text-indigo-400" />
-                                  </div>
-                                  <div>
-                                    <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                                      分鏡智慧協調助理
-                                      <span className="text-[9px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-1.5 py-0.5 rounded-full font-mono font-medium">Chat & Modify</span>
-                                    </h4>
-                                    <p className="text-[10px] text-slate-500 mt-0.5">就該分鏡主題解答、翻譯，或下達指令即時修改此分鏡的所有內容。</p>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* Chat messages container */}
-                              <div className="bg-slate-950/80 border border-slate-850 rounded-xl p-4 flex flex-col gap-3 min-h-[100px] max-h-[250px] overflow-y-auto custom-scrollbar">
-                                {(!sceneChats[scene.id] || sceneChats[scene.id].length === 0) ? (
-                                  <div className="flex flex-col items-center justify-center py-4 text-center space-y-3">
-                                    <p className="text-[11px] text-slate-500 italic">尚未與本分鏡助理進行過對話。你可以點擊以下預設指令快速進行：</p>
-                                    <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
-                                      {[
-                                        { text: "💡 幫我將台詞改得更有情感張力，並同步更新英文 PROMPT", action: "請幫我把台詞對白改得更有情感張力、口語化且吸引人，並依據此情感同步優化繪圖英文描述提示詞 (PROMPT) 與動作描述 (ACTION PROMPT)。" },
-                                        { text: "👩 解決雙男角/雙女角問題：在 PROMPT 中明確設定主角與女主角的性別與長相", action: "我的場景中有男主角（陳默）和女主角（林芊），但 AI 繪圖生成了兩個男生。請幫我修改英文 PROMPT，在裡面明確標記：Chen Mo 為帥氣年輕男性 (handsome young Chinese male)，Lin Qian 為長髮美麗女性 (beautiful young Chinese female with long hair)，以修正雙男角問題，並保持角色服裝一致。" },
-                                        { text: "🎬 幫我優化鏡頭運動 (Action Prompt) 與導演註記", action: "請幫我精進本分鏡的「影片動作描述提示詞 (ACTION PROMPT)」與「導演註記 (DIRECTOR'S NOTES)」，加入更專業的電影級運鏡技巧、燈光氛圍、冷暖色調與情感特寫指示。" },
-                                        { text: "🎵 設計更有臨場感的環境音效與背景音樂描述", action: "請針對此場景的氣氛，幫我設計更生動、具有電影臨場感的「音效與背景音樂 / 鏡頭音訊 (audioCue)」描述。" }
-                                      ].map((btn, bIdx) => (
-                                        <button
-                                          key={bIdx}
-                                          type="button"
-                                          onClick={() => {
-                                            setSceneChatInputs(prev => ({ ...prev, [scene.id]: btn.action }));
-                                          }}
-                                          className="text-[10px] text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg transition-all text-left cursor-pointer active:scale-95"
-                                        >
-                                          {btn.text}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  sceneChats[scene.id].map((msg, mIdx) => (
-                                    <div key={mIdx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                      <div className={`max-w-[85%] rounded-2xl p-3 text-xs ${
-                                        msg.role === 'user'
-                                          ? 'bg-indigo-600 text-white rounded-tr-none shadow-md shadow-indigo-600/10'
-                                          : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none shadow-sm'
-                                      }`}>
-                                        {msg.role === 'ai' && (
-                                          <div className="text-[9px] font-bold mb-1 text-indigo-400 uppercase flex items-center gap-1">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-                                            分鏡助理
-                                          </div>
-                                        )}
-                                        <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                                      </div>
-                                    </div>
-                                  ))
-                                )}
-
-                                {isSceneChatting[scene.id] && (
-                                  <div className="flex justify-start">
-                                    <div className="bg-slate-900 border border-slate-800 rounded-2xl rounded-tl-none p-3 text-xs text-slate-400 flex items-center gap-2">
-                                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                                      <span>AI 導演正針對此分鏡重新佈置並即時更新設定中...</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* Chat input box */}
-                              <div className="flex gap-2">
-                                <textarea
-                                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition placeholder:text-slate-600 font-sans min-h-[44px] max-h-[100px] resize-y custom-scrollbar"
-                                  placeholder="對此分鏡下達修改、翻譯指令，或直接發問（例：請幫我將台詞改為德語並更新 PROMPT）..."
-                                  value={sceneChatInputs[scene.id] || ""}
-                                  onChange={(e) => setSceneChatInputs(prev => ({ ...prev, [scene.id]: e.target.value }))}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
-                                      e.preventDefault();
-                                      if ((sceneChatInputs[scene.id] || "").trim() && !isSceneChatting[scene.id]) {
-                                        handleChatScene(scene.id);
-                                      }
-                                    }
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => handleChatScene(scene.id)}
-                                  disabled={isSceneChatting[scene.id] || !(sceneChatInputs[scene.id] || "").trim()}
-                                  className="px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800/50 text-white disabled:text-slate-500 font-bold rounded-xl text-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed shadow-md shadow-indigo-600/10"
-                                >
-                                  {isSceneChatting[scene.id] ? (
-                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                  )}
-                                  <span>傳送</span>
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        )})}
-
-                        {activeProject.scenes.length === 0 && (
+                          );
+                        })}
+                      </div>
+                      {activeProject.scenes.length === 0 && (
                           <div className="text-center p-12 border border-dashed border-slate-800 rounded-2xl text-slate-500 text-xs">
                             此專案尚未拆解分鏡。請在上方原著小說頁面輸入劇本文字，並按下「一鍵 AI 拆解分鏡」生成豐富的故事劇本！
                           </div>
                         )}
-                      </div>
+                                            </div>
                     </div>
                   </div>
-                </div>
               )}
-
               {/* ============ TAB: GALLERY ============ */}
               {activeTab === "gallery" && (
                 <div className="space-y-6">
                   <VideoGallery activeProject={activeProject} />
+                </div>
+              )}
+
+              {/* ============ TAB: EXPERIENCE LIBRARY ============ */}
+              {activeTab === "experience" && (
+                <div className="space-y-6">
+                  <ExperienceLibrary />
                 </div>
               )}
 
@@ -10267,7 +8044,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                               </span>
                               <div>
                                 <h4 className="text-xs font-extrabold text-white print-text-dark">
-                                  {scene.title || `未命名分鏡場景 ${index + 1}`}
+                                  {scene.title || "未命名分鏡場景 " + (index + 1)}
                                 </h4>
                                 <p className="text-[9px] text-slate-500 font-mono">
                                   ID: {scene.id}
@@ -10382,78 +8159,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         )}
       </AnimatePresence>
 
-      {/* Styled inline animation helpers */}
-      <style>{`
-        @keyframes zoomPan {
-          0% { transform: scale(1.0) translate(0, 0); }
-          50% { transform: scale(1.15) translate(1%, -1%); }
-          100% { transform: scale(1.05) translate(-1%, 1%); }
-        }
-        .animate-zoomPan {
-          animation: zoomPan 10s infinite alternate ease-in-out;
-        }
-        @keyframes bounce-small {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-3px); }
-        }
-        @keyframes soundwave {
-          0%, 100% { height: 4px; }
-          50% { height: 12px; }
-        }
-        .animate-soundwave-1 { animation: soundwave 0.8s infinite ease-in-out; }
-        .animate-soundwave-2 { animation: soundwave 1.1s infinite ease-in-out; }
-        .animate-soundwave-3 { animation: soundwave 0.6s infinite ease-in-out; }
-        .animate-soundwave-4 { animation: soundwave 0.9s infinite ease-in-out; }
-
-        @media print {
-          body {
-            background: white !important;
-            color: black !important;
-          }
-          /* Hide everything in the main layout */
-          #root > div:not(.fixed), 
-          main > *:not(#print-preview-modal),
-          header, footer, .no-print {
-            display: none !important;
-            height: 0 !important;
-            overflow: hidden !important;
-            visibility: hidden !important;
-          }
-          /* Style the printable area */
-          #print-preview-modal {
-            display: block !important;
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            width: 100% !important;
-            height: auto !important;
-            background: white !important;
-            color: black !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            box-shadow: none !important;
-            border: none !important;
-            overflow: visible !important;
-          }
-          .print-card {
-            background: white !important;
-            color: black !important;
-            border: 1px solid #ddd !important;
-            page-break-inside: avoid !important;
-            margin-bottom: 20px !important;
-          }
-          .print-text-dark {
-            color: #111 !important;
-          }
-          .print-text-muted {
-            color: #555 !important;
-          }
-          .print-bg-light {
-            background-color: #f9f9f9 !important;
-            border-color: #eee !important;
-          }
-        }
-      `}</style>
 
       </main>
 
