@@ -1068,6 +1068,188 @@ function registerCloudMapping(cloudUrl: string, localPath: string) {
   console.log(`[Cloud Mapping] Registered: ${cloudUrl} -> ${localPath}`);
 }
 
+// AI Experience Library & Approved Assets Storage
+const APPROVED_ASSETS_FILE = path.join(process.cwd(), "assets", "approved-assets-library.json");
+
+interface ApprovedAsset {
+  id: string;
+  type: "image" | "video" | "prompt";
+  prompt: string;
+  url: string;
+  localPath?: string;
+  score: number;
+  passed: boolean;
+  sceneId?: string;
+  projectId?: string;
+  sceneTitle?: string;
+  timestamp: string;
+  negativePrompt?: string;
+}
+
+function loadApprovedAssets(): ApprovedAsset[] {
+  try {
+    if (fs.existsSync(APPROVED_ASSETS_FILE)) {
+      return JSON.parse(fs.readFileSync(APPROVED_ASSETS_FILE, "utf-8"));
+    }
+  } catch (err) {
+    console.warn("Failed to load approved assets library:", err);
+  }
+  return [];
+}
+
+function saveApprovedAssets(assets: ApprovedAsset[]) {
+  try {
+    const dir = path.dirname(APPROVED_ASSETS_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(APPROVED_ASSETS_FILE, JSON.stringify(assets, null, 2), "utf-8");
+  } catch (err) {
+    console.warn("Failed to save approved assets library:", err);
+  }
+}
+
+function cleanPromptForMatching(prompt: string): string {
+  return (prompt || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]/g, ""); // supports English and Chinese alphanumeric matching
+}
+
+// 1. Archive generated or approved asset API
+app.post("/api/archive-asset", express.json(), (req, res) => {
+  const { type, prompt, url, score, passed, sceneId, projectId, sceneTitle, negativePrompt } = req.body;
+  if (!type || !prompt || !url) {
+    return res.status(400).json({ error: "type, prompt, and url are required" });
+  }
+
+  try {
+    const assets = loadApprovedAssets();
+    const existingIndex = assets.findIndex(a => a.url === url);
+    const timestamp = new Date().toISOString();
+
+    if (existingIndex !== -1) {
+      assets[existingIndex] = {
+        ...assets[existingIndex],
+        score: score !== undefined ? score : assets[existingIndex].score,
+        passed: passed !== undefined ? passed : assets[existingIndex].passed,
+        sceneId: sceneId || assets[existingIndex].sceneId,
+        projectId: projectId || assets[existingIndex].projectId,
+        sceneTitle: sceneTitle || assets[existingIndex].sceneTitle,
+        negativePrompt: negativePrompt || assets[existingIndex].negativePrompt,
+        timestamp
+      };
+    } else {
+      assets.push({
+        id: `asset-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        type,
+        prompt,
+        url,
+        score: score || 100,
+        passed: passed !== undefined ? passed : true,
+        sceneId,
+        projectId,
+        sceneTitle,
+        timestamp,
+        negativePrompt
+      });
+    }
+
+    saveApprovedAssets(assets);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("Error archiving asset:", err);
+    res.status(500).json({ error: "Failed to archive asset" });
+  }
+});
+
+// 2. Lookup archived asset API for historical lookup
+app.post("/api/lookup-archive", express.json(), (req, res) => {
+  const { type, prompt } = req.body;
+  if (!type || !prompt) {
+    return res.status(400).json({ error: "type and prompt are required" });
+  }
+
+  try {
+    const assets = loadApprovedAssets();
+    const targetClean = cleanPromptForMatching(prompt);
+
+    const matches = assets.filter(a => 
+      a.type === type && 
+      cleanPromptForMatching(a.prompt) === targetClean &&
+      (a.passed || a.score >= 70)
+    );
+
+    if (matches.length > 0) {
+      matches.sort((a, b) => b.score - a.score);
+      console.log(`[Archive Lookup] Found matched high-score historical asset! Score: ${matches[0].score}, URL: ${matches[0].url}`);
+      return res.json({ found: true, asset: matches[0] });
+    }
+
+    res.json({ found: false });
+  } catch (err: any) {
+    console.error("Error looking up archive:", err);
+    res.status(500).json({ error: "Failed to query archive" });
+  }
+});
+
+// 3. Delete asset API to clean disk files and records
+app.post("/api/delete-asset", express.json(), (req, res) => {
+  const { url } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: "url is required" });
+  }
+
+  try {
+    console.log(`[Delete Asset] Requested deletion of asset: ${url}`);
+    const filesToDelete: string[] = [];
+
+    if (url.includes("/assets/")) {
+      const filename = url.substring(url.indexOf("/assets/") + 8);
+      const localPath = path.join(process.cwd(), "assets", filename);
+      filesToDelete.push(localPath);
+    }
+
+    const mapping = loadCloudMapping();
+    if (mapping[url]) {
+      filesToDelete.push(mapping[url]);
+      delete mapping[url];
+    }
+
+    for (const key of Object.keys(mapping)) {
+      if (filesToDelete.includes(mapping[key])) {
+        delete mapping[key];
+      }
+    }
+    saveCloudMapping(mapping);
+
+    let deletedCount = 0;
+    for (const filePath of filesToDelete) {
+      if (fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+          deletedCount++;
+          console.log(`[Delete Asset] Deleted file from disk: ${filePath}`);
+        } catch (unlinkErr) {
+          console.warn(`[Delete Asset] Failed to unlink file ${filePath}:`, unlinkErr);
+        }
+      }
+    }
+
+    const assets = loadApprovedAssets();
+    const updatedAssets = assets.filter(a => a.url !== url);
+    saveApprovedAssets(updatedAssets);
+
+    res.json({ 
+      success: true, 
+      message: `Asset record and ${deletedCount} local files deleted successfully.` 
+    });
+  } catch (err: any) {
+    console.error("Error deleting asset:", err);
+    res.status(500).json({ error: "Failed to delete asset" });
+  }
+});
+
 // Context-aware beautifully animated fallback videos (using high-quality royalty-free video clips)
 function getFallbackVideo(prompt: string): string {
   const combined = prompt.toLowerCase();
@@ -2248,11 +2430,53 @@ Instructions for synthesis:
 }
 });
 
+// Cooldown map to prevent spamming / rapid clicking on AI prompt optimization
+const optimizePromptRateLimit = new Map<string, number>();
+
 // Toonflow Feature: AI Prompt Optimizer Endpoint using Gemini/Agnes
 app.post("/api/optimize-prompt", async (req, res) => {
-  const { prompt, artStyle, character, characterDescription, customApiKey, mood, engine, dialogue, narration, sceneId } = req.body;
+  const { prompt, artStyle, character, characterDescription, customApiKey, mood, engine, dialogue, narration, sceneId, projectId, sceneTitle } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: "Prompt is required" });
+  }
+
+  // 1. Anti-spam clicking check (cooldown of 3 seconds per sceneId or visual prompt)
+  const spamKey = sceneId || prompt;
+  const now = Date.now();
+  if (optimizePromptRateLimit.has(spamKey)) {
+    const lastTime = optimizePromptRateLimit.get(spamKey) || 0;
+    if (now - lastTime < 3000) {
+      console.warn(`[Anti-Spam] Rejecting rapid duplicate prompt optimization request for key: ${spamKey}`);
+      return res.status(429).json({ error: "您的請求過於頻繁，AI 正在加速處理中，請稍候再試。" });
+    }
+  }
+  optimizePromptRateLimit.set(spamKey, now);
+
+  // 2. AI Experience Library History Lookup Check
+  try {
+    const assets = loadApprovedAssets();
+    const targetClean = cleanPromptForMatching(prompt);
+    // Find matched high-score prompt that passed review or has score >= 70
+    const matches = assets.filter(a => 
+      a.type === "prompt" && 
+      cleanPromptForMatching(a.prompt) === targetClean &&
+      (a.passed || a.score >= 70)
+    );
+
+    if (matches.length > 0) {
+      matches.sort((a, b) => b.score - a.score);
+      const matchedPrompt = matches[0];
+      console.log(`[AI 經驗圖書館] 偵測到本分鏡歷史高分優化提示詞存檔！分數: ${matchedPrompt.score}, 標題: ${matchedPrompt.sceneTitle || "無"}`);
+      return res.json({
+        optimizedPrompt: matchedPrompt.url,
+        negativePrompt: matchedPrompt.negativePrompt || "blurry, low resolution, low quality, worst quality, deformed hands, extra fingers, text, watermark",
+        fromCache: true,
+        score: matchedPrompt.score,
+        msg: `✨ [AI 經驗圖書館] 偵測到本分鏡已有歷史高分審核優化紀錄 (分數：${matchedPrompt.score}/100)，已自動為您載入，免去重複等待時間！`
+      });
+    }
+  } catch (err) {
+    console.warn("[AI 經驗圖書館] 歷史優化提示詞讀取失敗:", err);
   }
 
   try {
@@ -2365,9 +2589,34 @@ Original prompt to translate/optimize: "${prompt}"`;
       }
     }
 
+    const finalOptimized = parsedData.optimizedPrompt || prompt;
+    const finalNegative = parsedData.negativePrompt || "blurry, low resolution, low quality, worst quality, deformed hands, extra fingers, text, watermark";
+
+    // 3. Save Newly Generated Optimized Prompt into the Experience Library
+    try {
+      const assets = loadApprovedAssets();
+      assets.push({
+        id: `prompt-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        type: "prompt",
+        prompt: prompt,
+        url: finalOptimized,
+        negativePrompt: finalNegative,
+        score: 95, // default high-quality initial score
+        passed: true,
+        sceneId,
+        projectId,
+        sceneTitle,
+        timestamp: new Date().toISOString()
+      });
+      saveApprovedAssets(assets);
+      console.log(`[AI 經驗圖書館] 成功為新生成的優化提示詞存檔入庫！`);
+    } catch (saveErr) {
+      console.warn("[AI 經驗圖書館] 提示詞入庫失敗:", saveErr);
+    }
+
     res.json({
-      optimizedPrompt: parsedData.optimizedPrompt || prompt,
-      negativePrompt: parsedData.negativePrompt || "blurry, low resolution, low quality, worst quality, deformed hands, extra fingers, text, watermark"
+      optimizedPrompt: finalOptimized,
+      negativePrompt: finalNegative
     });
   } catch (error: any) {
     const rawErr = error?.message || String(error);
@@ -3936,9 +4185,20 @@ app.post("/api/generate-image", async (req, res) => {
 
   let enhancedPrompt = "";
   const isLiveAction = artStyle?.toLowerCase().includes('live-action') || artStyle?.toLowerCase().includes('photorealistic') || artStyle?.toLowerCase().includes('realistic') || artStyle?.includes('寫實') || artStyle?.includes('真人') || artStyle?.includes('電影');
-  const baseSceneType = isLiveAction ? "high quality, beautifully framed 16:9 cinematic photorealistic live-action storyboard scene, real human photography" : "high quality, beautifully framed 16:9 cinematic storyboard scene";
   
-  const styleAddon = isLiveAction ? `${artStyle || "cinematic"}. HIGHLY REALISTIC PHOTOGRAPHY, CINEMATIC SHOT, NO ANIME, NO CARTOON, NO ILLUSTRATION` : `${artStyle || "cinematic"}`;
+  const isAnimeOrCartoon = !isLiveAction || artStyle?.toLowerCase().includes('anime') || artStyle?.toLowerCase().includes('cartoon') || artStyle?.toLowerCase().includes('illustration') || artStyle?.includes('動漫') || artStyle?.includes('卡通') || artStyle?.includes('漫畫') || artStyle?.includes('插畫') || artStyle?.includes('手繪') || artStyle?.toLowerCase().includes('comic') || artStyle?.toLowerCase().includes('ghibli');
+  
+  const baseSceneType = isLiveAction 
+    ? "high quality, beautifully framed 16:9 cinematic photorealistic live-action storyboard scene, real human photography" 
+    : (isAnimeOrCartoon 
+        ? "high quality, beautifully framed 16:9 cinematic 2D anime style storyboard scene, beautiful hand-drawn anime illustration" 
+        : "high quality, beautifully framed 16:9 cinematic storyboard scene");
+  
+  const styleAddon = isLiveAction 
+    ? `${artStyle || "cinematic"}. HIGHLY REALISTIC PHOTOGRAPHY, CINEMATIC SHOT, NO ANIME, NO CARTOON, NO ILLUSTRATION, real-life human features` 
+    : (isAnimeOrCartoon 
+        ? `${artStyle || "anime"}. 2D anime style, vibrant colors, clean lines, cell-shaded, masterpiece 2D illustration, absolutely NO realism, NO real-life human features, NO photorealistic photography, NO 3D rendering, NO realistic textures` 
+        : `${artStyle || "cinematic"}`);
 
   if (isAvatar) {
     let referenceGuidance = "";
@@ -5055,87 +5315,96 @@ async function executeFirestoreSaveForUser(userId: string) {
 // Grok 7-Step Interactive Storyboarding Workflow API Endpoints
 // -------------------------------------------------------------
 
+// Helper to download image and convert to inlineData b64 for Gemini multimodal input
+async function getImageInlineData(imageUrl: string, req: any): Promise<{ mimeType: string; data: string } | null> {
+  if (!imageUrl) return null;
+  if (imageUrl.startsWith('data:')) {
+    const [header, data] = imageUrl.split(',');
+    const mimeType = header.split(':')[1].split(';')[0];
+    return { mimeType, data };
+  }
+
+  let buffer: Buffer | null = null;
+  let mimeType = 'image/jpeg';
+
+  const isLocalAsset = imageUrl.includes('/assets/') || imageUrl.startsWith('assets/');
+  if (isLocalAsset) {
+    const filename = imageUrl.substring(imageUrl.indexOf('/assets/') + 8);
+    const localPath = path.join(process.cwd(), "assets", filename);
+    if (fs.existsSync(localPath)) {
+      buffer = fs.readFileSync(localPath);
+      const ext = filename.split('.').pop() || 'jpeg';
+      mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+    }
+  }
+
+  if (!buffer) {
+    const urlParts = imageUrl.split("/");
+    const originalFilename = urlParts[urlParts.length - 1].split("?")[0];
+    const localBackupPath = path.join(process.cwd(), "assets", originalFilename);
+    if (fs.existsSync(localBackupPath)) {
+      buffer = fs.readFileSync(localBackupPath);
+      const ext = originalFilename.split('.').pop() || 'jpeg';
+      mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+    }
+  }
+
+  if (!buffer) {
+    const publicBaseUrl = getPublicBaseUrl(req);
+    const absoluteUrl = (imageUrl.startsWith('/') || !imageUrl.startsWith('http'))
+      ? `${publicBaseUrl}${imageUrl.startsWith('/') ? '' : '/'}${imageUrl}`
+      : imageUrl;
+    try {
+      const fetchRes = await withTimeout(fetch(absoluteUrl), 15000, new Error("Fetch timeout"));
+      if (fetchRes.ok) {
+        const arrayBuffer = await fetchRes.arrayBuffer();
+        buffer = Buffer.from(arrayBuffer);
+        mimeType = fetchRes.headers.get('content-type') || 'image/jpeg';
+      }
+    } catch (err) {
+      console.warn(`[getImageInlineData] Failed to fetch image ${absoluteUrl}:`, err);
+    }
+  }
+
+  if (buffer) {
+    return { mimeType, data: buffer.toString('base64') };
+  }
+  return null;
+}
+
 // Step 4: AI Image Quality & Continuity Review
 app.post("/api/workflow/review-image", async (req, res) => {
-  const { imageUrl, visualPrompt, characterDescription, customApiKey, sceneId } = req.body;
+  const { imageUrl, visualPrompt, characterDescription, customApiKey, sceneId, artStyle, prevImageUrl } = req.body;
   if (!imageUrl) {
     return res.status(400).json({ error: "Image URL is required" });
   }
 
+  // Toonflow AI Experience Library: Bypass review disabled to guarantee visual continuity and strict style-aware check!
+
   try {
-    const publicBaseUrl = getPublicBaseUrl(req);
-    let inlineData: any = null;
-
-    if (imageUrl.startsWith('data:')) {
-      const [header, data] = imageUrl.split(',');
-      const mimeType = header.split(':')[1].split(';')[0];
-      inlineData = { mimeType, data };
-    } else {
-      let buffer: Buffer | null = null;
-      let mimeType = 'image/jpeg';
-
-      const isLocalAsset = imageUrl.includes('/assets/') || imageUrl.startsWith('assets/');
-      if (isLocalAsset) {
-        const filename = imageUrl.substring(imageUrl.indexOf('/assets/') + 8);
-        const localPath = path.join(process.cwd(), "assets", filename);
-        if (fs.existsSync(localPath)) {
-          buffer = fs.readFileSync(localPath);
-          const ext = filename.split('.').pop() || 'jpeg';
-          mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-        }
-      }
-
-      if (!buffer) {
-        const urlParts = imageUrl.split("/");
-        const originalFilename = urlParts[urlParts.length - 1].split("?")[0];
-        const localBackupPath = path.join(process.cwd(), "assets", originalFilename);
-        if (fs.existsSync(localBackupPath)) {
-          buffer = fs.readFileSync(localBackupPath);
-          const ext = originalFilename.split('.').pop() || 'jpeg';
-          mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
-        }
-      }
-
-      if (!buffer) {
-        const absoluteUrl = (imageUrl.startsWith('/') || !imageUrl.startsWith('http'))
-          ? `${publicBaseUrl}${imageUrl.startsWith('/') ? '' : '/'}${imageUrl}`
-          : imageUrl;
-        const fetchPromise = fetch(absoluteUrl);
-        const fetchRes = await withTimeout(fetchPromise, 15000, new Error("Fetch timeout"));
-        if (fetchRes.ok) {
-          const arrayBuffer = await fetchRes.arrayBuffer();
-          buffer = Buffer.from(arrayBuffer);
-          mimeType = fetchRes.headers.get('content-type') || 'image/jpeg';
-        }
-      }
-
-      if (buffer) {
-        inlineData = { mimeType, data: buffer.toString('base64') };
-      }
-    }
-
+    const inlineData = await getImageInlineData(imageUrl, req);
     if (!inlineData) {
       return res.status(400).json({ error: "Failed to load image data for evaluation" });
     }
 
+    const prevInlineData = prevImageUrl ? await getImageInlineData(prevImageUrl, req) : null;
+
     const expContext = await getExperienceContext("image_review", sceneId);
 
     const systemInstruction = `You are Toonflow's Master Storyboard Image Critic.
-Evaluate this generated keyframe storyboard image against the intended positive visual prompt and target character details.
+Your primary task is to evaluate the generated keyframe storyboard image (Scene i) against the target art style, character descriptions, and the previous scene's image (if provided) to ensure flawless visual continuity and absolute stylistic alignment.
 ${expContext}
-Assess:
-1. "score": A quality/matching score from 0 to 100 based on composition, lighting, style matching, and consistency.
-2. "critique": Structured feedback in Traditional Chinese. Comment on style, facial features/clothing consistency, lighting contrast, and spatial composition. Point out any AI artifacts.
-3. "passed": true if score >= 70, otherwise false.
-4. "optimizedVisualPrompt": If passed is false, provide a revised English visual prompt.
-5. "technical_failure": Set to true IF AND ONLY IF the image appears to be a technical error (e.g., solid color, abstract digital noise/artifacts that don't represent any physical objects, or a generic placeholder). If this is true, the score must be 0.
-6. "failureCategory": If passed is false, classify the error as "generation_failure", "system_error", or "prompt_issue". If passed is true, use "none".
-7. "rootCause": If passed is false, describe the real root cause of the issue in Traditional Chinese.
-8. "isPromptRelated": Boolean, true if the issue is actually caused by the original prompt being bad/vague, false if it's a model glitch or technical failure despite a good prompt.
-9. "actualProblem": Describe the actual visual problem observed in Traditional Chinese.
-10. "aiImprovementSuggestion": Suggestion for the AI to fix this.
-11. "resolution": Actionable resolution step.
-12. "permanentNote": A short note to remind future AI generations.
+
+CRITICAL CHECKS:
+1. Target Project Art Style: "${artStyle || "Not specified (Default: Anime/Cartoon)"}".
+   - You MUST verify that the generated image perfectly matches this style.
+   - If the target style is 'Anime' (動漫) or 'Cartoon' (卡通) but the generated image is a realistic/photorealistic version (真人/真實照片版), it is a SEVERE STYLE MISMATCH. In this case, you MUST set "passed" to false, and "score" to a low value (below 70).
+2. Character Consistency:
+   - Compare the characters in the current image (Scene i) with the target Character Details.
+   - If a PREVIOUS scene's approved image is provided, visually analyze the characters (face shape, eyes, hairstyle, clothing color, and general design). They MUST look like the same person in the same style. If there's a style mismatch or character inconsistency (e.g. they turned from anime into real life, or their outfit changed drastically with no reason), you MUST fail the image (score < 70, passed = false).
+3. Composition & Quality:
+   - Assess composition, lighting contrast, and spatial layout.
+   - Look for major AI artifacts or corruption.
 
 Respond STRICTLY in the following JSON structure:
 {
@@ -5154,18 +5423,33 @@ Respond STRICTLY in the following JSON structure:
 }`;
 
     const promptText = `
+Evaluation Context:
+Target Art Style: "${artStyle || "Not specified."}"
 Intended Visual Prompt: "${visualPrompt || "Not provided."}"
 Target Character Details: "${characterDescription || "Not provided."}"
 
-Please analyze this image. If it looks like a technical failure (e.g. just a blue fluid background unrelated to the prompt), mark technical_failure as true, set isPromptRelated to false, and correctly classify the root cause without rewriting the prompt.`;
+Please perform a strict visual analysis of the current image. 
+1. If the target art style is "動漫" / "Anime" or similar, but the current image shows a real-life human (photorealistic), flag it immediately, score it below 70, set passed to false, and explain in the critique that the image deviated to real-life (真人版).
+2. If the previous scene's image is provided above, check if the character design, clothes, face, and environment are continuous and match in style. If the previous scene was anime and this one is realistic, or vice versa, this is a fatal continuity error.`;
+
+    const parts: any[] = [];
+    if (prevInlineData) {
+      parts.push({
+        text: "Below is the APPROVED IMAGE from the PREVIOUS scene (Scene i-1) for visual continuity and character feature comparison."
+      });
+      parts.push({ inlineData: prevInlineData });
+    }
+
+    parts.push({
+      text: "Below is the CURRENT GENERATED IMAGE (Scene i) to be reviewed and scored."
+    });
+    parts.push({ inlineData: inlineData });
+    parts.push({ text: promptText });
 
     const response = await generateContentWithFallback({
       model: "gemini-3.5-flash",
       contents: {
-        parts: [
-          { inlineData },
-          { text: promptText }
-        ]
+        parts
       },
       config: {
         systemInstruction,
@@ -5243,20 +5527,30 @@ Please analyze this image. If it looks like a technical failure (e.g. just a blu
 
 // Step 6: AI Video Quality Review
 app.post("/api/workflow/review-video", async (req, res) => {
-  const { scene, previousScene, customApiKey } = req.body;
+  const { scene, previousScene, customApiKey, artStyle } = req.body;
   if (!scene) {
     return res.status(400).json({ error: "Scene is required" });
   }
+
+  // Toonflow AI Experience Library: Bypass review disabled to guarantee visual consistency and strict style-aware check!
 
   try {
     const expContext = await getExperienceContext("video_review", scene.id);
 
     const systemInstruction = `You are Toonflow's Master Director of Motion Graphics & Video Continuity.
-Evaluate the plan and physical logic of this video based on its visual prompt, dialogue, and intended action prompt.
+Evaluate the plan, camera movement, and continuity of this video shot based on its visual prompt, dialogue, intended action prompt, and the overall project art style.
 ${expContext}
+
+CRITICAL CHECKS:
+1. Target Project Art Style: "${artStyle || "Not specified (Default: Anime/Cartoon)"}".
+   - You MUST ensure the video's motion plan, aesthetic descriptions, and atmosphere are completely consistent with this style.
+2. Continuity & Flow:
+   - Check if the camera movement (zoom, pan, tilt, etc.) is smooth and logical.
+   - If a PREVIOUS scene is provided, check if the transition flows naturally and matches the spatial logic.
+
 Assess:
-1. "score": A quality/matching score from 0 to 100 based on camera movement, kinetic plausibility, lip-sync description, and motion continuity.
-2. "critique": Structured feedback in Traditional Chinese. Evaluate whether the camera flow is cinematic, if character motion is physically consistent, if the lip sync or closed-mouth rule is correctly followed, and if the video maintains the scenic logic of the previous shot (if any).
+1. "score": A quality/matching score from 0 to 100 based on camera movement, kinetic plausibility, lip-sync description, style compliance, and motion continuity.
+2. "critique": Structured feedback in Traditional Chinese. Evaluate whether the camera flow is cinematic, if character motion is physically consistent, if the style aligns with the project style (${artStyle || "Anime"}), and if the video maintains the scenic logic of the previous shot (if any).
 3. "passed": true if score >= 70, otherwise false.
 4. "technical_failure": Set to true IF AND ONLY IF the video output itself was completely corrupted, 0 bytes, or abstract noise/failed API rendering.
 5. "failureCategory": If passed is false, classify the error as "generation_failure", "system_error", or "prompt_issue". If passed is true, use "none".
@@ -5291,11 +5585,12 @@ Character: ${scene.character || "旁白"}
 Visual Prompt: ${scene.visualPrompt}
 Action Prompt: ${scene.actionPrompt || ""}
 Transition Prompt: ${scene.transitionPrompt || ""}
+Target Project Art Style: ${artStyle || "Not specified."}
 
 Previous Scene Details (for continuity):
 ${previousScene ? `Title: ${previousScene.title}\nVisual Prompt: ${previousScene.visualPrompt}\nAction Prompt: ${previousScene.actionPrompt || ""}` : "No previous scene (this is the first shot)."}
 
-Please review the cinematic motion plan. If it looks like a technical failure, mark technical_failure as true, set isPromptRelated to false, and correctly classify the root cause.`;
+Please review the cinematic motion plan. If it looks like a style deviation or has poor consistency, score it under 70 and make sure passed is false.`;
 
     const response = await generateContentWithFallback({
       model: "gemini-3.5-flash",

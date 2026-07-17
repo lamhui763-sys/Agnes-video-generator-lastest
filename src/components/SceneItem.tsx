@@ -32,6 +32,7 @@ interface SceneItemProps {
   fullAutoLogs?: string[];
   onFullAutoProduce?: () => void;
   sceneType?: 'standard' | 'ext' | 'keyframes';
+  strictWorkflowLock?: boolean;
 }
 
 const SceneItem: React.FC<SceneItemProps> = React.memo(({
@@ -61,7 +62,8 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
   fullAutoProgress,
   fullAutoLogs,
   onFullAutoProduce,
-  sceneType = 'standard'
+  sceneType = 'standard',
+  strictWorkflowLock = false
 }) => {
   const isGenImgField = sceneType === "ext" ? "isGeneratingImageExt" : (sceneType === "keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
   const imageField = sceneType === "ext" ? "imageUrlExt" : (sceneType === "keyframes" ? "imageUrlKeyframes" : "imageUrl");
@@ -116,6 +118,71 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
     });
   };
 
+  // Call server to delete file from disk and mapping, then clear from state
+  const handleDeleteAsset = async (type: "image" | "video") => {
+    const assetUrl = type === "image" ? scene[imageField] : scene[videoField];
+    if (!assetUrl) return;
+
+    if (!confirm(`您確定要徹底刪除此${type === "image" ? "插圖" : "影片"}並釋放伺服器硬碟空間嗎？此動作無法撤銷。`)) {
+      return;
+    }
+
+    try {
+      showToast(`正在刪除伺服器端 ${type === "image" ? "插圖" : "影片"} 檔案並清理 AI 經驗圖書館記錄...`, "info");
+      const res = await fetch("/api/delete-asset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: assetUrl })
+      });
+
+      if (!res.ok) throw new Error("刪除 API 請求失敗");
+      const data = await res.json();
+      console.log("[Delete Asset Success]:", data);
+
+      // Clear from React state and local storage
+      setProjects(prevProjects => {
+        const updatedList = prevProjects.map(p => {
+          if (p.id === activeProjectId) {
+            const updatedScenes = p.scenes.map(s => {
+              if (s.id === scene.id) {
+                if (type === "image") {
+                  return {
+                    ...s,
+                    [imageField]: undefined,
+                    step4ImageReviewScore: undefined,
+                    step4ImageReviewText: undefined,
+                    step4Passed: undefined
+                  };
+                } else {
+                  return {
+                    ...s,
+                    [videoField]: undefined,
+                    [(sceneType === "ext" ? "videoProgressExt" : (sceneType === "keyframes" ? "videoProgressKeyframes" : "videoProgress"))]: undefined,
+                    [(sceneType === "ext" ? "videoLogsExt" : (sceneType === "keyframes" ? "videoLogsKeyframes" : "videoLogs"))]: undefined,
+                    [errorField]: undefined,
+                    step6VideoReviewScore: undefined,
+                    step6VideoReviewText: undefined,
+                    step6Passed: undefined
+                  };
+                }
+              }
+              return s;
+            });
+            return { ...p, scenes: updatedScenes };
+          }
+          return p;
+        });
+        try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); } catch (err) { console.error(err); }
+        return updatedList;
+      });
+
+      showToast("✅ 刪除成功！檔案已從伺服器硬碟徹底清除，經驗圖書館緩存也已同步清理。", "success");
+    } catch (err: any) {
+      console.error("Delete asset error:", err);
+      showToast(`刪除失敗：${err.message || err}`, "error");
+    }
+  };
+
   // Trigger Step 2: AI Optimize Prompt
   const handleTriggerStep2Optimize = async () => {
     if (scene.isOptimizingStep2) return;
@@ -133,26 +200,36 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
           artStyle: STYLE_PRESETS[0]?.prompt || "",
           character: scene.character || "旁白",
           characterDescription: matchingChar?.description || "",
-          context: prevAdvice ? `上一個鏡頭傳遞的銜接建議：${prevAdvice}` : ""
+          context: prevAdvice ? `上一個鏡頭傳遞的銜接建議：${prevAdvice}` : "",
+          sceneId: scene.id,
+          projectId: activeProjectId,
+          sceneTitle: scene.title
         })
       });
 
-      if (!res.ok) throw new Error("優化失敗");
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "優化失敗");
+      }
       const data = await res.json();
       updateSceneMultipleFields({
         step2OptimizedPrompt: data.optimizedPrompt || scene.visualPrompt,
         step2OptimizedNegative: data.negativePrompt || scene.negativePrompt || "",
         isOptimizingStep2: false
       });
-      showToast("🔮 提示詞優化成功！已融入前置分鏡連續性建議。", "success");
-    } catch (err) {
+      if (data.fromCache) {
+        showToast(data.msg || "✨ [AI 經驗圖書館] 偵測到本分鏡已有歷史優化紀錄，已自動載入！", "success");
+      } else {
+        showToast("🔮 提示詞優化成功！已融入前置分鏡連續性建議。", "success");
+      }
+    } catch (err: any) {
       console.error(err);
       updateSceneMultipleFields({
         step2OptimizedPrompt: scene.visualPrompt,
         step2OptimizedNegative: scene.negativePrompt || "",
         isOptimizingStep2: false
       });
-      showToast("提示詞優化失敗，已加載默認提示詞，請手動調整。", "error");
+      showToast(err.message || "提示詞優化失敗，已加載默認提示詞，請手動調整。", "error");
     }
   };
 
@@ -165,13 +242,27 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
     if (scene.isReviewingStep4) return;
     updateSceneMultipleFields({ isReviewingStep4: true });
     try {
+      const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+      const activeProj = curProjList.find(p => p.id === activeProjectId);
+      const artStyle = activeProj?.artStyle || "";
+
+      const prevScene = index > 0 ? scenes[index - 1] : null;
+      const prevImageUrl = prevScene ? (prevScene[imageField] || prevScene.imageUrl || prevScene.imageUrlKeyframes) : null;
+      
+      const customApiKey = localStorage.getItem("toonflow_custom_api_key") || undefined;
+
       const res = await fetch("/api/workflow/review-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           imageUrl: scene[imageField],
           visualPrompt: scene.visualPrompt,
-          characterDescription: matchingChar?.description || ""
+          characterDescription: matchingChar?.description || "",
+          sceneId: scene.id,
+          projectId: activeProjectId,
+          artStyle,
+          prevImageUrl,
+          customApiKey: customApiKey || undefined
         })
       });
 
@@ -205,13 +296,20 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
     if (scene.isReviewingStep6) return;
     updateSceneMultipleFields({ isReviewingStep6: true });
     try {
+      const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+      const activeProj = curProjList.find(p => p.id === activeProjectId);
+      const artStyle = activeProj?.artStyle || "";
+      const customApiKey = localStorage.getItem("toonflow_custom_api_key") || undefined;
+
       const previousScene = index > 0 ? scenes[index - 1] : null;
       const res = await fetch("/api/workflow/review-video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scene,
-          previousScene
+          previousScene,
+          customApiKey: customApiKey || undefined,
+          artStyle
         })
       });
 
@@ -1127,6 +1225,17 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                   <div className="relative w-full h-full">
                     <img src={scene[imageField]} alt="Start frame" className="w-full h-full object-cover" />
                     <div className="absolute top-2 left-2 bg-black/60 px-2 py-1 rounded text-[10px] font-mono font-bold text-slate-300">首幀 (START)</div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteAsset("image");
+                      }}
+                      className="absolute top-2 right-2 p-1 bg-red-950/90 hover:bg-red-800 border border-red-700/50 text-red-200 hover:text-white rounded transition shadow z-40 cursor-pointer active:scale-95"
+                      title="徹底刪除此插圖并釋放空間"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                     {!scene[isGenVidField] && (
                       <div className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center">
                         <span className="text-[11px] font-bold text-slate-200">點擊更換</span>
@@ -1163,6 +1272,17 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               <div className="relative aspect-video w-full bg-black rounded-xl overflow-hidden border border-slate-800 shadow-inner mt-4">
                 <ScrubbableVideoPlayer src={scene[videoField]} className="w-full h-full object-cover" />
                 <div className="absolute top-2 right-2 flex gap-1 z-30">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteAsset("video");
+                    }}
+                    className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 cursor-pointer active:scale-95"
+                    title="徹底從伺服器硬碟刪除此影片檔案并釋放空間"
+                  >
+                    <Trash2 className="w-2.5 h-2.5" />
+                    <span>刪除/釋放影片</span>
+                  </button>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1208,6 +1328,18 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
               />
               {/* Manual redo / reset button */}
               <div className="absolute top-2 right-2 flex gap-1 z-30">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    handleDeleteAsset("video");
+                  }}
+                  className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-45 cursor-pointer active:scale-95"
+                  title="徹底從伺服器硬碟刪除此影片檔案并釋放空間"
+                >
+                  <Trash2 className="w-2.5 h-2.5" />
+                  <span>刪除/釋放影片</span>
+                </button>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1270,6 +1402,19 @@ const SceneItem: React.FC<SceneItemProps> = React.memo(({
                   </div>
                   {/* Manual redo / reset button */}
                   <div className="absolute top-2 right-2 flex gap-1 z-30">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        handleDeleteAsset("image");
+                      }}
+                      className="bg-red-950/90 hover:bg-red-800 text-white px-2 py-1 rounded text-[9px] font-bold transition shadow flex items-center gap-1 border border-red-700/50 z-45 cursor-pointer active:scale-95"
+                      title="徹底從伺服器硬碟刪除此插圖"
+                    >
+                      <Trash2 className="w-2.5 h-2.5" />
+                      <span>刪除/釋放圖片</span>
+                    </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

@@ -1736,6 +1736,47 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     }
   };
 
+  // AI Experience Library & Historical Approved Asset helpers
+  const checkArchiveHistory = async (type: "image" | "video", prompt: string) => {
+    try {
+      const res = await fetch("/api/lookup-archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, prompt })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.found && data.asset) {
+          return data.asset;
+        }
+      }
+    } catch (err) {
+      console.warn("[Toonflow History] Archive lookup bypassed:", err);
+    }
+    return null;
+  };
+
+  const archiveAsset = async (assetData: {
+    type: "image" | "video";
+    prompt: string;
+    url: string;
+    score?: number;
+    passed?: boolean;
+    sceneId?: string;
+    projectId?: string;
+    sceneTitle?: string;
+  }) => {
+    try {
+      await fetch("/api/archive-asset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(assetData)
+      });
+    } catch (err) {
+      console.warn("[Toonflow History] Archiving bypassed:", err);
+    }
+  };
+
   // Storyboard Image Generation (calls Gemini-3.1-flash-image)
   const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
     let freshActiveProject = activeProject;
@@ -1749,14 +1790,6 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     const isGenField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
     const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
 
-    // Update loading state
-    updateActiveProject((prev) => ({
-      scenes: prev.scenes.map(s => {
-        if (s.id === sceneId) return { ...s, [isGenField]: true };
-        return s;
-      })
-    }));
-
     let targetSceneForGen: Scene | undefined;
     setProjects(prev => {
       const p = prev.find(p => p.id === activeProjectId);
@@ -1767,6 +1800,14 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
     // Fallback to activeProject if not found (though it should be)
     const sceneToGen = targetSceneForGen || activeProject.scenes.find(s => s.id === sceneId);
     if (!sceneToGen) return;
+
+    // Update loading state
+    updateActiveProject((prev) => ({
+      scenes: prev.scenes.map(s => {
+        if (s.id === sceneId) return { ...s, [isGenField]: true };
+        return s;
+      })
+    }));
 
     // Check if it's an automatic transition scene and intercept it to prevent real drawing
     if (sceneId.startsWith("scene_transition_")) {
@@ -1946,6 +1987,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           return s;
         })
       }));
+
+      // Archive newly generated image
+      archiveAsset({
+        type: "image",
+        prompt: sceneToGen.visualPrompt,
+        url: data.imageUrl,
+        sceneId,
+        projectId: activeProjectId || undefined,
+        sceneTitle: sceneToGen.title,
+        score: 100, // default high score, will be updated by review if review runs
+        passed: true
+      });
 
       // Automatically trigger AI review after image generation completes!
       setTimeout(() => {
@@ -2131,6 +2184,25 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           setTimeout(() => handleGenerateVideo(sceneId), 1500);
         }
       } else {
+        const isPassed = review.status === "passed";
+        const score = isPassed ? 95 : 60;
+        const targetUrl = mode === 'image' 
+          ? (scene.imageUrlExt || scene.imageUrlKeyframes || scene.imageUrl)
+          : (scene.videoUrlExt || scene.videoUrlKeyframes || scene.videoUrl);
+
+        if (targetUrl) {
+          archiveAsset({
+            type: mode,
+            prompt: scene.visualPrompt,
+            url: targetUrl,
+            score,
+            passed: isPassed,
+            sceneId,
+            projectId: activeProjectId || undefined,
+            sceneTitle: scene.title
+          });
+        }
+
         if (review.status === "passed") {
           showToast(`✅ 分鏡 ${index + 1} 通過 AI 影視級邏輯審核！`, "success");
         } else {
@@ -2503,6 +2575,18 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                       delete videoIntervalsRef.current[sceneId];
                       console.log("[DEBUG] Video URL generated:", statusData.outputPath);
                       
+                      // Archive newly generated video
+                      archiveAsset({
+                        type: "video",
+                        prompt: s.visualPrompt,
+                        url: statusData.outputPath,
+                        sceneId,
+                        projectId: activeProjectId || undefined,
+                        sceneTitle: s.title,
+                        score: 100, // default high score, will be updated by review if review runs
+                        passed: true
+                      });
+
                       // Automatically trigger AI review after video generation completes!
                       setTimeout(() => {
                         handleReviewScene(sceneId, 'video');
@@ -3682,9 +3766,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 4, isReviewingStep4: true } : s)
         }));
 
+        let imageAttemptsList: Array<{ imageUrl: string; score: number; critique: string }> = [];
         let reviewSuccess = false;
         let reviewRetryCount = 0;
-        const maxReviewAttempts = strictWorkflowLock ? 10 : 3;
+        const maxReviewAttempts = strictWorkflowLock ? 10 : 5;
 
         while (!reviewSuccess && reviewRetryCount < maxReviewAttempts) {
           reviewRetryCount++;
@@ -3692,18 +3777,24 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
             const curProj = curProjList.find(p => p.id === activeProjectId);
             const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+            const currentImgUrl = freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes;
 
             const characterObj = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === (freshS.character || "").trim().toLowerCase());
+
+            const prevScene = i > 0 ? (curProj?.scenes[i - 1] || currentScenes[i - 1]) : null;
+            const prevImageUrl = prevScene ? (prevScene[imageField] || prevScene.imageUrl || prevScene.imageUrlKeyframes) : null;
 
             const resReview = await fetch("/api/workflow/review-image", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                imageUrl: freshS[imageField] || freshS.imageUrl || freshS.imageUrlKeyframes,
+                imageUrl: currentImgUrl,
                 visualPrompt: freshS.visualPrompt,
                 characterDescription: characterObj?.description || "",
                 sceneId: scene.id,
-                projectId: activeProjectId
+                projectId: activeProjectId,
+                artStyle: activeProject.artStyle || "",
+                prevImageUrl
               })
             });
 
@@ -3711,61 +3802,159 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
             const reviewData = await resReview.json();
             const score = reviewData.score || 85;
             const text = reviewData.critique || "構圖流暢，首幀角色特徵契合，故事連貫性佳。";
-            const passed = reviewData.passed !== undefined ? reviewData.passed : true;
+            // Dynamic threshold for strict mode: starting at 70, relaxes by 2 points per retry down to 60.
+            const minRequiredScore = Math.max(60, 70 - (reviewRetryCount - 1) * 2);
+            const passed = score >= minRequiredScore;
 
-            if (!passed && strictWorkflowLock) {
-              // Auto-improve prompt if AI provided one
-              if (reviewData.optimizedVisualPrompt) {
-                setFullAutoLogs(prev => [...prev, `✨ [AI 智慧優化] 偵測到畫面邏輯缺陷，正在自動重構並強化提示詞...`]);
+            if (currentImgUrl) {
+              imageAttemptsList.push({ imageUrl: currentImgUrl, score, critique: text });
+            }
+
+            if (strictWorkflowLock) {
+              if (!passed) {
+                // Auto-improve prompt if AI provided one
+                if (reviewData.optimizedVisualPrompt) {
+                  setFullAutoLogs(prev => [...prev, `✨ [AI 智慧優化] 偵測到畫面邏輯缺陷，正在自動重構並強化提示詞...`]);
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      visualPrompt: reviewData.optimizedVisualPrompt
+                    } : s)
+                  }));
+                  
+                  try {
+                    const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const updatedList = curList.map(p => p.id === activeProjectId ? {
+                      ...p,
+                      scenes: p.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        visualPrompt: reviewData.optimizedVisualPrompt
+                      } : s)
+                    } : p);
+                    localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                  } catch(e) {}
+                }
+                throw new Error(`首幀審核未通過（當前分數：${score}/100，本次所需及格線：${minRequiredScore} 分）。建議：${text}`);
+              } else {
+                if (score < 70) {
+                  setFullAutoLogs(prev => [...prev, `✨ [鎖定解套機制] 由於重試 ${reviewRetryCount} 次，首幀容錯及格線已動態調整為 ${minRequiredScore} 分。當前分數：${score}/100，判定為合格通過！`]);
+                }
                 updateActiveProject((prev) => ({
                   scenes: prev.scenes.map(s => s.id === scene.id ? {
                     ...s,
-                    visualPrompt: reviewData.optimizedVisualPrompt
+                    step4ImageReviewScore: score,
+                    step4ImageReviewText: text,
+                    step4Passed: passed,
+                    isReviewingStep4: false,
+                    workflowStep: 4
                   } : s)
                 }));
-                
+
                 try {
                   const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
                   const updatedList = curList.map(p => p.id === activeProjectId ? {
                     ...p,
                     scenes: p.scenes.map(s => s.id === scene.id ? {
                       ...s,
-                      visualPrompt: reviewData.optimizedVisualPrompt
+                      step4ImageReviewScore: score,
+                      step4ImageReviewText: text,
+                      step4Passed: passed
                     } : s)
                   } : p);
                   localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
                 } catch(e) {}
+
+                setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 物理合理性與人物一致性審核通過！分數：${score}/100 (及格線：${minRequiredScore})`]);
+                reviewSuccess = true;
               }
-              throw new Error(`首幀審核未通過（分數：${score}/100）。建議：${text}`);
+            } else {
+              // Lenient mode - 不上鎖
+              if (score >= 75) {
+                setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎯 取得合格品質首幀（分數：${score}/100），直接通過！`]);
+                updateActiveProject((prev) => ({
+                  scenes: prev.scenes.map(s => s.id === scene.id ? {
+                    ...s,
+                    step4ImageReviewScore: score,
+                    step4ImageReviewText: text,
+                    step4Passed: true,
+                    isReviewingStep4: false,
+                    workflowStep: 4
+                  } : s)
+                }));
+                try {
+                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const updatedList = curList.map(p => p.id === activeProjectId ? {
+                    ...p,
+                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      step4ImageReviewScore: score,
+                      step4ImageReviewText: text,
+                      step4Passed: true
+                    } : s)
+                  } : p);
+                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                } catch(e) {}
+                reviewSuccess = true;
+              } else {
+                if (reviewRetryCount < maxReviewAttempts) {
+                  setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 首幀分數偏低 (${score}/100)，自動重新生成第 ${reviewRetryCount + 1} 次以尋找 5 次中之最高分...`]);
+                  await handleGenerateImage(scene.id, 'agnes');
+                  await new Promise<void>((resolve, reject) => {
+                    let checkCount = 0;
+                    const checkImgInterval = setInterval(() => {
+                      checkCount++;
+                      const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                      const curProj = curProjList.find(p => p.id === activeProjectId);
+                      const freshS = curProj?.scenes.find(s => s.id === scene.id);
+                      if (freshS && !freshS[isGenImgField]) {
+                        clearInterval(checkImgInterval);
+                        resolve();
+                      }
+                      if (checkCount > 180) {
+                        clearInterval(checkImgInterval);
+                        reject(new Error("影像生成超時。"));
+                      }
+                    }, 1500);
+                  });
+                } else {
+                  imageAttemptsList.sort((a, b) => b.score - a.score);
+                  const bestAttempt = imageAttemptsList[0] || { imageUrl: currentImgUrl, score, critique: text };
+                  setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🏆 連續 5 次首幀生成與審核完畢。自動選取其中最高分首幀（分數：${bestAttempt.score}/100），即便未達標也強制通過！`]);
+                  
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      [imageField]: bestAttempt.imageUrl,
+                      imageUrlExt: bestAttempt.imageUrl,
+                      imageUrlKeyframes: bestAttempt.imageUrl,
+                      step4ImageReviewScore: bestAttempt.score,
+                      step4ImageReviewText: `${bestAttempt.critique} (不上鎖模式 5 次重試中之最高分強制通過)`,
+                      step4Passed: true,
+                      isReviewingStep4: false,
+                      workflowStep: 4
+                    } : s)
+                  }));
+
+                  try {
+                    const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const updatedList = curList.map(p => p.id === activeProjectId ? {
+                      ...p,
+                      scenes: p.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        [imageField]: bestAttempt.imageUrl,
+                        imageUrlExt: bestAttempt.imageUrl,
+                        imageUrlKeyframes: bestAttempt.imageUrl,
+                        step4ImageReviewScore: bestAttempt.score,
+                        step4ImageReviewText: `${bestAttempt.critique} (不上鎖模式 5 次重試中之最高分強制通過)`,
+                        step4Passed: true
+                      } : s)
+                    } : p);
+                    localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                  } catch(e) {}
+                  reviewSuccess = true;
+                }
+              }
             }
-
-            updateActiveProject((prev) => ({
-              scenes: prev.scenes.map(s => s.id === scene.id ? {
-                ...s,
-                step4ImageReviewScore: score,
-                step4ImageReviewText: text,
-                step4Passed: passed,
-                isReviewingStep4: false,
-                workflowStep: 4
-              } : s)
-            }));
-
-            try {
-              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-              const updatedList = curList.map(p => p.id === activeProjectId ? {
-                ...p,
-                scenes: p.scenes.map(s => s.id === scene.id ? {
-                  ...s,
-                  step4ImageReviewScore: score,
-                  step4ImageReviewText: text,
-                  step4Passed: passed
-                } : s)
-              } : p);
-              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-            } catch(e) {}
-
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 物理合理性與人物一致性審核通過！分數：${score}/100`]);
-            reviewSuccess = true;
           } catch (err: any) {
             setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 步驟 4 首幀審核不通過 (嘗試 ${reviewRetryCount}/${maxReviewAttempts}): ${err.message || err}`]);
             if (reviewRetryCount >= maxReviewAttempts) {
@@ -3774,28 +3963,48 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                 showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 物理審查失敗，已安全暫停。`, "error");
                 throw new Error("STRICT_LOCK_PAUSE");
               } else {
-                updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? {
-                    ...s,
-                    step4ImageReviewScore: 70,
-                    step4ImageReviewText: "（容錯模式強制通過）強制作為合格處理。",
-                    step4Passed: true,
-                    isReviewingStep4: false
-                  } : s)
-                }));
-                try {
-                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                  const updatedList = curList.map(p => p.id === activeProjectId ? {
-                    ...p,
-                    scenes: p.scenes.map(s => s.id === scene.id ? {
+                if (imageAttemptsList.length > 0) {
+                  imageAttemptsList.sort((a, b) => b.score - a.score);
+                  const bestAttempt = imageAttemptsList[0];
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      [imageField]: bestAttempt.imageUrl,
+                      imageUrlExt: bestAttempt.imageUrl,
+                      imageUrlKeyframes: bestAttempt.imageUrl,
+                      step4ImageReviewScore: bestAttempt.score,
+                      step4ImageReviewText: `${bestAttempt.critique} (不上鎖模式最高分強制通過)`,
+                      step4Passed: true,
+                      isReviewingStep4: false
+                    } : s)
+                  }));
+                  try {
+                    const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const updatedList = curList.map(p => p.id === activeProjectId ? {
+                      ...p,
+                      scenes: p.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        [imageField]: bestAttempt.imageUrl,
+                        imageUrlExt: bestAttempt.imageUrl,
+                        imageUrlKeyframes: bestAttempt.imageUrl,
+                        step4ImageReviewScore: bestAttempt.score,
+                        step4ImageReviewText: `${bestAttempt.critique} (不上鎖模式最高分強制通過)`,
+                        step4Passed: true
+                      } : s)
+                    } : p);
+                    localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                  } catch(e) {}
+                } else {
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
                       ...s,
                       step4ImageReviewScore: 70,
                       step4ImageReviewText: "（容錯模式強制通過）強制作為合格處理。",
-                      step4Passed: true
+                      step4Passed: true,
+                      isReviewingStep4: false
                     } : s)
-                  } : p);
-                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-                } catch(e) {}
+                  }));
+                }
                 reviewSuccess = true;
               }
             } else {
@@ -3814,12 +4023,26 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                     }
                   }, 2000);
                 });
+              } else {
+                await new Promise(r => setTimeout(r, 1000));
+                await handleGenerateImage(scene.id, 'agnes');
+                await new Promise<void>((resolve) => {
+                  const checkImgInterval = setInterval(() => {
+                    const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const curProj = curProjList.find(p => p.id === activeProjectId);
+                    const freshS = curProj?.scenes.find(s => s.id === scene.id);
+                    if (freshS && !freshS[isGenImgField]) {
+                      clearInterval(checkImgInterval);
+                      resolve();
+                    }
+                  }, 2000);
+                });
               }
-              await new Promise(r => setTimeout(r, 1000));
             }
           }
         }
       }
+
 
       // =========================================================================
       // STEP 5: 用戶確認所有首幀
@@ -3845,9 +4068,10 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
           scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 6 } : s)
         }));
 
+        let videoAttemptsList: Array<{ videoUrl: string; score: number; critique: string }> = [];
         let videoSuccess = false;
         let vidRetryCount = 0;
-        const maxVidAttempts = strictWorkflowLock ? 10 : 3;
+        const maxVidAttempts = strictWorkflowLock ? 10 : 5;
 
         while (!videoSuccess && vidRetryCount < maxVidAttempts) {
           vidRetryCount++;
@@ -3896,23 +4120,192 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
             const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
             const curProj = curProjList.find(p => p.id === activeProjectId);
-            const freshS = curProj?.scenes.find(s => s.id === scene.id);
+            const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
+            const currentVidUrl = freshS[videoField];
 
-            if (freshS && freshS[videoField]) {
-              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 影片分鏡合成渲染成功！`]);
-              videoSuccess = true;
+            if (freshS && currentVidUrl) {
+              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 影片分鏡合成渲染成功！正在進行 AI 影片品質與鏡頭運動審核...`]);
+              
+              // Run Video Quality Review
+              const previousScene = i > 0 ? currentScenes[i - 1] : null;
+              const resReview = await fetch("/api/workflow/review-video", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  scene: freshS,
+                  previousScene,
+                  customApiKey: customApiKey || undefined,
+                  artStyle: activeProject.artStyle || ""
+                })
+              });
+
+              if (!resReview.ok) throw new Error("影片審核 API 響應錯誤");
+              const reviewData = await resReview.json();
+              const score = reviewData.score || 85;
+              const text = reviewData.critique || "影片流暢度極高，運鏡自然銜接。";
+              
+              // Dynamic threshold for strict mode: starting at 70, relaxes by 2 points per retry down to 60.
+              const minRequiredScore = Math.max(60, 70 - (vidRetryCount - 1) * 2);
+              const passed = score >= minRequiredScore;
+
+              videoAttemptsList.push({ videoUrl: currentVidUrl, score, critique: text });
+
+              if (strictWorkflowLock) {
+                if (!passed) {
+                  throw new Error(`影片審核未通過（當前分數：${score}/100，本次所需及格線：${minRequiredScore} 分）。建議：${text}`);
+                } else {
+                  if (score < 70) {
+                    setFullAutoLogs(prev => [...prev, `✨ [鎖定解套機制] 由於重試 ${vidRetryCount} 次，影片容錯及格線已動態調整為 ${minRequiredScore} 分。當前分數：${score}/100，判定為合格通過！`]);
+                  }
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      step6VideoReviewScore: score,
+                      step6VideoReviewText: text,
+                      step6Passed: passed,
+                      workflowStep: 6
+                    } : s)
+                  }));
+
+                  try {
+                    const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const updatedList = curList.map(p => p.id === activeProjectId ? {
+                      ...p,
+                      scenes: p.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        step6VideoReviewScore: score,
+                        step6VideoReviewText: text,
+                        step6Passed: passed
+                      } : s)
+                    } : p);
+                    localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                  } catch(e) {}
+
+                  setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 影片品質與連續性審核通過！分數：${score}/100 (及格線：${minRequiredScore})`]);
+                  videoSuccess = true;
+                }
+              } else {
+                // Lenient mode - 不上鎖
+                if (score >= 75) {
+                  setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🎯 取得合格影片畫面（分數：${score}/100），直接通過！`]);
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      step6VideoReviewScore: score,
+                      step6VideoReviewText: text,
+                      step6Passed: true,
+                      workflowStep: 6
+                    } : s)
+                  }));
+                  try {
+                    const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const updatedList = curList.map(p => p.id === activeProjectId ? {
+                      ...p,
+                      scenes: p.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        step6VideoReviewScore: score,
+                        step6VideoReviewText: text,
+                        step6Passed: true
+                      } : s)
+                    } : p);
+                    localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                  } catch(e) {}
+                  videoSuccess = true;
+                } else {
+                  if (vidRetryCount < maxVidAttempts) {
+                    setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 影片分數偏低 (${score}/100)，自動重新生成第 ${vidRetryCount + 1} 次以尋找 5 次中之最高分...`]);
+                    // No extra actions needed as the loop will naturally trigger handleGenerateVideo again
+                  } else {
+                    videoAttemptsList.sort((a, b) => b.score - a.score);
+                    const bestAttempt = videoAttemptsList[0] || { videoUrl: currentVidUrl, score, critique: text };
+                    setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] 🏆 連續 5 次影片生成與審核完畢。自動選取其中最高分影片（分數：${bestAttempt.score}/100），即便未達標也強制通過！`]);
+                    
+                    updateActiveProject((prev) => ({
+                      scenes: prev.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        [videoField]: bestAttempt.videoUrl,
+                        videoUrlExt: bestAttempt.videoUrl,
+                        videoUrlKeyframes: bestAttempt.videoUrl,
+                        step6VideoReviewScore: bestAttempt.score,
+                        step6VideoReviewText: `${bestAttempt.critique} (不上鎖模式 5 次重試中之最高分強制通過)`,
+                        step6Passed: true,
+                        workflowStep: 6
+                      } : s)
+                    }));
+
+                    try {
+                      const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                      const updatedList = curList.map(p => p.id === activeProjectId ? {
+                        ...p,
+                        scenes: p.scenes.map(s => s.id === scene.id ? {
+                          ...s,
+                          [videoField]: bestAttempt.videoUrl,
+                          videoUrlExt: bestAttempt.videoUrl,
+                          videoUrlKeyframes: bestAttempt.videoUrl,
+                          step6VideoReviewScore: bestAttempt.score,
+                          step6VideoReviewText: `${bestAttempt.critique} (不上鎖模式 5 次重試中之最高分強制通過)`,
+                          step6Passed: true
+                        } : s)
+                      } : p);
+                      localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                    } catch(e) {}
+                    videoSuccess = true;
+                  }
+                }
+              }
             } else {
               throw new Error("影片網址映射錯誤");
             }
           } catch (vidErr: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 影片生成失敗 (嘗試 ${vidRetryCount}/${maxVidAttempts}): ${vidErr.message || vidErr}`]);
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 影片生成或審核失敗 (嘗試 ${vidRetryCount}/${maxVidAttempts}): ${vidErr.message || vidErr}`]);
             if (vidRetryCount >= maxVidAttempts) {
               if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格安全鎖防護] 鏡頭 ${i + 1} 影片合成連續出錯達 10 次上限，全自動製片暫停！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片生成連續失敗，工作流暫停。`, "error");
+                setFullAutoLogs(prev => [...prev, `🛑 [嚴格安全鎖防護] 鏡頭 ${i + 1} 影片合成或審查未通過，工作流中斷，等待手動調整！`]);
+                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 影片合成或審查失敗，已安全暫停。`, "error");
                 throw new Error("STRICT_LOCK_PAUSE");
               } else {
-                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 影片合成失敗，自動繞過...`]);
+                if (videoAttemptsList.length > 0) {
+                  videoAttemptsList.sort((a, b) => b.score - a.score);
+                  const bestAttempt = videoAttemptsList[0];
+                  setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 影片渲染失敗，自動套用 5 次生成中評分最高的一組（分數：${bestAttempt.score}/100）並強行通過...`]);
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      [videoField]: bestAttempt.videoUrl,
+                      videoUrlExt: bestAttempt.videoUrl,
+                      videoUrlKeyframes: bestAttempt.videoUrl,
+                      step6VideoReviewScore: bestAttempt.score,
+                      step6VideoReviewText: `${bestAttempt.critique} (不上鎖模式最高分強制通過)`,
+                      step6Passed: true
+                    } : s)
+                  }));
+                  try {
+                    const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                    const updatedList = curList.map(p => p.id === activeProjectId ? {
+                      ...p,
+                      scenes: p.scenes.map(s => s.id === scene.id ? {
+                        ...s,
+                        [videoField]: bestAttempt.videoUrl,
+                        videoUrlExt: bestAttempt.videoUrl,
+                        videoUrlKeyframes: bestAttempt.videoUrl,
+                        step6VideoReviewScore: bestAttempt.score,
+                        step6VideoReviewText: `${bestAttempt.critique} (不上鎖模式最高分強制通過)`,
+                        step6Passed: true
+                      } : s)
+                    } : p);
+                    localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
+                  } catch(e) {}
+                } else {
+                  setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 影片合成失敗，無任何有效嘗試，強制作為合格處理。`]);
+                  updateActiveProject((prev) => ({
+                    scenes: prev.scenes.map(s => s.id === scene.id ? {
+                      ...s,
+                      step6VideoReviewScore: 70,
+                      step6VideoReviewText: "（容錯模式強制通過）強制作為合格處理。",
+                      step6Passed: true
+                    } : s)
+                  }));
+                }
                 videoSuccess = true;
               }
             } else {
@@ -3922,72 +4315,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
         }
       }
 
-      // =========================================================================
-      // STEP 7: 總結 + 下鏡頭建議（自動更新尾幀）
-      // =========================================================================
-      setFullAutoLogs(prev => [...prev, "🎬 [步驟 7] AI 正在為所有鏡頭進行畫面連續性特徵傳導分析、總結與更新下鏡頭建議..."]);
-      for (let i = 0; i < currentScenes.length; i++) {
-        const scene = currentScenes[i];
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 7, isGeneratingStep7: true } : s)
-        }));
 
-        try {
-          const nextScene = i < currentScenes.length - 1 ? currentScenes[i + 1] : null;
-          const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-          const curProj = curProjList.find(p => p.id === activeProjectId);
-          const freshS = curProj?.scenes.find(s => s.id === scene.id) || scene;
-
-          const resAdvice = await fetch("/api/workflow/generate-step7-advice", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              currentScene: freshS,
-              nextScene,
-              customApiKey: customApiKey || undefined
-            })
-          });
-
-          if (resAdvice.ok) {
-            const adviceData = await resAdvice.json();
-            const advice = adviceData.advice || "維持上一分鏡中主角與背景之色彩與基調。";
-            updateActiveProject((prev) => ({
-              scenes: prev.scenes.map(s => s.id === scene.id ? {
-                ...s,
-                step7AdviceForNext: advice,
-                isGeneratingStep7: false,
-                workflowStep: 7
-              } : s)
-            }));
-            
-            try {
-              const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-              const updatedList = curList.map(p => p.id === activeProjectId ? {
-                ...p,
-                scenes: p.scenes.map(s => s.id === scene.id ? { ...s, step7AdviceForNext: advice } : s)
-              } : p);
-              localStorage.setItem("toonflow_projects", JSON.stringify(updatedList));
-            } catch(e) {}
-
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 步驟 7/7 連續性對齊建議已完美生成：${advice}`]);
-          } else {
-            throw new Error("連續性分析 API 響應錯誤");
-          }
-        } catch (adviceErr: any) {
-          console.warn("Advice generation failed, using fallback:", adviceErr);
-          const fallbackAdvice = "維持上一分鏡角色一致服飾與氛圍。";
-          updateActiveProject((prev) => ({
-            scenes: prev.scenes.map(s => s.id === scene.id ? {
-              ...s,
-              step7AdviceForNext: fallbackAdvice,
-              isGeneratingStep7: false,
-              workflowStep: 7
-            } : s)
-          }));
-        }
-      }
-
-      // Proceed to Step 7
 
 
       // =========================================================================
@@ -7054,6 +7382,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 fullAutoLogs={fullAutoLogs}
                                 onFullAutoProduce={handleFullAutoVideoProduction}
                                 sceneType="standard"
+                                strictWorkflowLock={strictWorkflowLock}
                               />
                             </div>
                           );
@@ -7321,6 +7650,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 fullAutoLogs={fullAutoLogs}
                                 onFullAutoProduce={handleFullAutoVideoProduction}
                                 sceneType="ext"
+                                strictWorkflowLock={strictWorkflowLock}
                               />
                             </div>
                           );
@@ -7737,6 +8067,7 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
                                 fullAutoLogs={fullAutoLogs}
                                 onFullAutoProduce={handleFullAutoVideoProduction}
                                 sceneType="keyframes"
+                                strictWorkflowLock={strictWorkflowLock}
                               />
                             </div>
                           );
