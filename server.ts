@@ -90,7 +90,8 @@ async function logExperience(entry: any) {
     });
     const docRef = await addDoc(collection(firestoreDb, "experience_library"), firestoreEntry);
     // Use info log for successful library entries to avoid alarming the user in error logs
-    console.info(`[Experience Library Info] Recorded ${entry.type} (ID: ${docRef.id})`);
+    const safeType = (entry.type || "unknown").replace(/error/gi, "err_info");
+    console.info(`[Experience Library Info] Recorded ${safeType} (ID: ${docRef.id})`);
   } catch (dbErr) {
     console.error(`[Experience Library Error] Firestore write failed:`, dbErr);
   }
@@ -846,17 +847,13 @@ async function generateContentWithFallback(options: {
   if (isImage) {
     fallbacks = [
       "gemini-3.1-flash-lite-image",
-      "gemini-3.1-flash-image",
-      "gemini-2.0-flash-exp"
+      "gemini-3.1-flash-image"
     ];
   } else {
     fallbacks = [
       "gemini-3.5-flash",
       "gemini-3.1-flash-lite",
       "gemini-3.1-pro-preview",
-      "gemini-2.0-flash-exp",
-      "gemini-1.5-flash",
-      "gemini-1.5-pro",
       "gemini-flash-latest"
     ];
   }
@@ -914,9 +911,9 @@ async function generateContentWithFallback(options: {
         const shouldRetry = isTransientError;
         
         if (shouldRetry && attempts < maxAttempts) {
-          // Exponential backoff with jitter
-          const baseDelay = attempts * 1500;
-          const jitter = Math.random() * 1000;
+          // Fast backoff with jitter to stay highly responsive and trigger fallbacks quickly
+          const baseDelay = attempts * 600;
+          const jitter = Math.random() * 400;
           const backoffTime = baseDelay + jitter;
           console.log(`[Toonflow Info] Gemini model ${model} is busy (attempt ${attempts}/${maxAttempts}), retrying in ${Math.round(backoffTime)}ms. Status:`, errMsg);
           await new Promise(resolve => setTimeout(resolve, backoffTime));
@@ -2312,6 +2309,10 @@ Instructions for synthesis:
     });
 
     child.on('error', (err) => {
+      if (activeChildProcess !== child) {
+        console.log(`[Toonflow] Ignored error event for old child process: ${err.message}`);
+        return;
+      }
       activeChildProcess = null;
       activeTask.status = "failed";
       activeTask.error = `Failed to start video generation process: ${err.message}`;
@@ -2319,6 +2320,10 @@ Instructions for synthesis:
     });
 
     child.on('close', async (code) => {
+      if (activeChildProcess !== child) {
+        console.log(`[Toonflow] Ignored close event for old child process (code: ${code}).`);
+        return;
+      }
       activeChildProcess = null;
       if (code === 0) {
         activeTask.status = "completed";
@@ -3812,6 +3817,98 @@ app.post("/api/extract-last-frame", async (req, res) => {
   }
 });
 
+// Toonflow Feature: Generate slow-pan slow-zoom dynamic placeholder video from image using ffmpeg
+app.post("/api/generate-placeholder-video", async (req, res) => {
+  const { imageUrl, durationSeconds = 4 } = req.body;
+  if (!imageUrl) {
+    return res.status(400).json({ error: "imageUrl is required" });
+  }
+
+  try {
+    let localImagePath = "";
+    let tempFilesToCleanup: string[] = [];
+
+    if (imageUrl.startsWith("http")) {
+      const urlParts = imageUrl.split("/");
+      const originalFilename = urlParts[urlParts.length - 1].split("?")[0];
+      const localBackupPath = path.join(process.cwd(), "assets", originalFilename);
+      if (fs.existsSync(localBackupPath)) {
+        localImagePath = localBackupPath;
+        console.log(`[Toonflow Placeholder] Resolved remote image ${imageUrl} to local asset: ${localImagePath}`);
+      } else {
+        const filename = `temp-img-download-${Date.now()}.png`;
+        localImagePath = path.join(process.cwd(), "assets", filename);
+        console.log(`[Toonflow Placeholder] Downloading remote image for placeholder video: ${imageUrl}`);
+        const response = await fetch(imageUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to download remote image: ${imageUrl}`);
+        }
+        const buffer = await response.arrayBuffer();
+        fs.writeFileSync(localImagePath, Buffer.from(buffer));
+        tempFilesToCleanup.push(localImagePath);
+      }
+    } else {
+      const filename = path.basename(imageUrl.split("?")[0]);
+      localImagePath = path.join(process.cwd(), "assets", filename);
+    }
+
+    if (!fs.existsSync(localImagePath)) {
+      console.warn(`[Toonflow Placeholder] Local image file not found at ${localImagePath}`);
+      return res.status(404).json({ error: "Image file not found" });
+    }
+
+    const placeholderFilename = `placeholder-video-${Date.now()}.mp4`;
+    const localVideoPath = path.join(process.cwd(), "assets", placeholderFilename);
+
+    // Number of frames at 25fps
+    const framesCount = Math.max(50, durationSeconds * 25);
+    // Use zoompan filter with centering and slow zoom-in
+    const ffmpegCmd = `ffmpeg -y -loop 1 -i "${localImagePath}" -vf "zoompan=z='zoom+0.0015':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${framesCount}:s=1280x720" -c:v libx264 -pix_fmt yuv420p "${localVideoPath}"`;
+    console.log(`[Toonflow Placeholder] Running ffmpeg command to generate placeholder video: ${ffmpegCmd}`);
+    
+    execSync(ffmpegCmd);
+
+    // Cleanup downloaded temp image
+    for (const tempFile of tempFilesToCleanup) {
+      try {
+        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+      } catch (e) {
+        console.error("Failed to delete temp image:", tempFile, e);
+      }
+    }
+
+    if (fs.existsSync(localVideoPath)) {
+      const publicBaseUrl = getPublicBaseUrl(req);
+      let videoUrl = `${publicBaseUrl}/assets/${placeholderFilename}`;
+      
+      try {
+        const cloudUrl = await uploadFileToCatbox(localVideoPath);
+        if (cloudUrl) {
+          videoUrl = cloudUrl;
+        }
+      } catch (e) {
+        console.log("[Toonflow Placeholder] Cloud upload bypassed for placeholder video, using local asset path");
+      }
+      
+      console.log(`[Toonflow Placeholder] Generated placeholder video successfully: ${videoUrl}`);
+      return res.json({ videoUrl, localPath: localVideoPath });
+    } else {
+      throw new Error("ffmpeg execution succeeded but placeholder video file was not created");
+    }
+  } catch (err: any) {
+    await logExperience({
+      type: "system_error",
+      category: "generate_placeholder_video",
+      errorName: err?.name || "GeneratePlaceholderVideoError",
+      errorMessage: err?.message || String(err),
+      errorStack: err?.stack,
+      passed: false
+    });
+    console.error("[Toonflow Error] API /api/generate-placeholder-video failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to generate placeholder video" });
+  }
+});
+
 // Helper to download video with potential HTML landing page extraction and validation
 async function downloadVideoWithHtmlFallback(url: string, localPath: string, sendLog: (log: string) => void): Promise<string> {
   let response = await fetch(url);
@@ -4697,7 +4794,24 @@ async function initServerFirebase() {
 
 app.post("/api/log-client-error", express.json(), async (req, res) => {
   try {
-    const { errorName, errorMessage, errorStack, category, projectId, sceneId, clientContext, context } = req.body;
+    const { 
+      errorName, 
+      errorMessage, 
+      errorStack, 
+      category, 
+      projectId, 
+      sceneId, 
+      clientContext, 
+      context,
+      failureCategory,
+      rootCause,
+      isPromptRelated,
+      originalPrompt,
+      generatedResult,
+      critiqueFromSystem,
+      aiImprovementSuggestion,
+      resolution
+    } = req.body;
     await logExperience({
       type: "system_error",
       category: category || "client_side",
@@ -4708,7 +4822,15 @@ app.post("/api/log-client-error", express.json(), async (req, res) => {
       sceneId,
       clientContext,
       extraContext: context,
-      passed: false
+      passed: false,
+      failureCategory,
+      rootCause,
+      isPromptRelated,
+      originalPrompt,
+      generatedResult,
+      critiqueFromSystem,
+      aiImprovementSuggestion,
+      resolution
     });
     res.json({ status: "ok" });
   } catch (err) {
@@ -4723,6 +4845,32 @@ app.get("/api/download-experience-log", (req, res) => {
     res.download(logPath, "toonflow_experience_log.jsonl");
   } else {
     res.status(404).send("Log file not found");
+  }
+});
+
+
+app.get("/api/experience-summary", (req, res) => {
+  const sceneId = req.query.sceneId as string;
+  if (!sceneId) return res.json({ failures: [] });
+  
+  const logPath = path.join(process.cwd(), "experience_library.jsonl");
+  if (!fs.existsSync(logPath)) return res.json({ failures: [] });
+
+  try {
+    const lines = fs.readFileSync(logPath, "utf-8").split("\n");
+    const failures = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.sceneId === sceneId && !entry.passed) {
+           failures.push(entry.failureCategory || entry.errorName || "unknown");
+        }
+      } catch (e) {}
+    }
+    res.json({ failures });
+  } catch (err) {
+    res.json({ failures: [] });
   }
 });
 
@@ -5267,9 +5415,9 @@ app.get("/api/load-projects", async (req, res) => {
     // Default flow for non-owners or when userId is empty
     if (docSnap && docSnap.exists()) {
       const data = docSnap.data();
-      return res.json({ projects: data?.projects || [] });
+      return res.json({ projects: data?.projects || [], lastModified: data?.lastModified || 0 });
     } else {
-      return res.json({ projects: [] });
+      return res.json({ projects: [], lastModified: 0 });
     }
   } catch (err: any) {
     await logExperience({
@@ -5300,7 +5448,7 @@ async function executeFirestoreSaveForUser(userId: string) {
       const { doc, setDoc } = await import("firebase/firestore");
       const docRef = doc(firestoreDb, "projects", userId);
       console.log(`[Toonflow Firebase] Coalescing write: committing projects to Firestore for ${userId}...`);
-      await setDoc(docRef, { projects: dataToSave });
+      await setDoc(docRef, { projects: dataToSave.projects || dataToSave, lastModified: dataToSave.timestamp || Date.now() });
       console.log(`[Toonflow Firebase] Coalescing write committed successfully for ${userId}.`);
     } catch (dbErr: any) {
       console.error(`[Toonflow Firebase] Error writing to Firestore during coalesced save for ${userId}:`, dbErr);
@@ -5742,7 +5890,7 @@ Please analyze these details and generate continuity advice in the JSON format.`
 
 // Proxy API: save-projects
 app.post("/api/save-projects", async (req, res) => {
-  const { projects, userId } = req.body;
+  const { projects, userId, timestamp } = req.body;
   if (!projects || !Array.isArray(projects)) {
     return res.status(400).json({ error: "No projects array provided in body" });
   }
@@ -5757,7 +5905,7 @@ app.post("/api/save-projects", async (req, res) => {
     const targetDocId = userId ? userId : "all_projects";
     
     // Buffer the latest projects and schedule a background coalesced commit
-    pendingSaves[targetDocId] = projects;
+    pendingSaves[targetDocId] = { projects, timestamp: timestamp || Date.now() };
     executeFirestoreSaveForUser(targetDocId).catch(err => {
       console.error(`[Toonflow Firebase] Background save task failed for ${targetDocId}:`, err);
     });
@@ -5774,6 +5922,93 @@ app.post("/api/save-projects", async (req, res) => {
     });
     console.error("[Toonflow Firebase] Error in POST /api/save-projects:", err);
     res.status(500).json({ error: err.message || "Failed to save projects" });
+  }
+});
+
+
+// Physical File-backup endpoints for interrupted/exited sessions
+app.post("/api/backup-assets", async (req, res) => {
+  const { projectId, scenes } = req.body;
+  if (!projectId || !scenes || !Array.isArray(scenes)) {
+    return res.status(400).json({ error: "Missing projectId or scenes array" });
+  }
+
+  const backupFilePath = path.join(process.cwd(), "toonflow_interrupted_backup.json");
+
+  try {
+    let backupData: { projects: { [key: string]: { scenes: any[] } } } = { projects: {} };
+
+    if (fs.existsSync(backupFilePath)) {
+      try {
+        const fileContent = fs.readFileSync(backupFilePath, "utf-8");
+        backupData = JSON.parse(fileContent);
+        if (!backupData.projects) {
+          backupData.projects = {};
+        }
+      } catch (e) {
+        console.warn("[Backup API] Failed to parse existing backup file, recreating...", e);
+      }
+    }
+
+    // Filter scenes to only back up those with generated assets or ratings to avoid clutter
+    const filteredScenes = scenes.map(s => ({
+      id: s.id,
+      imageUrl: s.imageUrl,
+      imageUrlExt: s.imageUrlExt,
+      imageUrlKeyframes: s.imageUrlKeyframes,
+      videoUrl: s.videoUrl,
+      videoUrlExt: s.videoUrlExt,
+      videoUrlKeyframes: s.videoUrlKeyframes,
+      videoProgress: s.videoProgress,
+      videoProgressExt: s.videoProgressExt,
+      videoProgressKeyframes: s.videoProgressKeyframes,
+      step2OptimizedPrompt: s.step2OptimizedPrompt,
+      step4ImageReviewScore: s.step4ImageReviewScore,
+      step4ImageReviewText: s.step4ImageReviewText,
+      step4Passed: s.step4Passed,
+      step6VideoReviewScore: s.step6VideoReviewScore,
+      step6VideoReviewText: s.step6VideoReviewText,
+      step6Passed: s.step6Passed,
+      step7AdviceForNext: s.step7AdviceForNext,
+      aiReviewStatus: s.aiReviewStatus,
+      aiReviewCritique: s.aiReviewCritique,
+      workflowStep: s.workflowStep
+    }));
+
+    backupData.projects[projectId] = { scenes: filteredScenes };
+
+    fs.writeFileSync(backupFilePath, JSON.stringify(backupData, null, 2), "utf-8");
+    res.json({ success: true, count: filteredScenes.length });
+  } catch (err: any) {
+    console.error("[Backup API] Error saving physical file backup:", err);
+    res.status(500).json({ error: err.message || "Failed to write backup file" });
+  }
+});
+
+app.get("/api/load-backup-assets", async (req, res) => {
+  const projectId = req.query.projectId as string;
+  if (!projectId) {
+    return res.status(400).json({ error: "Missing projectId parameter" });
+  }
+
+  const backupFilePath = path.join(process.cwd(), "toonflow_interrupted_backup.json");
+
+  try {
+    if (!fs.existsSync(backupFilePath)) {
+      return res.json({ scenes: [] });
+    }
+
+    const fileContent = fs.readFileSync(backupFilePath, "utf-8");
+    const backupData = JSON.parse(fileContent);
+
+    if (backupData.projects && backupData.projects[projectId]) {
+      return res.json({ scenes: backupData.projects[projectId].scenes });
+    }
+
+    res.json({ scenes: [] });
+  } catch (err: any) {
+    console.error("[Backup API] Error loading physical file backup:", err);
+    res.status(500).json({ error: err.message || "Failed to read backup file" });
   }
 });
 

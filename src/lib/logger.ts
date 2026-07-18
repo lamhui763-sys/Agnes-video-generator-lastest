@@ -6,6 +6,14 @@ export interface LogEntry {
   projectId?: string;
   sceneId?: string;
   context?: any;
+  failureCategory?: string;
+  rootCause?: string;
+  isPromptRelated?: boolean;
+  originalPrompt?: string;
+  generatedResult?: string;
+  critiqueFromSystem?: string;
+  aiImprovementSuggestion?: string;
+  resolution?: string;
 }
 
 export async function logToExperienceLibrary(log: LogEntry) {

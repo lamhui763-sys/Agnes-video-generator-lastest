@@ -21,12 +21,27 @@ import {
   FileJson
 } from "lucide-react";
 import clsx from "clsx";
+import FailureRecordLibrary from "./FailureRecordLibrary";
 
-export default function ExperienceLibrary() {
+interface ExperienceLibraryProps {
+  activeProjectId?: string;
+  scenes?: any[];
+  onApplySuggestion?: (sceneId: string, newPrompt: string) => void;
+}
+
+export default function ExperienceLibrary({ activeProjectId, scenes = [], onApplySuggestion }: ExperienceLibraryProps) {
   const [entries, setEntries] = useState<ExperienceEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "review" | "error">("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selectedSceneId, setSelectedSceneId] = useState<string>(scenes[0]?.id || "");
+
+  // Update selected scene if scenes load
+  useEffect(() => {
+    if (scenes && scenes.length > 0 && !selectedSceneId) {
+      setSelectedSceneId(scenes[0].id);
+    }
+  }, [scenes]);
 
   useEffect(() => {
     fetchEntries();
@@ -184,203 +199,242 @@ export default function ExperienceLibrary() {
         </div>
       </div>
 
-      <div className="space-y-4">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-20 space-y-4">
-            <div className="w-12 h-12 border-4 border-orange-500/20 border-t-orange-500 rounded-full animate-spin"></div>
-            <p className="text-slate-500 font-mono text-sm">正在載入經驗數據...</p>
-          </div>
-        ) : groupedEntries.length === 0 ? (
-          <div className="bg-slate-900/40 border border-dashed border-slate-800 rounded-2xl p-12 text-center">
-            <AlertTriangle className="w-12 h-12 text-slate-700 mx-auto mb-4" />
-            <p className="text-slate-400 font-medium">目前尚無相關經驗記錄</p>
-            <p className="text-xs text-slate-500 mt-2">當發生錯誤或 AI 審核時，系統會自動記錄並累積在這裡</p>
-          </div>
-        ) : (
-          groupedEntries.map((entry) => (
-            <motion.div
-              key={entry.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className={clsx(
-                "bg-slate-900/60 border rounded-2xl overflow-hidden transition-all duration-300",
-                entry.passed === true ? "border-emerald-900/30 hover:border-emerald-500/30" : 
-                (entry.type.includes("error") || entry.technical_failure) ? "border-red-900/40 hover:border-red-500/40" : "border-orange-900/30 hover:border-orange-500/30"
-              )}
-            >
-              <div 
-                className="p-5 cursor-pointer flex items-center justify-between"
-                onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+        {/* Left Column: Experience Entries (Global Stream) */}
+        <div className="xl:col-span-2 space-y-4">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-20 space-y-4">
+              <div className="w-12 h-12 border-4 border-orange-500/20 border-t-orange-500 rounded-full animate-spin"></div>
+              <p className="text-slate-500 font-mono text-sm">正在載入經驗數據...</p>
+            </div>
+          ) : groupedEntries.length === 0 ? (
+            <div className="bg-slate-900/40 border border-dashed border-slate-800 rounded-2xl p-12 text-center">
+              <AlertTriangle className="w-12 h-12 text-slate-700 mx-auto mb-4" />
+              <p className="text-slate-400 font-medium">目前尚無相關經驗記錄</p>
+              <p className="text-xs text-slate-500 mt-2">當發生錯誤或 AI 審核時，系統會自動記錄並累積在這裡</p>
+            </div>
+          ) : (
+            groupedEntries.map((entry) => (
+              <motion.div
+                key={entry.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={clsx(
+                  "bg-slate-900/60 border rounded-2xl overflow-hidden transition-all duration-300",
+                  entry.passed === true ? "border-emerald-900/30 hover:border-emerald-500/30" : 
+                  (entry.type.includes("error") || entry.technical_failure) ? "border-red-900/40 hover:border-red-500/40" : "border-orange-900/30 hover:border-orange-500/30"
+                )}
               >
-                <div className="flex items-center gap-4">
-                  <div className={clsx(
-                    "w-10 h-10 rounded-full flex items-center justify-center shadow-inner",
-                    entry.passed === true ? "bg-emerald-500/10 text-emerald-400" : 
-                    entry.type.includes("error") || entry.technical_failure ? "bg-red-500/10 text-red-400" : "bg-orange-500/10 text-orange-400"
-                  )}>
-                    {getIcon(entry.type, entry.passed, entry.technical_failure)}
+                <div 
+                  className="p-5 cursor-pointer flex items-center justify-between"
+                  onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className={clsx(
+                      "w-10 h-10 rounded-full flex items-center justify-center shadow-inner",
+                      entry.passed === true ? "bg-emerald-500/10 text-emerald-400" : 
+                      entry.type.includes("error") || entry.technical_failure ? "bg-red-500/10 text-red-400" : "bg-orange-500/10 text-orange-400"
+                    )}>
+                      {getIcon(entry.type, entry.passed, entry.technical_failure)}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono text-slate-500">[{getTypeName(entry.type, entry.technical_failure)}]</span>
+                        <span className="text-sm font-bold text-slate-200">
+                          {entry.passed === true ? "審核通過" : 
+                           entry.type.includes("error") ? `${entry.errorName || '錯誤'}` : 
+                           entry.technical_failure ? "作圖異常" : "審核不通過"}
+                          {entry.score !== undefined && ` (分數: ${entry.score})`}
+                        </span>
+                        {entry.count && entry.count > 1 && (
+                          <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-2 py-0.5 rounded-full ml-2">
+                            連續失敗 {entry.count} 次
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">{new Date(entry.timestamp).toLocaleString()}</p>
+                    </div>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-mono text-slate-500">[{getTypeName(entry.type, entry.technical_failure)}]</span>
-                      <span className="text-sm font-bold text-slate-200">
-                        {entry.passed === true ? "審核通過" : 
-                         entry.type.includes("error") ? `${entry.errorName || '錯誤'}` : 
-                         entry.technical_failure ? "作圖異常" : "審核不通過"}
-                        {entry.score !== undefined && ` (分數: ${entry.score})`}
-                      </span>
-                      {entry.count && entry.count > 1 && (
-                        <span className="bg-red-500/20 text-red-400 text-[10px] font-bold px-2 py-0.5 rounded-full ml-2">
-                          連續失敗 {entry.count} 次
+                  
+                  <div className="flex items-center gap-4">
+                    <div className="text-right hidden md:block">
+                      {entry.category && (
+                        <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full mr-2">
+                          {entry.category}
                         </span>
                       )}
+                      <span className="text-[10px] text-slate-600 font-mono uppercase tracking-tighter">ID: {entry.id.slice(0, 8)}</span>
                     </div>
-                    <p className="text-xs text-slate-500 mt-0.5">{new Date(entry.timestamp).toLocaleString()}</p>
+                    {expandedId === entry.id ? <ChevronUp className="w-5 h-5 text-slate-500" /> : <ChevronDown className="w-5 h-5 text-slate-500" />}
                   </div>
                 </div>
-                
-                <div className="flex items-center gap-4">
-                  <div className="text-right hidden md:block">
-                    {entry.category && (
-                      <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full mr-2">
-                        {entry.category}
-                      </span>
-                    )}
-                    <span className="text-[10px] text-slate-600 font-mono uppercase tracking-tighter">ID: {entry.id.slice(0, 8)}</span>
-                  </div>
-                  {expandedId === entry.id ? <ChevronUp className="w-5 h-5 text-slate-500" /> : <ChevronDown className="w-5 h-5 text-slate-500" />}
-                </div>
-              </div>
 
-              <AnimatePresence>
-                {expandedId === entry.id && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    className="border-t border-slate-800/50 bg-slate-950/40"
-                  >
-                    <div className="p-6 space-y-6">
-                      {entry.type.includes("error") ? (
-                        <div className="space-y-4">
-                          <div className="space-y-2">
-                            <p className="text-[10px] text-orange-400 font-mono uppercase font-bold flex items-center gap-1">
-                              <Bug className="w-3 h-3" /> 錯誤詳情 (Error Detail)
-                            </p>
-                            <div className="bg-orange-500/5 border border-orange-500/20 rounded-xl p-4 text-sm text-orange-200 leading-relaxed italic">
-                              {entry.errorMessage || "無錯誤訊息"}
-                            </div>
-                          </div>
-                          {entry.errorStack && (
+                <AnimatePresence>
+                  {expandedId === entry.id && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="border-t border-slate-800/50 bg-slate-950/40"
+                    >
+                      <div className="p-6 space-y-6">
+                        {entry.type.includes("error") ? (
+                          <div className="space-y-4">
                             <div className="space-y-2">
-                              <p className="text-[10px] text-slate-600 font-mono uppercase font-bold">Stack Trace</p>
-                              <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 text-[10px] text-slate-500 font-mono overflow-x-auto whitespace-pre">
-                                {entry.errorStack}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                          <div className="space-y-2">
-                            <p className="text-[10px] text-red-400 font-mono uppercase font-bold flex items-center gap-1">
-                              <AlertTriangle className="w-3 h-3" /> 審核意見 (Critique)
-                            </p>
-                            <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-4 text-sm text-red-200 leading-relaxed italic">
-                              {entry.critique}
-                            </div>
-                          </div>
-
-                          <div className="space-y-2">
-                            <p className="text-[10px] text-emerald-400 font-mono uppercase font-bold flex items-center gap-1">
-                              <Lightbulb className="w-3 h-3" /> AI 優化提示詞 (Optimized Prompt)
-                            </p>
-                            <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4 text-sm text-emerald-200 leading-relaxed font-mono">
-                              {entry.optimizedPrompt || "無建議優化提示詞"}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {entry.failureCategory && (
-                        <div className="space-y-4 pt-2 border-t border-slate-800/50">
-                          <p className="text-[10px] text-orange-400 font-mono uppercase font-bold flex items-center gap-1">
-                            <Bug className="w-3 h-3" /> 失敗原因分析 (Failure Analysis)
-                          </p>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {entry.failureCategory && (
-                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
-                                <span className="text-[10px] text-slate-500 uppercase block mb-1">錯誤分類</span>
-                                <span className="text-sm text-slate-300">{entry.failureCategory}</span>
-                              </div>
-                            )}
-                            {entry.isPromptRelated !== undefined && (
-                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
-                                <span className="text-[10px] text-slate-500 uppercase block mb-1">是否與提示詞相關</span>
-                                <span className={clsx("text-sm", entry.isPromptRelated ? "text-orange-400" : "text-emerald-400")}>
-                                  {entry.isPromptRelated ? "是 (Prompt Issue)" : "否 (Technical / Model Issue)"}
-                                </span>
-                              </div>
-                            )}
-                            {entry.rootCause && (
-                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
-                                <span className="text-[10px] text-slate-500 uppercase block mb-1">根本原因 (Root Cause)</span>
-                                <span className="text-sm text-slate-300">{entry.rootCause}</span>
-                              </div>
-                            )}
-                            {entry.actualProblem && (
-                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
-                                <span className="text-[10px] text-slate-500 uppercase block mb-1">實際問題 (Actual Problem)</span>
-                                <span className="text-sm text-slate-300">{entry.actualProblem}</span>
-                              </div>
-                            )}
-                            {entry.aiImprovementSuggestion && (
-                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
-                                <span className="text-[10px] text-slate-500 uppercase block mb-1">改善建議 (AI Improvement Suggestion)</span>
-                                <span className="text-sm text-slate-300">{entry.aiImprovementSuggestion}</span>
-                              </div>
-                            )}
-                            {entry.resolution && (
-                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
-                                <span className="text-[10px] text-slate-500 uppercase block mb-1">解決方案 (Resolution)</span>
-                                <span className="text-sm text-emerald-400">{entry.resolution}</span>
-                              </div>
-                            )}
-                            {entry.permanentNote && (
-                              <div className="bg-slate-900 border border-amber-500/20 rounded-lg p-3 md:col-span-2 bg-amber-500/5">
-                                <span className="text-[10px] text-amber-500 uppercase block mb-1">經驗總結 (Permanent Note)</span>
-                                <span className="text-sm text-amber-200 font-bold">{entry.permanentNote}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {(entry.originalPrompt || entry.projectId) && (
-                        <div className="space-y-4 pt-2 border-t border-slate-800/50">
-                          {entry.originalPrompt && (
-                            <div className="space-y-2">
-                              <p className="text-[10px] text-slate-500 font-mono uppercase font-bold flex items-center gap-1">
-                                <Zap className="w-3 h-3" /> 原始提示詞 (Original Prompt)
+                              <p className="text-[10px] text-orange-400 font-mono uppercase font-bold flex items-center gap-1">
+                                <Bug className="w-3 h-3" /> 錯誤詳情 (Error Detail)
                               </p>
-                              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs text-slate-400 font-mono break-all opacity-80">
-                                {entry.originalPrompt}
+                              <div className="bg-orange-500/5 border border-orange-500/20 rounded-xl p-4 text-sm text-orange-200 leading-relaxed italic">
+                                {entry.errorMessage || "無錯誤訊息"}
                               </div>
                             </div>
-                          )}
-                          <div className="flex flex-wrap gap-4 text-[10px] font-mono text-slate-600">
-                            {entry.projectId && <div>PROJECT_ID: {entry.projectId}</div>}
-                            {entry.sceneId && <div>SCENE_ID: {entry.sceneId}</div>}
+                            {entry.errorStack && (
+                              <div className="space-y-2">
+                                <p className="text-[10px] text-slate-600 font-mono uppercase font-bold">Stack Trace</p>
+                                <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 text-[10px] text-slate-500 font-mono overflow-x-auto whitespace-pre">
+                                  {entry.errorStack}
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      )}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.div>
-          ))
-        )}
+                        ) : (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div className="space-y-2">
+                              <p className="text-[10px] text-red-400 font-mono uppercase font-bold flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" /> 審核意見 (Critique)
+                              </p>
+                              <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-4 text-sm text-red-200 leading-relaxed italic">
+                                {entry.critique}
+                              </div>
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-[10px] text-emerald-400 font-mono uppercase font-bold flex items-center gap-1">
+                                <Lightbulb className="w-3 h-3" /> AI 優化提示詞 (Optimized Prompt)
+                              </p>
+                              <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4 text-sm text-emerald-200 leading-relaxed font-mono">
+                                {entry.optimizedPrompt || "無建議優化提示詞"}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {entry.failureCategory && (
+                          <div className="space-y-4 pt-2 border-t border-slate-800/50">
+                            <p className="text-[10px] text-orange-400 font-mono uppercase font-bold flex items-center gap-1">
+                              <Bug className="w-3 h-3" /> 失敗原因分析 (Failure Analysis)
+                            </p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {entry.failureCategory && (
+                                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                                  <span className="text-[10px] text-slate-500 uppercase block mb-1">錯誤分類</span>
+                                  <span className="text-sm text-slate-300">{entry.failureCategory}</span>
+                                </div>
+                              )}
+                              {entry.isPromptRelated !== undefined && (
+                                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                                  <span className="text-[10px] text-slate-500 uppercase block mb-1">是否與提示詞相關</span>
+                                  <span className={clsx("text-sm", entry.isPromptRelated ? "text-orange-400" : "text-emerald-400")}>
+                                    {entry.isPromptRelated ? "是 (Prompt Issue)" : "否 (Technical / Model Issue)"}
+                                  </span>
+                                </div>
+                              )}
+                              {entry.rootCause && (
+                                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
+                                  <span className="text-[10px] text-slate-500 uppercase block mb-1">根本原因 (Root Cause)</span>
+                                  <span className="text-sm text-slate-300">{entry.rootCause}</span>
+                                </div>
+                              )}
+                              {entry.actualProblem && (
+                                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
+                                  <span className="text-[10px] text-slate-500 uppercase block mb-1">實際問題 (Actual Problem)</span>
+                                  <span className="text-sm text-slate-300">{entry.actualProblem}</span>
+                                </div>
+                              )}
+                              {entry.aiImprovementSuggestion && (
+                                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
+                                  <span className="text-[10px] text-slate-500 uppercase block mb-1">改善建議 (AI Improvement Suggestion)</span>
+                                  <span className="text-sm text-slate-300">{entry.aiImprovementSuggestion}</span>
+                                </div>
+                              )}
+                              {entry.resolution && (
+                                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 md:col-span-2">
+                                  <span className="text-[10px] text-slate-500 uppercase block mb-1">解決方案 (Resolution)</span>
+                                  <span className="text-sm text-emerald-400">{entry.resolution}</span>
+                                </div>
+                              )}
+                              {entry.permanentNote && (
+                                <div className="bg-slate-900 border border-amber-500/20 rounded-lg p-3 md:col-span-2 bg-amber-500/5">
+                                  <span className="text-[10px] text-amber-500 uppercase block mb-1">經驗總結 (Permanent Note)</span>
+                                  <span className="text-sm text-amber-200 font-bold">{entry.permanentNote}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {(entry.originalPrompt || entry.projectId) && (
+                          <div className="space-y-4 pt-2 border-t border-slate-800/50">
+                            {entry.originalPrompt && (
+                              <div className="space-y-2">
+                                <p className="text-[10px] text-slate-500 font-mono uppercase font-bold flex items-center gap-1">
+                                  <Zap className="w-3 h-3" /> 原始提示詞 (Original Prompt)
+                                </p>
+                                <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs text-slate-400 font-mono break-all opacity-80">
+                                  {entry.originalPrompt}
+                                </div>
+                              </div>
+                            )}
+                            <div className="flex flex-wrap gap-4 text-[10px] font-mono text-slate-600">
+                              {entry.projectId && <div>PROJECT_ID: {entry.projectId}</div>}
+                              {entry.sceneId && <div>SCENE_ID: {entry.sceneId}</div>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            ))
+          )}
+        </div>
+
+        {/* Right Column: Interactive Scene Failure Diagnosis */}
+        <div className="space-y-4">
+          <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 backdrop-blur-md space-y-4 shadow-lg shadow-black/20">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <BrainCircuit className="w-4 h-4 text-orange-400" />
+                選擇診斷分鏡 (Select Scene)
+              </h3>
+              <p className="text-[10px] text-slate-400 mt-1">選擇專案中的特定分鏡，深入調閱其失敗記錄與專屬修復提示詞</p>
+            </div>
+            
+            <select
+              value={selectedSceneId}
+              onChange={(e) => setSelectedSceneId(e.target.value)}
+              className="w-full bg-slate-950 text-slate-200 border border-slate-800 rounded-xl px-3 py-2.5 text-xs focus:outline-none focus:border-orange-500/50 transition cursor-pointer"
+            >
+              <option value="">-- 請選擇欲檢視的分鏡 --</option>
+              {scenes.map((s: any, index: number) => (
+                <option key={s.id} value={s.id}>
+                  分鏡 {index + 1}: {s.title || `無標題分鏡 (${s.id.slice(0, 4)})`}
+                </option>
+              ))}
+            </select>
+          </div>
+          
+          <FailureRecordLibrary 
+            sceneId={selectedSceneId} 
+            projectId={activeProjectId || ""} 
+            onSelectSuggestion={(prompt) => {
+              if (onApplySuggestion && selectedSceneId) {
+                onApplySuggestion(selectedSceneId, prompt);
+              }
+            }}
+          />
+        </div>
       </div>
     </div>
   );

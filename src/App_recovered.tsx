@@ -2354,39 +2354,6 @@ Anime aesthetic, high resolution, no text, no watermark.
       }
 
 
-      // 1. Pre-check Experience Library for past failures
-      let historicalFailures: string[] = [];
-      try {
-        const expRes = await fetch(`/api/experience-summary?sceneId=${sceneId}`);
-        if (expRes.ok) {
-          const data = await expRes.json();
-          historicalFailures = data.failures || [];
-        }
-      } catch (e) {}
-
-      const hasAbstractBgIssue = historicalFailures.some(f => f.toLowerCase().includes("abstract") || f.toLowerCase().includes("gradient") || f.toLowerCase().includes("purple"));
-      const hasMissingContentIssue = historicalFailures.some(f => f.toLowerCase().includes("content missing") || f.toLowerCase().includes("missing gun") || f.toLowerCase().includes("missing character"));
-
-      if (hasAbstractBgIssue) {
-        finalPrompt += "\n[CRITICAL HARD CONSTRAINT]: NO abstract background, NO gradients. Must be a concrete real environment.";
-        if (finalNegativePrompt) finalNegativePrompt += ", gradient, color blocks, abstract background";
-      }
-      if (hasMissingContentIssue) {
-        finalPrompt += "\n[CRITICAL HARD CONSTRAINT]: Must contain character, must hold weapon clearly.";
-        if (finalNegativePrompt) finalNegativePrompt += ", missing gun, missing character, empty scene";
-      }
-
-      // 2. Cross-scene consistency logic
-      let startFrameUrl = undefined;
-      const index = activeProject.scenes.findIndex((s) => s.id === sceneId);
-      if (index > 0) {
-        const prevScene = activeProject.scenes.slice(0, index).reverse().find((s) => s.imageUrl);
-        if (prevScene) {
-           startFrameUrl = prevScene.imageUrl;
-           finalPrompt += "\n[CROSS-SCENE CONSISTENCY]: The character's appearance, clothing, and facial features MUST exactly match the provided previous scene image reference.";
-        }
-      }
-
       const res = await fetch("/api/generate-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2394,7 +2361,6 @@ Anime aesthetic, high resolution, no text, no watermark.
         body: JSON.stringify({
           prompt: finalPrompt,
           negativePrompt: finalNegativePrompt,
-          image_reference: startFrameUrl || undefined,
           artStyle: characterObj?.artStyle || activeProject.artStyle,
           character: sceneToGen.character,
           characterDescription: charDesc,
@@ -2840,7 +2806,7 @@ Anime aesthetic, high resolution, no text, no watermark.
   };
 
   // Agnes Video Generation for a specific scene card!
-  const handleGenerateVideo = async (sceneId: string, force = false, retryCount = 0) => {
+  const handleGenerateVideo = async (sceneId: string, force = false) => {
     console.log("[DEBUG] handleGenerateVideo called for:", sceneId, "Force:", force);
     let freshActiveProject = activeProject;
     try {
@@ -2990,20 +2956,10 @@ Anime aesthetic, high resolution, no text, no watermark.
 
       const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
       const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
-      let actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
-      let transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
+      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
+      const transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      let cameraAddon = "(Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.)";
-
-      // Downgrade prompt complexity on 3rd-4th attempt (retryCount >= 2)
-      if (retryCount >= 2) {
-        actionAddon = " ";
-        transitionAddon = " ";
-        cameraAddon = "(Static camera, clear subject, cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.)";
-        console.log(`[Video Gen] Retry ${retryCount + 1}: Downgrading prompt complexity (removed camera/action descriptors).`);
-      }
-
-      let enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. ${cameraAddon} Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}. ${videoProactiveInjections}`;
+      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || activeProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}. ${videoProactiveInjections}`;
 
       // Dynamic Negative Prompt reinforcement for Video
       let finalNegativePrompt = targetScene.negativePrompt || "";
@@ -3019,28 +2975,6 @@ Anime aesthetic, high resolution, no text, no watermark.
         finalNegativePrompt += ", hands not holding gun, gun floating, missing weapon, hands not gripping pistol, blurry gun, deformed weapon";
       }
       finalNegativePrompt += ", sudden pose change, character appearance inconsistency, missing gun, deformed hands at start, jump cuts, chaotic camera movement";
-
-      // Apply historical failure constraints (Experience Library)
-      let historicalFailures: string[] = [];
-      try {
-        const expRes = await fetch(`/api/experience-summary?sceneId=${sceneId}`);
-        if (expRes.ok) {
-          const data = await expRes.json();
-          historicalFailures = data.failures || [];
-        }
-      } catch (e) {}
-      
-      const hasContentMissing = historicalFailures.some(f => f.toLowerCase().includes("content missing") || f.toLowerCase().includes("missing gun"));
-      const hasAbstractBg = historicalFailures.some(f => f.toLowerCase().includes("abstract") || f.toLowerCase().includes("gradient"));
-      
-      if (hasContentMissing) {
-        enhancedPrompt += "\n[CRITICAL HARD CONSTRAINT]: Must contain character, must hold weapon clearly.";
-        finalNegativePrompt += ", missing gun, empty scene, character missing";
-      }
-      if (hasAbstractBg) {
-        enhancedPrompt += "\n[CRITICAL HARD CONSTRAINT]: NO abstract background, NO gradients. Must be a concrete real environment.";
-        finalNegativePrompt += ", gradient, abstract background";
-      }
 
       try {
         const url = force ? "/api/generate?force=true" : "/api/generate";
@@ -3286,7 +3220,7 @@ Anime aesthetic, high resolution, no text, no watermark.
   };
 
   // Agnes Video Generation with frame continuity (extend from previous scene's last frame)
-  const handleGenerateVideoExtended = async (sceneId: string, index: number, retryCount = 0) => {
+  const handleGenerateVideoExtended = async (sceneId: string, index: number) => {
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
@@ -3400,20 +3334,10 @@ Anime aesthetic, high resolution, no text, no watermark.
 
       const dialogueAddon = targetScene.dialogue ? ` (lips speaking and mouth moving to speak. The character is actively talking with realistic mouth movements, speaking: "${targetScene.dialogue}". The video must be completely clean with ABSOLUTELY NO SUBTITLES, no burned-in text, no on-screen text, no words, no captions, no letters).` : " No character is talking, no lip movement. Mouth closed and completely still.";
       const narrationAddon = targetScene.narration ? ` (Narrator voiceover atmospheric ambiance, character is not speaking, lips closed, completely clean video, absolutely no subtitles, no on-screen text, no captions, no words, no letters. No character is talking, no lip movement).` : "";
-      let actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
-      let transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
+      const actionAddon = targetScene.actionPrompt ? ` Action and movement: ${targetScene.actionPrompt}. ` : " ";
+      const transitionAddon = targetScene.transitionPrompt ? ` Transition action: ${targetScene.transitionPrompt}. ` : " ";
       const notesAddon = targetScene.directorNotes ? ` Director's notes: ${targetScene.directorNotes}. ` : " ";
-      let cameraAddon = "(Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.)";
-
-      // Downgrade prompt complexity on 3rd-4th attempt (retryCount >= 2)
-      if (retryCount >= 2) {
-        actionAddon = " ";
-        transitionAddon = " ";
-        cameraAddon = "(Static camera, clear subject, cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.)";
-        console.log(`[Video Gen Ext] Retry ${retryCount + 1}: Downgrading prompt complexity (removed camera/action descriptors).`);
-      }
-
-      let enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. ${cameraAddon} Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}. ${videoProactiveInjections}`;
+      const enhancedPrompt = `${targetScene.visualPrompt}.${actionAddon}${transitionAddon}${dialogueAddon}${narrationAddon}${notesAddon} ABSOLUTELY NO SUBTITLES, NO TEXT, NO WATERMARKS, CLEAN VIDEO, PURE CINEMATIC VISUALS. [CRITICAL CLOTHING CONSISTENCY]: The character MUST wear the exact clothing described in their Description. (Advanced camera movement and cinematic lighting, natural human behavior, realistic high-fidelity video, masterwork.) Style: ${characterObj?.artStyle || freshActiveProject.artStyle}. Character: ${targetScene.character}, Description: ${charDesc}. ${videoProactiveInjections}`;
 
       // Dynamic Negative Prompt reinforcement for Video
       let finalNegativePrompt = targetScene.negativePrompt || "";
@@ -3429,28 +3353,6 @@ Anime aesthetic, high resolution, no text, no watermark.
         finalNegativePrompt += ", hands not holding gun, gun floating, missing weapon, hands not gripping pistol, blurry gun, deformed weapon";
       }
       finalNegativePrompt += ", sudden pose change, character appearance inconsistency, missing gun, deformed hands at start, jump cuts, chaotic camera movement";
-
-      // Apply historical failure constraints (Experience Library)
-      let historicalFailures: string[] = [];
-      try {
-        const expRes = await fetch(`/api/experience-summary?sceneId=${sceneId}`);
-        if (expRes.ok) {
-          const data = await expRes.json();
-          historicalFailures = data.failures || [];
-        }
-      } catch (e) {}
-      
-      const hasContentMissing = historicalFailures.some(f => f.toLowerCase().includes("content missing") || f.toLowerCase().includes("missing gun"));
-      const hasAbstractBg = historicalFailures.some(f => f.toLowerCase().includes("abstract") || f.toLowerCase().includes("gradient"));
-      
-      if (hasContentMissing) {
-        enhancedPrompt += "\n[CRITICAL HARD CONSTRAINT]: Must contain character, must hold weapon clearly.";
-        finalNegativePrompt += ", missing gun, empty scene, character missing";
-      }
-      if (hasAbstractBg) {
-        enhancedPrompt += "\n[CRITICAL HARD CONSTRAINT]: NO abstract background, NO gradients. Must be a concrete real environment.";
-        finalNegativePrompt += ", gradient, abstract background";
-      }
 
       // If index > 0, we pass the previous scene's videoUrlExt as extendFromVideoUrl
       const prevScene = (index > 0) ? freshActiveProject.scenes[index - 1] : undefined;
@@ -3834,7 +3736,7 @@ Anime aesthetic, high resolution, no text, no watermark.
   };
 
   // Agnes Video Generation with keyframes (start frame is this scene's image, end frame is next scene's image)
-  const handleGenerateVideoKeyframes = async (sceneId: string, index: number, retryCount = 0) => {
+  const handleGenerateVideoKeyframes = async (sceneId: string, index: number) => {
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
