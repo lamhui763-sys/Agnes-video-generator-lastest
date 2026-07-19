@@ -827,7 +827,7 @@ export default function App() {
   useEffect(() => {
     if (isSyncCompleted && activeProjectId) {
       console.log("[Toonflow Startup Auto-Restore] Application initialized/restarted, pulling latest physical backups from server...");
-      handleRestoreFromBackup(true).catch(e => {
+      handleRestoreFromBackup(true, { timeoutMs: 8000 }).catch(e => {
         console.warn("[Toonflow Auto-Restore Warning] Failed to silently restore backup assets at startup:", e);
       });
     }
@@ -4311,13 +4311,20 @@ Anime aesthetic, high resolution, no text, no watermark.
     }
   };
 
-  const handleRestoreFromBackup = async (silent: boolean = false) => {
+  const handleRestoreFromBackup = async (silent: boolean = false, opts?: { skipMedia?: boolean; timeoutMs?: number }) => {
     if (!activeProjectId) return null;
     const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
     const videoField = activeTab === "scenes_ext" ? "videoUrlExt" : (activeTab === "scenes_keyframes" ? "videoUrlKeyframes" : "videoUrl");
+    const timeoutMs = opts?.timeoutMs ?? 8000;
+    const skipMedia = !!opts?.skipMedia;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const backupRes = await fetch(`/api/load-backup-assets?projectId=${activeProjectId}`);
+      const backupRes = await fetch(`/api/load-backup-assets?projectId=${encodeURIComponent(activeProjectId)}`, {
+        signal: controller.signal,
+      });
       if (!backupRes.ok) throw new Error("無法連接備份伺服器。");
       
       const backupData = await backupRes.json();
@@ -4340,9 +4347,20 @@ Anime aesthetic, high resolution, no text, no watermark.
         const bs = backupMap.get(s.id);
         if (bs) {
           const backupImg = bs[imageField] || bs.imageUrl || bs.imageUrlKeyframes;
-          const currentImg = s[imageField] || s.imageUrl || s.imageUrlKeyframes;
           const backupVid = bs[videoField] || bs.videoUrl || bs.videoUrlKeyframes;
-          const currentVid = s[videoField] || s.videoUrl || s.videoUrlKeyframes;
+
+          // skipMedia: only restore text/review metadata, never re-inject old photos/videos
+          if (skipMedia) {
+            if (bs.step2OptimizedPrompt || bs.step7AdviceForNext) {
+              restoredCount++;
+              return {
+                ...s,
+                step2OptimizedPrompt: bs.step2OptimizedPrompt || s.step2OptimizedPrompt,
+                step7AdviceForNext: bs.step7AdviceForNext || s.step7AdviceForNext,
+              };
+            }
+            return s;
+          }
 
           if (backupImg || backupVid || bs.step4Passed || bs.step6Passed) {
             restoredCount++;
@@ -4389,10 +4407,14 @@ Anime aesthetic, high resolution, no text, no watermark.
         }
       }
     } catch (e: any) {
+      const isAbort = e?.name === "AbortError" || String(e?.message || "").toLowerCase().includes("abort");
       console.error("Failed to restore from server backup:", e);
       if (!silent) {
-        showToast("⚠️ 抽回備份失敗: " + (e.message || e), "error");
+        showToast(isAbort ? "⚠️ 備份連線逾時，已略過。" : ("⚠️ 抽回備份失敗: " + (e.message || e)), "error");
       }
+      if (isAbort) throw new Error("BACKUP_RESTORE_TIMEOUT");
+    } finally {
+      clearTimeout(timer);
     }
     return null;
   };
@@ -4413,19 +4435,47 @@ Anime aesthetic, high resolution, no text, no watermark.
 
     setFullAutoLogs([
       "🚀 啟動 AI 全自動製片大師極致工作流...",
-      "🔍 正在與 Toonflow 備份伺服器連線，智慧檢查與抽回已核准的分鏡相片與影像...",
+      "🔍 正在檢查備份伺服器（最多 8 秒，逾時會自動略過並繼續）...",
     ]);
 
-    // Retrieve approved scenes from server file backup first
+    // Scan local state first to decide whether to re-import server backup media
+    let curProjectsScan = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+    let curProjScan = curProjectsScan.find(p => p.id === activeProjectId) || activeProject;
+
+    const hasLocalMedia = (curProjScan?.scenes || []).some((s: any) => {
+      const img = s[imageField] || s.imageUrl || s.imageUrlKeyframes;
+      const vid = s[videoField] || s.videoUrl || s.videoUrlKeyframes;
+      return !!(img || vid);
+    });
+
+    // Retrieve backup — never hang forever; if media already cleared, do not re-inject old photos/videos
     try {
-      await handleRestoreFromBackup(true);
-    } catch (e) {
+      if (!hasLocalMedia) {
+        setFullAutoLogs(prev => [
+          ...prev,
+          "🧹 偵測到目前沒有本地媒體（可能剛一鍵清除），跳過抽回舊備份相片/影片，避免重用舊圖。",
+        ]);
+        // Still allow soft metadata restore with short timeout, but skip media fields
+        try {
+          await handleRestoreFromBackup(true, { skipMedia: true, timeoutMs: 5000 });
+        } catch (_) { /* ignore */ }
+      } else {
+        await handleRestoreFromBackup(true, { timeoutMs: 8000 });
+        setFullAutoLogs(prev => [...prev, "✅ 備份檢查完成，繼續全自動流程..."]);
+      }
+    } catch (e: any) {
       console.warn("Failed to auto restore backup:", e);
+      setFullAutoLogs(prev => [
+        ...prev,
+        e?.message === "BACKUP_RESTORE_TIMEOUT"
+          ? "⚠️ 備份連線逾時（8 秒），已略過，直接繼續製片..."
+          : `⚠️ 備份檢查失敗已略過：${e?.message || e}，繼續製片...`,
+      ]);
     }
 
-    // Scan project state
-    const curProjectsScan = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-    const curProjScan = curProjectsScan.find(p => p.id === activeProjectId) || activeProject;
+    // Re-scan after optional restore
+    curProjectsScan = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+    curProjScan = curProjectsScan.find(p => p.id === activeProjectId) || activeProject;
     
     const totalScenesCount = curProjScan.scenes.length;
     let completedImagesCount = 0;
