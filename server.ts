@@ -12,8 +12,9 @@ import { GoogleGenAI, Type, GenerateVideosOperation } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc, query, getDocs, limit, orderBy, where, serverTimestamp } from "firebase/firestore";
 
-// Load environment variables
+// Load environment variables (.env then .env.local override)
 dotenv.config();
+dotenv.config({ path: ".env.local", override: true });
 
 // Read firebase config manually to ensure compatibility on server
 const firebaseConfig = JSON.parse(fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf8"));
@@ -774,57 +775,153 @@ const MOOD_KEYWORDS: Record<string, string> = {
   tired: "tired expression, exhausted look, heavy eyes, yawning, weary posture",
 };
 
-// Official helper to generate images using Gemini's image generation model (gemini-3.1-flash-image)
+// Official helper to generate images using Gemini image-capable models
 async function generateGeminiImage(options: {
   prompt: string;
   aspectRatio: string;
   customApiKey?: string;
+  extraParts?: any[];
 }): Promise<string | null> {
   if (isGeminiImageQuotaExhausted) {
     console.log("[Toonflow] Gemini image quota is currently flagged as exhausted. Bypassing Gemini image generation.");
     return null;
   }
 
+  // Skip quickly if key is missing / placeholder
+  const envKey = (process.env.GEMINI_API_KEY || "").trim();
+  const customKey = (options.customApiKey || "").trim();
+  const effectiveKey = customKey.startsWith("AIza") ? customKey : envKey;
+  if (
+    !effectiveKey ||
+    effectiveKey === "MY_GEMINI_API_KEY" ||
+    effectiveKey === "YOUR_GEMINI_API_KEY" ||
+    effectiveKey.startsWith("MY_G") ||
+    effectiveKey.includes("PLACEHOLDER") ||
+    effectiveKey.length < 20
+  ) {
+    console.warn("[Toonflow] GEMINI_API_KEY missing or placeholder — skip Gemini image, use Agnes.");
+    return null;
+  }
+
   const aiInstance = getGeminiClient(options.customApiKey);
+  const modelsToTry = [
+    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.5-flash-image",
+    "gemini-3.1-flash-image",
+  ];
+  const parts = [{ text: options.prompt }, ...(options.extraParts || [])];
 
-  try {
-    console.log(`[Toonflow] Attempting Gemini Image Generation using gemini-3.1-flash-image with aspect ratio ${options.aspectRatio}...`);
-    const response = await aiInstance.models.generateContent({
-      model: 'gemini-3.1-flash-image',
-      contents: {
-        parts: [{ text: options.prompt }],
-      },
-      config: {
-        imageConfig: {
-          aspectRatio: options.aspectRatio,
-          imageSize: "1K"
+  for (const model of modelsToTry) {
+    try {
+      console.log(`[Toonflow] Attempting Gemini Image Generation using ${model} aspect=${options.aspectRatio}...`);
+      const response = await aiInstance.models.generateContent({
+        model,
+        contents: { parts },
+        config: {
+          responseModalities: ["TEXT", "IMAGE"],
+          imageConfig: {
+            aspectRatio: options.aspectRatio,
+            imageSize: "1K",
+          },
         },
-      },
-    });
+      });
 
-    if (response && response.candidates?.[0]?.content?.parts) {
-      for (const part of response.candidates[0].content.parts) {
-        if (part.inlineData && part.inlineData.data) {
-          const mimeType = part.inlineData.mimeType || 'image/png';
-          const ext = mimeType.split('/')[1] || 'png';
-          const buffer = Buffer.from(part.inlineData.data, 'base64');
-          const filename = `gemini-imagen-${Date.now()}-${Math.floor(Math.random() * 10000)}.${ext}`;
-          const localPath = path.join(process.cwd(), "assets", filename);
-          fs.writeFileSync(localPath, buffer);
-          console.log(`[Toonflow] Gemini image generation succeeded: /assets/${filename}`);
-          return `/assets/${filename}`;
+      if (response && response.candidates?.[0]?.content?.parts) {
+        for (const part of response.candidates[0].content.parts) {
+          if (part.inlineData && part.inlineData.data) {
+            const mimeType = part.inlineData.mimeType || "image/png";
+            const ext = mimeType.split("/")[1] || "png";
+            const buffer = Buffer.from(part.inlineData.data, "base64");
+            const filename = `gemini-imagen-${Date.now()}-${Math.floor(Math.random() * 10000)}.${ext}`;
+            const localPath = path.join(process.cwd(), "assets", filename);
+            fs.writeFileSync(localPath, buffer);
+            console.log(`[Toonflow] Gemini image generation succeeded (${model}): /assets/${filename}`);
+            return `/assets/${filename}`;
+          }
         }
       }
+      console.warn(`[Toonflow] Gemini model ${model} returned no image parts`);
+    } catch (err: any) {
+      const rawErr = err?.message || String(err || "Unknown");
+      const isQuota =
+        rawErr.includes("429") ||
+        rawErr.includes("quota") ||
+        rawErr.includes("RESOURCE_EXHAUSTED");
+      if (isQuota) {
+        console.log("[Toonflow] Gemini image generation quota exceeded. Falling back to Agnes.");
+        markGeminiImageQuotaExhausted();
+        break;
+      }
+      console.warn(`[Toonflow Warning] Gemini model ${model} failed:`, rawErr.substring(0, 200));
     }
-  } catch (err: any) {
-    const rawErr = err?.message || String(err || "Unknown");
-    const isQuota = rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED");
-    if (isQuota) {
-      console.log("[Toonflow] Gemini image generation quota exceeded. Gracefully falling back to alternative engine.");
-      markGeminiImageQuotaExhausted();
-    } else {
-      console.warn("[Toonflow Warning] Gemini image generation failed:", rawErr);
+  }
+  return null;
+}
+
+/** Call Agnes image API with long timeout + 503 retries (avatars often take 50–90s) */
+async function generateAgnesImageUrl(
+  prompt: string,
+  size: string,
+  customApiKey?: string,
+  maxAttempts: number = 3
+): Promise<{ url: string; model: string } | null> {
+  const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
+  if (!sanitizedAgnesKey) {
+    console.error("[Toonflow] No valid AGNES_API_KEY for image generation");
+    return null;
+  }
+  const modelsToTry = ["agnes-image-2.0-flash", "agnes-image-2.1-flash"];
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (const model of modelsToTry) {
+      try {
+        console.log(`[Toonflow] Agnes image attempt ${attempt}/${maxAttempts} model=${model} size=${size}`);
+        const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/images/generations", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sanitizedAgnesKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ model, prompt, size }),
+        });
+        // Avatars/sheets routinely take 50–90s; 45s was cutting off successful jobs
+        const response = await withTimeout(
+          fetchPromise,
+          120000,
+          new Error("Agnes API request timed out (120s)")
+        );
+        if (response.ok) {
+          const data: any = await response.json();
+          if (data?.data?.[0]?.url) {
+            console.log(`[Toonflow] Agnes image success model=${model}`);
+            return { url: data.data[0].url, model };
+          }
+          lastError = new Error("Agnes returned 200 but no image URL");
+        } else {
+          const bodyText = await response.text().catch(() => "");
+          lastError = new Error(
+            `Agnes HTTP ${response.status}${bodyText ? ": " + bodyText.substring(0, 180) : ""}`
+          );
+          // Retry on busy / rate limit
+          if (response.status === 503 || response.status === 429 || response.status >= 500) {
+            console.warn(`[Toonflow] Agnes busy/error ${response.status}, will retry...`);
+            continue;
+          }
+        }
+      } catch (e: any) {
+        lastError = e;
+        console.warn(`[Toonflow] Agnes image attempt failed:`, e?.message || e);
+      }
     }
+    if (attempt < maxAttempts) {
+      const waitMs = 2000 * attempt;
+      console.log(`[Toonflow] Waiting ${waitMs}ms before Agnes retry...`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  if (lastError) {
+    console.error("[Toonflow] All Agnes image attempts failed:", lastError?.message || lastError);
   }
   return null;
 }
@@ -4306,8 +4403,8 @@ app.post("/api/generate-image", async (req, res) => {
     if (imageParts.length > 0) {
       referenceGuidance = ` Crucial: You MUST use the attached photo as a direct visual guide to maintain absolute face and feature consistency. Transform the person in the attached photo into the design sheet character, matching their face shape, eyes, nose, hair, and age.`;
     }
-    // We generate a single high-quality character design sheet to guarantee absolute face consistency!
-    enhancedPrompt = `A professional character concept design sheet showing ${character || "the character"} from different angles (front view and side profile view) with highly consistent facial features, uniform hairstyle and outfit. Style: ${styleAddon}.${referenceGuidance} Visual description: ${finalPrompt}. Solid clean light-grey simple background, uniform studio lighting, masterpiece, elegant side-by-side layout. DO NOT generate buildings or separate background landscapes. Absolutely NO text, labels, signatures, titles, captions, watermarks, UI elements, words, or letters on the image.`;
+    // Single multi-angle character sheet (front + side + back) for identity lock
+    enhancedPrompt = `Professional character concept design sheet (turnaround) of ${character || "the character"}: three full-body views side-by-side on one canvas — FRONT VIEW, SIDE PROFILE VIEW, and BACK VIEW. Same face, same hairstyle, same outfit, same proportions across all three views. Style: ${styleAddon}.${referenceGuidance} Visual description: ${finalPrompt}. Clean solid light-grey studio background, even studio lighting, masterpiece character turnaround sheet, elegant horizontal layout. DO NOT generate cityscapes, buildings, or separate landscape backgrounds. Absolutely NO text, labels, signatures, titles, captions, watermarks, UI elements, words, or letters on the image.`;
   } else {
     // For storyboards/scenes, we want a SINGLE scene image. We must avoid terms like "reference sheet", 
     // "model sheet", or "multi-angle collage" which confuse the text-to-image generator into drawing a layout template.
@@ -4348,14 +4445,13 @@ app.post("/api/generate-image", async (req, res) => {
 
     console.log(`[Toonflow] Generating ${isAvatar ? "avatar" : "storyboard"} image using ${activeEngine} AI with prompt: ${enhancedPrompt}`);
 
+    // Nano Banana / Mistral previously returned Unsplash stock — route to real Agnes generation instead
     if (activeEngine === 'nanobanana' || activeEngine === 'mistral') {
-      // Disabled: Nano Banana/Mistral previously returned Unsplash stock photos as fake "previews"
-      return res.status(500).json({
-        error: "已禁用保底圖片引擎（Nano Banana / Mistral Unsplash）。請使用 Agnes 真實繪圖。",
-        noFallback: true
-      });
-    } else if (activeEngine === 'agnes') {
-      const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
+      console.log(`[Toonflow] Engine ${activeEngine} remapped to Agnes (stock Unsplash disabled).`);
+      activeEngine = 'agnes';
+    }
+
+    if (activeEngine === 'agnes') {
       let activePromptForFallback = enhancedPrompt;
 
       let size = isAvatar ? "1024x1024" : "1024x576";
@@ -4366,274 +4462,103 @@ app.post("/api/generate-image", async (req, res) => {
       }
 
       console.log(`[Toonflow] Agnes AI drawing mode is [${agnesImageMode}]. Selected size: ${size}`);
-      const modelsToTry = ["agnes-image-2.0-flash", "agnes-image-2.1-flash"];
-      let response;
-      let lastError;
-
-      for (const model of modelsToTry) {
-        try {
-          const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/images/generations", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${sanitizedAgnesKey}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              model: model,
-              prompt: enhancedPrompt,
-              size: size
-            })
-          });
-
-          response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
-          if (response.ok) break;
-          
-          let bodyText = "";
-          try {
-            bodyText = await response.clone().text();
-          } catch (e) {}
-          lastError = new Error(`Agnes API returned status ${response.status}${bodyText ? ": " + bodyText : ""}`);
-        } catch (e) {
-          lastError = e;
-        }
+      const agnesResult = await generateAgnesImageUrl(enhancedPrompt, size, customApiKey, isAvatar ? 3 : 2);
+      if (agnesResult?.url) {
+        return res.json({
+          imageUrl: agnesResult.url,
+          isAgnesImage: true,
+          message: isAvatar
+            ? "成功使用 Agnes AI 生成一致性三視角角色設計圖！"
+            : "成功使用 Agnes AI 高階繪圖引擎生成高品質分鏡圖像！"
+        });
       }
 
-      let succeededWithAgnes = false;
-      if (response && response.ok) {
-        try {
-          const data: any = await response.json();
-          if (data && data.data && data.data[0] && data.data[0].url) {
-            succeededWithAgnes = true;
-            return res.json({ 
-              imageUrl: data.data[0].url,
+      // Avatar: one more pass with safety-rewritten prompt if primary Agnes failed
+      try {
+        if (isAvatar) {
+          console.log("[Toonflow] Avatar primary Agnes failed — trying safety rewrite + retry...");
+          const safePrompt = await rewritePromptToBeSafe(enhancedPrompt, customApiKey);
+          activePromptForFallback = safePrompt || enhancedPrompt;
+          const retry = await generateAgnesImageUrl(activePromptForFallback, size, customApiKey, 2);
+          if (retry?.url) {
+            return res.json({
+              imageUrl: retry.url,
               isAgnesImage: true,
-              message: "成功使用 Agnes AI 高階繪圖引擎生成高品質分鏡圖像！"
+              message: "成功使用 Agnes AI（安全改寫後）生成一致性三視角角色設計圖！"
             });
           }
-        } catch (e) {
-          lastError = e;
         }
+      } catch (e: any) {
+        console.warn("[Toonflow] Avatar safety rewrite path failed:", e?.message || e);
       }
 
-      // If Agnes failed due to safety violation, let's auto-fix the prompt and retry with Agnes
-      const errMsg = lastError?.message || '';
-      const isPolicyViolation = errMsg.includes("content_policy_violation") || errMsg.includes("Content policy violation");
-      
-      if (!succeededWithAgnes && isPolicyViolation) {
-        console.log("[Toonflow] Content policy filter initiated. Retrying with safety-enhanced prompt.");
+      // Soft Gemini fallback only if key exists (not stock photos)
+      if (!isGeminiImageQuotaExhausted) {
         try {
-          const safePrompt = await rewritePromptToBeSafe(enhancedPrompt, customApiKey);
-          activePromptForFallback = safePrompt;
-          console.log(`[Toonflow] Retrying image generation with sanitized safe prompt: "${safePrompt}"`);
-          
-          for (const model of modelsToTry) {
-            try {
-              const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/images/generations", {
-                method: "POST",
-                headers: {
-                  "Authorization": `Bearer ${sanitizedAgnesKey}`,
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  model: model,
-                  prompt: safePrompt,
-                  size: size
-                })
-              });
-
-              response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
-              if (response.ok) {
-                try {
-                  const data: any = await response.json();
-                  if (data && data.data && data.data[0] && data.data[0].url) {
-                    succeededWithAgnes = true;
-                    console.log("[Toonflow] Agnes AI retry with sanitized prompt succeeded!");
-                    return res.json({ 
-                      imageUrl: data.data[0].url,
-                      isAgnesImage: true,
-                      message: "已自動重寫並修正安全性提示詞，並成功使用 Agnes AI 引擎生成高品質分鏡圖像！"
-                    });
-                  }
-                } catch (e) {
-                  lastError = e;
-                }
-                break;
-              }
-              
-              let bodyText = "";
-              try {
-                bodyText = await response.clone().text();
-              } catch (e) {}
-              lastError = new Error(`Agnes API retry returned status ${response.status}${bodyText ? ": " + bodyText : ""}`);
-            } catch (e) {
-              lastError = e;
-            }
-          }
-        } catch (rewriteErr: any) {
-          console.log("[Toonflow] Prompt auto-fix flow was bypassed:", rewriteErr.message);
-        }
-      }
-
-      if (!succeededWithAgnes) {
-        const errMsg = lastError?.message || '';
-        console.log(`[Toonflow] Agnes AI image generation did not complete: ${errMsg}`);
-        console.log("[Toonflow] Transitioning to seamless fallback chain (Gemini -> Pollinations -> Nano Banana)...");
-
-        let geminiImageUrl = null;
-        if (!isGeminiImageQuotaExhausted) {
           const aspectRatio = isAvatar ? "1:1" : "16:9";
-          // First try the native Imagen 3 API
-          geminiImageUrl = await generateGeminiImage({
-            prompt: activePromptForFallback,
-            aspectRatio: aspectRatio,
-            customApiKey: customApiKey
+          const geminiUrl = await generateGeminiImage({
+            prompt: activePromptForFallback || enhancedPrompt,
+            aspectRatio,
+            customApiKey,
+            extraParts: imageParts
           });
-          
-          if (!geminiImageUrl) {
-            try {
-              const geminiResponse = await generateContentWithFallback({
-                model: 'gemini-3.1-flash-image',
-                contents: {
-                  parts: [{ text: activePromptForFallback }, ...imageParts],
-                },
-                customApiKey,
-                config: {
-                  imageConfig: {
-                    aspectRatio: aspectRatio,
-                    imageSize: "1K"
-                  },
-                },
-              });
-              
-              for (const part of geminiResponse.candidates?.[0]?.content?.parts || []) {
-                if (part.inlineData) {
-                  const mimeType = part.inlineData.mimeType || 'image/png';
-                  const ext = mimeType.split('/')[1] || 'png';
-                  const buffer = Buffer.from(part.inlineData.data, 'base64');
-                  const filename = `gemini-fallback-${Date.now()}-${Math.floor(Math.random() * 10000)}.${ext}`;
-                  const localPath = path.join(process.cwd(), "assets", filename);
-                  fs.writeFileSync(localPath, buffer);
-                  geminiImageUrl = `/assets/${filename}`;
-                  break;
-                }
-              }
-            } catch (err: any) {
-              const rawErr = err?.message || String(err || "Unknown");
-              const isQuota = rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED");
-              if (isQuota) {
-                markGeminiImageQuotaExhausted();
-              }
-              console.log("[Toonflow] Gemini backup drawing was not completed:", err.message);
-            }
+          if (geminiUrl) {
+            return res.json({
+              imageUrl: geminiUrl,
+              isAgnesImage: false,
+              message: isAvatar
+                ? "Agnes 忙碌，已改用 Gemini 生成三視角角色設計圖。"
+                : "Agnes AI 服務忙碌中，已自動切換至 Gemini AI 引擎為您生成高品質圖像！"
+            });
           }
-        }
-
-        if (geminiImageUrl) {
-          return res.json({ 
-            imageUrl: geminiImageUrl,
-            isAgnesImage: false,
-            message: "Agnes AI 服務忙碌中，已自動切換至 Gemini AI 引擎為您生成高品質圖像！"
-          });
-        } else {
-          // No Pollinations / Unsplash stock fallbacks — force real generation or fail cleanly
-          return res.status(500).json({ error: "所有繪圖引擎均失敗，已禁用保底圖片。請稍後重試或手動上傳。", noFallback: true });
-        }
+        } catch (e) {}
       }
+
+      return res.status(500).json({
+        error: isAvatar
+          ? "三視角設計圖生成失敗：Agnes 忙碌或逾時（503/timeout）。請隔 30 秒用「Agnes AI」再試，或上傳參考相片。"
+          : "所有繪圖引擎均失敗，已禁用保底圖片。請稍後重試或手動上傳。",
+        noFallback: true
+      });
     } else {
-      // Gemini AI (default)
+      // Gemini AI path — try Gemini first, then Agnes with long timeout retries
       const aspectRatio = isAvatar ? "1:1" : "16:9";
-      // First try the native Imagen 3 API
       let geminiImageUrl = await generateGeminiImage({
         prompt: enhancedPrompt,
         aspectRatio: aspectRatio,
-        customApiKey: customApiKey
+        customApiKey: customApiKey,
+        extraParts: imageParts
       });
-      
-      if (!geminiImageUrl && !isGeminiImageQuotaExhausted) {
-        try {
-          const response = await generateContentWithFallback({
-            model: 'gemini-3.1-flash-image',
-            contents: {
-              parts: [{ text: enhancedPrompt }, ...imageParts],
-            },
-            customApiKey,
-            config: {
-              imageConfig: {
-                aspectRatio: aspectRatio,
-                imageSize: "1K"
-              },
-            },
-          });
-          
-          for (const part of response.candidates?.[0]?.content?.parts || []) {
-            if (part.inlineData) {
-              const mimeType = part.inlineData.mimeType || 'image/png';
-              const ext = mimeType.split('/')[1] || 'png';
-              const buffer = Buffer.from(part.inlineData.data, 'base64');
-              const filename = `gemini-gen-${Date.now()}-${Math.floor(Math.random() * 10000)}.${ext}`;
-              const localPath = path.join(process.cwd(), "assets", filename);
-              fs.writeFileSync(localPath, buffer);
-              geminiImageUrl = `/assets/${filename}`;
-              break;
-            }
-          }
-        } catch (err: any) {
-          const rawErr = err?.message || String(err || "Unknown");
-          const isQuota = rawErr.includes("429") || rawErr.includes("quota") || rawErr.includes("RESOURCE_EXHAUSTED");
-          if (isQuota) {
-            markGeminiImageQuotaExhausted();
-          }
-          const cleanErr = isQuota ? "API Quota Limit (429)" : (rawErr.length > 150 ? rawErr.substring(0, 150) + "..." : rawErr);
-          console.log("[Toonflow Warning] Gemini image generation failed, trying Agnes fallback...", cleanErr);
-        }
-      }
-      
+
       if (geminiImageUrl) {
-        return res.json({ 
+        return res.json({
           imageUrl: geminiImageUrl,
           isAgnesImage: false,
-          message: "成功使用 Gemini AI 高階繪圖引擎生成高品質分鏡圖像！"
+          message: isAvatar
+            ? "成功使用 Gemini AI 生成一致性三視角角色設計圖！"
+            : "成功使用 Gemini AI 高階繪圖引擎生成高品質分鏡圖像！"
         });
-      } else {
-        console.log("[Toonflow] Attempting fallback to Agnes AI image generation...");
-        const sanitizedAgnesKey = getAgnesApiKey(customApiKey);
-        const size = isAvatar ? "1024x1024" : "1024x576";
-        const modelsToTry = ["agnes-image-2.0-flash", "agnes-image-2.1-flash"];
-        let response;
-        for (const model of modelsToTry) {
-          try {
-            const fetchPromise = fetch("https://apihub.agnes-ai.com/v1/images/generations", {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${sanitizedAgnesKey}`,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                model: model,
-                prompt: enhancedPrompt,
-                size: size
-              })
-            });
-            response = await withTimeout(fetchPromise, 45000, new Error("Agnes API request timed out"));
-            if (response.ok) break;
-          } catch (e) {}
-        }
-        
-        if (response && response.ok) {
-          try {
-            const data: any = await response.json();
-            if (data && data.data && data.data[0] && data.data[0].url) {
-              return res.json({ 
-                imageUrl: data.data[0].url,
-                isAgnesImage: true,
-                message: "Gemini AI 服務忙碌中，已自動切換至 Agnes AI 引擎為您生成高品質分鏡圖像！"
-              });
-            }
-          } catch (e) {}
-        }
-        
-        throw new Error("Both Gemini and Agnes image generators failed.");
       }
+
+      console.log("[Toonflow] Gemini unavailable/failed — falling back to Agnes for image generation...");
+      const size = isAvatar ? "1024x1024" : "1024x576";
+      const agnesResult = await generateAgnesImageUrl(enhancedPrompt, size, customApiKey, isAvatar ? 3 : 2);
+      if (agnesResult?.url) {
+        return res.json({
+          imageUrl: agnesResult.url,
+          isAgnesImage: true,
+          message: isAvatar
+            ? "Gemini 不可用，已自動改用 Agnes 生成一致性三視角角色設計圖！"
+            : "Gemini AI 服務忙碌中，已自動切換至 Agnes AI 引擎為您生成高品質分鏡圖像！"
+        });
+      }
+
+      return res.status(500).json({
+        error: isAvatar
+          ? "三視角設計圖失敗：Gemini 金鑰無效/配額不足，且 Agnes 忙碌(503)或逾時。請用「Agnes AI」隔 30 秒再試，或上傳多張參考相片。"
+          : "Both Gemini and Agnes image generators failed. 已禁用保底圖。",
+        noFallback: true
+      });
     }
   } catch (error: any) {
     const rawErrorMsg = error?.message || String(error || "Unknown");

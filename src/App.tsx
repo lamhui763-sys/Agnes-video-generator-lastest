@@ -6680,12 +6680,21 @@ Anime aesthetic, high resolution, no text, no watermark.
     showToast('已移除該張參考相片', 'info');
   };
 
-  // Trigger simulated character avatar drawing (generates a multi-angle character sheet)
+  // Character multi-angle (3-view) design sheet — prefers Agnes; Gemini falls back to Agnes server-side
   const handleGenerateAvatar = async (charId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
     if (!activeProject) return;
 
     const charToGen = activeProject.characters.find(c => c.id === charId);
     if (!charToGen) return;
+
+    // Nanobanana/mistral are remapped server-side to Agnes; gemini auto-falls back to Agnes if no key
+    if (engine === 'gemini') {
+      showToast("正在嘗試 Gemini；若無有效金鑰會自動改用 Agnes 生成三視角…", "info");
+    } else if (engine === 'nanobanana' || engine === 'mistral') {
+      showToast("已改走 Agnes 真實繪圖（禁用 Unsplash 保底）…", "info");
+    } else {
+      showToast("正在用 Agnes 生成一致性三視角設計圖（約 1–2 分鐘，請稍候）…", "info");
+    }
 
     updateActiveProject(prev => {
       const updatedChars = prev.characters.map(c => {
@@ -6697,13 +6706,15 @@ Anime aesthetic, high resolution, no text, no watermark.
 
     const charSeed = charToGen.seed || Math.floor(Math.random() * 1000000) + 1;
 
-    // Construct a rich combined prompt if the description is empty
-    const combinedPrompt = charToGen.description.trim() || 
+    // Rich prompt for three-view turnaround
+    const baseDesc = charToGen.description.trim() ||
       `${charToGen.name || "主角"}${charToGen.role ? `, 身份/職業: ${charToGen.role}` : ""}${charToGen.age ? `, 年齡: ${charToGen.age}` : ""}${charToGen.clothing ? `, 服裝風格: ${charToGen.clothing}` : ""}${charToGen.personality ? `, 性格特質: ${charToGen.personality}` : ""}`;
+    const combinedPrompt = `character turnaround sheet, three views front side and back, ${baseDesc}`;
 
     const controller = new AbortController();
     abortControllersRef.current[charId] = controller;
-    const timeoutId = setTimeout(() => controller.abort(new Error("請求處理超時，請重試")), 180000); // 180s timeout
+    // Server may retry Agnes up to ~3×120s when busy — allow longer client wait
+    const timeoutId = setTimeout(() => controller.abort(new Error("請求處理超時（約 4 分鐘）。Agnes 可能忙碌，請隔 30 秒再按 Agnes AI 重試")), 240000);
 
     try {
       const res = await fetch("/api/generate-image", {
@@ -6714,6 +6725,7 @@ Anime aesthetic, high resolution, no text, no watermark.
           prompt: combinedPrompt,
           artStyle: charToGen.artStyle || activeProject.artStyle,
           character: charToGen.name,
+          characterDescription: charToGen.description || baseDesc,
           isAvatar: true,
           characterImages: charToGen.uploadedAvatarUrls && charToGen.uploadedAvatarUrls.length > 0
             ? charToGen.uploadedAvatarUrls
@@ -6738,6 +6750,10 @@ Anime aesthetic, high resolution, no text, no watermark.
         console.warn("[Toonflow] Failed to parse character image response JSON. Raw text:", textRes.substring(0, 50));
         throw new Error("伺服器回傳格式錯誤，請稍後再試。");
       }
+
+      if (!data.imageUrl) {
+        throw new Error("伺服器未回傳圖像網址");
+      }
       
       if (data.message) {
         showToast(data.message, data.isAgnesImage ? "success" : "info");
@@ -6748,7 +6764,7 @@ Anime aesthetic, high resolution, no text, no watermark.
           if (c.id === charId) {
             return { 
               ...c, 
-              avatarUrl: data.imageUrl, // This is the single multi-angle sheet
+              avatarUrl: data.imageUrl, // single multi-angle sheet
               avatarUrls: [data.imageUrl],
               seed: charSeed,
               isGeneratingAvatar: false 
@@ -6759,11 +6775,13 @@ Anime aesthetic, high resolution, no text, no watermark.
         return { characters: list };
       });
     } catch (e: any) {
+      clearTimeout(timeoutId);
       const isAbort = e.name === 'AbortError' || 
                       e.message === 'USER_ABORTED' || 
                       e.message?.toLowerCase().includes('abort') || 
                       controller.signal.aborted;
       if (isAbort) {
+        showToast(e.message?.includes("超時") ? String(e.message) : "已停止繪圖", "info");
         updateActiveProject(prev => {
           const list = prev.characters.map(c => {
             if (c.id === charId) {
@@ -7612,8 +7630,8 @@ Anime aesthetic, high resolution, no text, no watermark.
                               <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
                                 {/* Avatar Display & Generator on the Left */}
                                 <div className="md:col-span-4 flex flex-col items-center space-y-4">
-                                  <div className="text-[10px] font-mono text-indigo-400 font-bold tracking-wider uppercase block bg-slate-950/80 px-2.5 py-1 border border-slate-850 rounded-full text-center w-full">
-                                    🎨 一致性三視角設計圖 (Gemini Image AI)
+                                  <div className="text-[10px] font-mono text-pink-400 font-bold tracking-wider uppercase block bg-slate-950/80 px-2.5 py-1 border border-slate-850 rounded-full text-center w-full">
+                                    🎨 一致性三視角設計圖（建議 Agnes）
                                   </div>
                                   
                                   {/* Single Multi-angle Canvas Sheet */}
@@ -7621,9 +7639,9 @@ Anime aesthetic, high resolution, no text, no watermark.
                                     {char.avatarUrl ? (
                                       <img src={char.avatarUrl} alt={`${char.name} Character Sheet`} className="w-full h-full object-cover transition duration-300 group-hover:scale-105" referrerPolicy="no-referrer" />
                                     ) : char.isGeneratingAvatar ? (
-                                      <div className="flex flex-col items-center space-y-3 text-indigo-400">
+                                      <div className="flex flex-col items-center space-y-3 text-pink-400">
                                         <RefreshCw className="w-8 h-8 animate-spin" />
-                                        <span className="text-[10px] font-mono">正在調用 AI 繪製三視角插圖...</span>
+                                        <span className="text-[10px] font-mono text-center px-2">正在繪製三視角（約 1–2 分鐘，忙碌時會自動重試）...</span>
                                         <button
                                           onClick={() => handleStopGenerateAvatar(char.id)}
                                           className="px-4 py-1.5 bg-red-600/95 hover:bg-red-500 text-white text-[10px] font-bold rounded-lg transition shadow flex items-center gap-1 cursor-pointer z-30"
@@ -7635,40 +7653,43 @@ Anime aesthetic, high resolution, no text, no watermark.
                                     ) : (
                                       <div className="flex flex-col items-center space-y-1.5 text-slate-600">
                                         <User className="w-10 h-10" />
-                                        <span className="text-[10px]">無主角相片 (採用 Gemini AI)</span>
+                                        <span className="text-[10px] text-center px-2">尚未生成 — 請按下方 Agnes AI（推薦）</span>
                                       </div>
                                     )}
                                   </div>
 
                                   <div className="grid grid-cols-2 gap-2 w-full mt-2">
                                     <button
-                                      onClick={() => handleGenerateAvatar(char.id, 'nanobanana')}
-                                      className="w-full py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-600 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20"
-                                      title="Nano Banana 高速免金鑰，完美生成"
+                                      onClick={() => handleGenerateAvatar(char.id, 'agnes')}
+                                      className="w-full py-1.5 bg-pink-950 hover:bg-pink-900 text-pink-100 text-[9px] font-bold rounded-lg border border-pink-500/50 hover:border-pink-400 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20 shadow shadow-pink-950/40"
+                                      title="推薦：真實 Agnes 繪圖，生成前/側/背三視角"
                                     >
-                                      {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-yellow-400" />}
-                                      <span>Nano Banana</span>
+                                      {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-pink-300" />}
+                                      <span>Agnes AI ★</span>
                                     </button>
                                     <button
                                       onClick={() => handleGenerateAvatar(char.id, 'gemini')}
                                       className="w-full py-1.5 bg-indigo-950 hover:bg-indigo-900 text-indigo-200 text-[9px] font-bold rounded-lg border border-indigo-900 hover:border-indigo-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20"
+                                      title="需有效 GEMINI_API_KEY；失敗會自動改用 Agnes"
                                     >
                                       {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-indigo-400" />}
                                       <span>Gemini AI</span>
                                     </button>
                                     <button
-                                      onClick={() => handleGenerateAvatar(char.id, 'agnes')}
-                                      className="w-full py-1.5 bg-pink-950 hover:bg-pink-900 text-pink-200 text-[9px] font-bold rounded-lg border border-pink-900 hover:border-pink-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20"
+                                      onClick={() => handleGenerateAvatar(char.id, 'nanobanana')}
+                                      className="w-full py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 text-[9px] font-bold rounded-lg border border-slate-800 hover:border-slate-600 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20"
+                                      title="已改走 Agnes 真實繪圖（不再使用 Unsplash 假圖）"
                                     >
-                                      {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-pink-400" />}
-                                      <span>Agnes AI</span>
+                                      {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-yellow-400" />}
+                                      <span>Nano→Agnes</span>
                                     </button>
                                     <button
                                       onClick={() => handleGenerateAvatar(char.id, 'mistral')}
                                       className="w-full py-1.5 bg-orange-950 hover:bg-orange-900 text-orange-200 text-[9px] font-bold rounded-lg border border-orange-900 hover:border-orange-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20"
+                                      title="已改走 Agnes 真實繪圖"
                                     >
                                       {char.isGeneratingAvatar ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-orange-400" />}
-                                      <span>Mistral AI</span>
+                                      <span>Mistral→Agnes</span>
                                     </button>
                                     <label className="col-span-2 w-full py-1.5 bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 text-[9px] font-bold rounded-lg border border-emerald-900/50 hover:border-emerald-700 transition-all flex flex-col items-center justify-center gap-1 cursor-pointer relative z-20" title="可選擇上傳多張相片作為角色一致性特徵參考">
                                       <Upload className="w-3 h-3 text-emerald-400" />
