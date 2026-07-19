@@ -4442,10 +4442,21 @@ Anime aesthetic, high resolution, no text, no watermark.
     let curProjectsScan = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
     let curProjScan = curProjectsScan.find(p => p.id === activeProjectId) || activeProject;
 
+    // Only count ACTIVE TAB fields. Never treat other tabs' old imageUrl as "already done"
+    // (that falsely enables 斷點續傳 and skips real generation after 一鍵清除 keyframes).
+    const isUsableMediaUrl = (url: any) => {
+      if (!url || typeof url !== "string") return false;
+      const u = url.trim();
+      if (!u || u === "null" || u === "undefined") return false;
+      if (u.includes("unsplash.com")) return false;
+      if (u.includes("pollinations-fallback")) return false;
+      if (u.includes("gradient") || u.includes("placeholder")) return false;
+      if (u.includes("mixkit.co")) return false; // stock video fallback
+      return u.startsWith("http") || u.startsWith("/assets/") || u.startsWith("data:");
+    };
+
     const hasLocalMedia = (curProjScan?.scenes || []).some((s: any) => {
-      const img = s[imageField] || s.imageUrl || s.imageUrlKeyframes;
-      const vid = s[videoField] || s.videoUrl || s.videoUrlKeyframes;
-      return !!(img || vid);
+      return isUsableMediaUrl(s[imageField]) || isUsableMediaUrl(s[videoField]);
     });
 
     // Retrieve backup — never hang forever; if media already cleared, do not re-inject old photos/videos
@@ -4453,7 +4464,7 @@ Anime aesthetic, high resolution, no text, no watermark.
       if (!hasLocalMedia) {
         setFullAutoLogs(prev => [
           ...prev,
-          "🧹 偵測到目前沒有本地媒體（可能剛一鍵清除），跳過抽回舊備份相片/影片，避免重用舊圖。",
+          "🧹 偵測到目前分頁沒有真實媒體（可能剛一鍵清除），跳過抽回舊備份相片/影片，避免重用舊圖。",
         ]);
         // Still allow soft metadata restore with short timeout, but skip media fields
         try {
@@ -4473,7 +4484,7 @@ Anime aesthetic, high resolution, no text, no watermark.
       ]);
     }
 
-    // Re-scan after optional restore
+    // Re-scan after optional restore — ACTIVE TAB fields only + reject stock/fallback URLs
     curProjectsScan = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
     curProjScan = curProjectsScan.find(p => p.id === activeProjectId) || activeProject;
     
@@ -4482,16 +4493,15 @@ Anime aesthetic, high resolution, no text, no watermark.
     let completedVideosCount = 0;
     
     curProjScan.scenes.forEach(s => {
-      const imgVal = s[imageField] || s.imageUrl || s.imageUrlKeyframes;
-      const vidVal = s[videoField] || s.videoUrl || s.videoUrlKeyframes;
-      if (imgVal) completedImagesCount++;
-      if (vidVal) completedVideosCount++;
+      if (isUsableMediaUrl(s[imageField])) completedImagesCount++;
+      if (isUsableMediaUrl(s[videoField])) completedVideosCount++;
     });
 
     const isResume = completedImagesCount > 0 || completedVideosCount > 0;
 
     setFullAutoLogs(prev => [
       ...prev,
+      `📂 掃描模式：${activeTab}（只計算 ${String(imageField)} / ${String(videoField)}，不認其他分頁舊圖）`,
       isResume 
         ? "🎬 [✨ 斷點增量續傳模式已啟用] 正在智慧掃描您目前手動調整或已合格的步驟，避免重複生成，保障創作延續性！"
         : "🎬 第一步：正在檢查並初始化劇本與分鏡劇本拆解..."
@@ -4501,11 +4511,11 @@ Anime aesthetic, high resolution, no text, no watermark.
       setFullAutoLogs(prev => [
         ...prev,
         `📊 專案掃描報告：共計 ${totalScenesCount} 個分鏡鏡頭。`,
-        `🖼️ 已就緒首幀：${completedImagesCount}/${totalScenesCount} 個分鏡。`,
-        `📹 已就緒影片：${completedVideosCount}/${totalScenesCount} 個分鏡。`,
+        `🖼️ 已就緒真實首幀：${completedImagesCount}/${totalScenesCount} 個分鏡。`,
+        `📹 已就緒真實影片：${completedVideosCount}/${totalScenesCount} 個分鏡。`,
         isResume 
-          ? `⚡ 本次製片將直接跳過已生成的首幀及影片，並針對失敗或修改的分鏡【接續增量生成】！`
-          : `🆕 本專案為全新製作，將從頭開始完整 7 步 Check List 大片級工作流。`
+          ? `⚡ 本次製片將跳過已有真實媒體的鏡頭，只補齊未完成分鏡（失敗/空白會重新生成）。`
+          : `🆕 本分頁無可用真實媒體，將從頭生成（不會沿用其他分頁或保底圖）。`
       ]);
     }
 
