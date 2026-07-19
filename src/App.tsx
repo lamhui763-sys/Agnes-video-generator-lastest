@@ -2871,12 +2871,25 @@ Anime aesthetic, high resolution, no text, no watermark.
     const downloadLatencyField = activeTab === "scenes_ext" ? "videoDownloadLatencyExt" : (activeTab === "scenes_keyframes" ? "videoDownloadLatencyKeyframes" : "videoDownloadLatency");
     const resourceAllocationField = activeTab === "scenes_ext" ? "videoResourceAllocationExt" : (activeTab === "scenes_keyframes" ? "videoResourceAllocationKeyframes" : "videoResourceAllocation");
 
-    const index = activeProject.scenes.findIndex(s => s.id === sceneId);
+    // Always prefer freshest localStorage project (full-auto writes there ahead of React state)
+    try {
+      const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+      const curProj = curProjects.find(p => p.id === activeProjectId);
+      if (curProj) freshActiveProject = curProj;
+    } catch (e) {}
+
+    // Kill any leftover poller for this scene (prevents race on retry → false "無有效網址")
+    if (videoIntervalsRef.current[sceneId]) {
+      try { clearInterval(videoIntervalsRef.current[sceneId]); } catch (_) {}
+      delete videoIntervalsRef.current[sceneId];
+    }
+
+    const index = freshActiveProject.scenes.findIndex(s => s.id === sceneId);
     let endImageUrl: string | undefined = undefined;
     let startImageUrlForTransition: string | undefined = undefined;
 
-    // Retrieve targets for video gen
-    const targetScene = activeProject.scenes.find(s => s.id === sceneId);
+    // Retrieve targets for video gen from freshest project
+    const targetScene = freshActiveProject.scenes.find(s => s.id === sceneId);
     if (!targetScene) return;
 
     if (sceneId.startsWith("scene_transition_")) {
@@ -2903,8 +2916,8 @@ Anime aesthetic, high resolution, no text, no watermark.
         alert("請先完成本分鏡的繪圖以作為首幀！");
         return;
       }
-      if (index < activeProject.scenes.length - 1) {
-        const nextScene = activeProject.scenes[index + 1];
+      if (index < freshActiveProject.scenes.length - 1) {
+        const nextScene = freshActiveProject.scenes[index + 1];
         const foundEndImage = nextScene.imageUrlKeyframes || nextScene.imageUrl || nextScene.imageUrlExt;
         if (!foundEndImage) {
           alert(`請先完成下一分鏡「${nextScene.title}」的繪圖，以作為本分鏡影片的結尾影格（尾幀）！`);
@@ -2914,21 +2927,33 @@ Anime aesthetic, high resolution, no text, no watermark.
       }
     }
 
-    updateActiveProject((prev) => ({
-      scenes: prev.scenes.map(s => {
-        if (s.id === sceneId) {
-          return { 
-            ...s, 
-            [isGenField]: true, 
-            [progressField]: "0%",
-            [logsField]: ["[SYSTEM] Initiating Agnes Video V2.0 call..."],
-            policyRetryCount: s.isRetryingPolicy ? s.policyRetryCount : 0,
-            isRetryingPolicy: s.isRetryingPolicy || false
+    // Sync write generating flag to localStorage immediately (full-auto polls localStorage, not React)
+    const markSceneVideoState = (patch: Record<string, any>) => {
+      try {
+        const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const next = list.map(p => {
+          if (p.id !== activeProjectId) return p;
+          return {
+            ...p,
+            scenes: p.scenes.map(s => s.id === sceneId ? { ...s, ...patch } : s)
           };
-        }
-        return s;
-      })
-    }));
+        });
+        localStorage.setItem("toonflow_projects", JSON.stringify(next));
+        localStorage.setItem("toonflow_last_sync_timestamp", Date.now().toString());
+      } catch (_) {}
+      updateActiveProject((prev) => ({
+        scenes: prev.scenes.map(s => s.id === sceneId ? { ...s, ...patch } : s)
+      }));
+    };
+
+    markSceneVideoState({
+      [isGenField]: true,
+      [progressField]: "0%",
+      [errorField]: "",
+      [logsField]: ["[SYSTEM] Initiating Agnes Video V2.0 call..."],
+      policyRetryCount: targetScene.isRetryingPolicy ? targetScene.policyRetryCount : 0,
+      isRetryingPolicy: targetScene.isRetryingPolicy || false
+    });
 
     try {
       const targetCharLower = (targetScene.character || "").trim().toLowerCase();
@@ -3089,19 +3114,11 @@ Anime aesthetic, high resolution, no text, no watermark.
         } else {
           console.error("[Toonflow Video Gen] Failed to initiate generation:", e);
         }
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => {
-            if (s.id === sceneId) {
-              return { 
-                ...s, 
-                [isGenField]: false, 
-                [errorField]: `生成請求失敗: ${e.message || e}`,
-                [logsField]: [...(s[logsField] as string[] || []), `[ERROR] ${e.message || e}`]
-              };
-            }
-            return s;
-          })
-        }));
+        markSceneVideoState({
+          [isGenField]: false,
+          [errorField]: `生成請求失敗: ${e.message || e}`,
+          [logsField]: [`[ERROR] ${e.message || e}`]
+        });
         return;
       }
 
@@ -3171,7 +3188,7 @@ Anime aesthetic, high resolution, no text, no watermark.
                         [isGenField]: false, 
                         [progressField]: "100%",
                         [logsField]: [...logs, "[SYSTEM] Video generated and mapped successfully!"],
-                        [errorField]: statusData.error,
+                        [errorField]: "",
                         [errorCodeField]: statusData.errorCode,
                         [apiLatencyField]: statusData.apiLatency || (s as any)[apiLatencyField],
                         [downloadLatencyField]: statusData.downloadLatency || (s as any)[downloadLatencyField],
@@ -3198,19 +3215,18 @@ Anime aesthetic, high resolution, no text, no watermark.
                         critiqueFromSystem: errString,
                         aiImprovementSuggestion: isPromptIssue 
                           ? "提示詞觸發了底層影片模型的安全政策。請移除非必要的安全敏感、人名或物理衝突描述。"
-                          : "影片生成連線逾時或算力短缺。建議啟用容錯降級（強制合格）以避免工作流中斷。",
-                        resolution: "⚠️ 正在呼叫 AI 經驗圖書館安全防重試與容錯降級工作流（強制合格推進）！"
+                          : "影片生成連線逾時或算力短缺。建議檢查 AGNES_API_KEY / Railway log 後手動重試。",
+                        resolution: "⚠️ 已禁用保底影片，交由重試或人手處理。"
                       });
 
-                      // Automatically trigger ffmpeg pan-and-scan zoom fallback!
-                      setTimeout(() => {
-                        handleVideoFallbackToPlaceholder(sceneId, startImageUrlForTransition || s.imageUrl || s.imageUrlExt || s.imageUrlKeyframes || "");
-                      }, 100);
-
+                      // NO placeholder/ffmpeg stock fallback — hard fail so full-auto can retry or stop
                       return {
                         ...s,
-                        [progressField]: "50%",
-                        [logsField]: [...logs, "[SYSTEM] ⚠️ 影片模型生成失敗。自動調度 ffmpeg 進行動態慢速運鏡保底影片生成..."],
+                        [isGenField]: false,
+                        [progressField]: "0%",
+                        [errorField]: errString,
+                        [errorCodeField]: statusData.errorCode,
+                        [logsField]: [...logs, `[SYSTEM] ❌ 影片生成失敗（已禁用保底影片）：${errString}`],
                         isRetryingPolicy: false,
                         [apiLatencyField]: statusData.apiLatency || (s as any)[apiLatencyField],
                         [downloadLatencyField]: statusData.downloadLatency || (s as any)[downloadLatencyField],
@@ -3241,30 +3257,14 @@ Anime aesthetic, high resolution, no text, no watermark.
           console.warn("Polling error for scene video", pollErr);
         }
 
-        // Failsafe timeout after 5 minutes of polling
+        // Failsafe timeout after ~10 minutes of polling (Agnes video is slow)
         count++;
-        if (count > 150) {
+        if (count > 200) {
           clearInterval(intervalId);
           delete videoIntervalsRef.current[sceneId];
-          setProjects(prevProjects => {
-            const updatedList = prevProjects.map(p => {
-              if (p.id === activeProjectId) {
-                const updatedScenes = p.scenes.map(s => {
-                  if (s.id === sceneId) {
-                    return {
-                      ...s,
-                      [isGenField]: false,
-                      [errorField]: "Generation timed out"
-                    };
-                  }
-                  return s;
-                });
-                return { ...p, scenes: updatedScenes };
-              }
-              return p;
-            });
-            try { localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); localStorage.setItem("toonflow_last_sync_timestamp", Date.now().toString()); } catch (e) { console.error("Quota exceeded", e); }
-            return updatedList;
+          markSceneVideoState({
+            [isGenField]: false,
+            [errorField]: "影片生成超時（約 10 分鐘）。請檢查 Agnes API / Railway 日誌後重試。"
           });
         }
       }, 3000);
@@ -5201,20 +5201,77 @@ Anime aesthetic, high resolution, no text, no watermark.
             if (!currentVidUrl) {
               setFullAutoLogs(prev => [...prev, `📹 [鏡頭 ${i + 1}] 正在呼叫 AI 導演合成影片 (嘗試 ${vidRetryCount}/${maxVidAttempts})...`]);
 
-              await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
+              // Only reset idle/failed server task — avoid killing a healthy in-flight job on first try
+              try {
+                const st0 = await fetch("/api/status").then(r => r.json()).catch(() => null);
+                if (!st0 || st0.status === "failed" || st0.status === "idle" || st0.status === "completed" || vidRetryCount > 1) {
+                  await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
+                }
+              } catch (_) {
+                await fetch("/api/reset-task", { method: "POST" }).catch(() => {});
+              }
 
-              // Trigger video generation - this automatically determines and passes nextScene.imageUrl as endImageUrl!
+              // Trigger video generation (start/end frames from freshest keyframe images)
               await handleGenerateVideo(scene.id, true);
 
               await new Promise<void>((resolve, reject) => {
                 let checkCount = 0;
-                const checkVidInterval = setInterval(() => {
+                let sawGenerating = false;
+                const checkVidInterval = setInterval(async () => {
                   checkCount++;
+                  try {
+                    // Prefer live server status (avoids localStorage race → false "無有效網址")
+                    const stRes = await fetch("/api/status");
+                    if (stRes.ok) {
+                      const st = await stRes.json();
+                      if (st.status === "in_progress" || st.status === "running") {
+                        sawGenerating = true;
+                        const prog = st.progress || "?";
+                        setFullAutoLogs(prev => {
+                          const prefix = `⏳ [鏡頭 ${i + 1}] Agnes 影片合成中... 進度 ${prog}`;
+                          if (prev[prev.length - 1] !== prefix) return [...prev, prefix];
+                          return prev;
+                        });
+                      } else if (st.status === "completed" && st.outputPath) {
+                        // Force-map URL into localStorage if poller lagged
+                        try {
+                          const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                          const next = list.map(p => {
+                            if (p.id !== activeProjectId) return p;
+                            return {
+                              ...p,
+                              scenes: p.scenes.map(s => s.id === scene.id ? {
+                                ...s,
+                                [videoField]: st.outputPath,
+                                [isGenVidField]: false,
+                                [progressField]: "100%",
+                                [errorField]: ""
+                              } : s)
+                            };
+                          });
+                          localStorage.setItem("toonflow_projects", JSON.stringify(next));
+                        } catch (_) {}
+                        clearInterval(checkVidInterval);
+                        resolve();
+                        return;
+                      } else if (st.status === "failed") {
+                        // Grace: ignore early idle/failed until we saw generation start, first ~12s
+                        if (sawGenerating || checkCount >= 4) {
+                          clearInterval(checkVidInterval);
+                          reject(new Error(st.error || "Agnes 影片生成失敗（伺服器 status=failed）"));
+                          return;
+                        }
+                      }
+                    }
+                  } catch (_) {}
+
                   const curProjList2 = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
                   const curProj2 = curProjList2.find(p => p.id === activeProjectId);
                   const freshS2 = curProj2?.scenes.find(s => s.id === scene.id);
 
                   if (freshS2) {
+                    if (freshS2[isGenVidField]) sawGenerating = true;
+
                     if (freshS2[progressField] && freshS2[progressField] !== "0%" && freshS2[progressField] !== "100%") {
                       setFullAutoLogs(prev => {
                         const prefix = `⏳ [鏡頭 ${i + 1}] 影片合成中... 進度 ${freshS2[progressField]}`;
@@ -5225,18 +5282,26 @@ Anime aesthetic, high resolution, no text, no watermark.
                       });
                     }
 
-                    if (!freshS2[isGenVidField]) {
+                    if (freshS2[videoField] && String(freshS2[videoField]).length > 4) {
                       clearInterval(checkVidInterval);
-                      if (freshS2[videoField]) {
-                        resolve();
-                      } else {
-                        reject(new Error(freshS2[errorField] || "影片生成失敗，無有效網址。"));
-                      }
+                      resolve();
+                      return;
+                    }
+
+                    // Only treat idle as failure after generate had a chance to start (avoid race)
+                    if (!freshS2[isGenVidField] && (sawGenerating || checkCount >= 5)) {
+                      clearInterval(checkVidInterval);
+                      const logsArr = (freshS2 as any).videoLogsKeyframes || (freshS2 as any).videoLogs || [];
+                      const lastLog = Array.isArray(logsArr) && logsArr.length ? String(logsArr[logsArr.length - 1]) : "";
+                      const errMsg = freshS2[errorField] || lastLog || "影片生成失敗，無有效網址（請查 Railway log / AGNES_API_KEY）";
+                      reject(new Error(errMsg));
+                      return;
                     }
                   }
-                  if (checkCount > 200) {
+                  // ~12 minutes (Agnes video is slow)
+                  if (checkCount > 240) {
                     clearInterval(checkVidInterval);
-                    reject(new Error("影片渲染超時。"));
+                    reject(new Error("影片渲染超時（約 12 分鐘）。請檢查 Railway log / AGNES_API_KEY。"));
                   }
                 }, 3000);
               });
