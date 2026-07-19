@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "prebuild": "node fix_detach_ai_studio.cjs || true; node fix_disable_firestore_writes.cjs || true; node fix_remove_unsplash_fallback.cjs || true",
+    "prebuild": "node fix_detach_ai_studio.cjs || true; node fix_disable_firestore_writes.cjs || true",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
