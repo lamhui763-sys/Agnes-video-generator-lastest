@@ -21,8 +21,15 @@ let changed = false;
 const oldFnMarker = "async function generateAgnesImageUrl(";
 if (server.includes(oldFnMarker)) {
   const start = server.indexOf(oldFnMarker);
-  // find matching closing of function by brace count from start
-  let i = server.indexOf("{", start);
+  // The signature contains "{" inside the return type object literal
+  // (Promise<{ url: string; model: string } | null>), so we must locate the
+  // function BODY brace: the first "{" that appears after the return type's
+  // closing ">" rather than the first "{" after the marker.
+  const parenClose = server.indexOf(")", start);
+  const searchFrom = parenClose >= 0 ? parenClose : start;
+  const retTypeEnd = server.indexOf(">", searchFrom);
+  const bodyBraceSearchFrom = retTypeEnd > searchFrom ? retTypeEnd : searchFrom;
+  let i = server.indexOf("{", bodyBraceSearchFrom);
   let depth = 0;
   let end = -1;
   for (let p = i; p < server.length; p++) {
