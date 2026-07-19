@@ -2504,7 +2504,7 @@ Anime aesthetic, high resolution, no text, no watermark.
         aiImprovementSuggestion: isPromptIssue 
           ? "偵測到可能違反安全或敏感詞策略的提示詞描述。建議移除具體人物姓名、限制級動作或可能敏感的物件，並保持英文提示詞簡短流暢。"
           : "繪圖伺服器算力資源超載或網絡抖動。建議稍後重試，或將繪圖引擎切換為 Stable Diffusion / 備用 Flux 快顯管道。",
-        resolution: "⚠️ 已自動調用 Unsplash 高清備用插圖（降級容錯），確保故事完整度並順利推進工作流！"
+        resolution: "⚠️ 繪圖失敗，已拒絕保底圖片。請手動重試或上傳。"
       });
 
       // fallback if error
@@ -2514,7 +2514,8 @@ Anime aesthetic, high resolution, no text, no watermark.
           if (s.id === sceneId) {
             return { 
               ...s, 
-              [imageField]: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80", 
+              // NO FALLBACK IMAGE — leave empty so skip/retry can work
+              [imageField]: "", 
               [isGenField]: false 
             };
           }
@@ -4189,8 +4190,15 @@ Anime aesthetic, high resolution, no text, no watermark.
 
     const resetScenes = activeProject.scenes.map(s => {
       const updated = { ...s };
+      // Fully wipe keyframe media so full-auto will NOT reuse old photos/videos
       delete updated.imageUrlKeyframes;
       delete updated.videoUrlKeyframes;
+      delete updated.startFrameKeyframes;
+      delete updated.endFrameKeyframes;
+      delete updated.endFrameDescriptionKeyframes;
+      delete updated.startFrameSourceKeyframes;
+      delete updated.step3ImageErrorKeyframes;
+      delete updated.midpointImageUrlKeyframes;
       updated.isGeneratingImageKeyframes = false;
       updated.isGeneratingVideoKeyframes = false;
       delete updated.videoProgressKeyframes;
@@ -4208,6 +4216,17 @@ Anime aesthetic, high resolution, no text, no watermark.
       delete updated.aiReviewCritique;
       updated.isReviewing = false;
       updated.hasAutoRegeneratedReview = false;
+      // Reset workflow gates so STEP 3/4/6 will re-run from scratch
+      updated.workflowStep = 1;
+      updated.step4Passed = false;
+      updated.step6Passed = false;
+      updated.step4ImageReviewScore = 0;
+      updated.step6VideoReviewScore = 0;
+      updated.step7AdviceForNext = "";
+      updated.step4ImageReviewText = "";
+      updated.step6VideoReviewText = "";
+      delete updated.step2OptimizedPrompt;
+      delete updated.step2OptimizedNegative;
       return updated;
     });
 
@@ -4215,9 +4234,28 @@ Anime aesthetic, high resolution, no text, no watermark.
       scenes: resetScenes,
       finalVideoUrl: undefined
     });
+    showToast("已清空所有首尾幀／影片／審核狀態，可重頭再來", "success");
   };
 
   // One-click generate all keyframe-based transition videos sequentially
+  // Clear Catbox permanent files that this app uploaded
+  const handleClearCatbox = async () => {
+    if (!window.confirm('確定要清除所有已上傳到 Catbox 的永久檔案嗎？此操作無法復原。')) return;
+    try {
+      showToast('正在清除 Catbox 檔案...', 'info');
+      const res = await fetch('/api/clear-catbox', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        showToast(data.message || 'Catbox 清除完成', 'success');
+      } else {
+        showToast(data.error || '清除失敗', 'error');
+      }
+    } catch (e: any) {
+      showToast('清除 Catbox 失敗: ' + (e.message || e), 'error');
+    }
+  };
+
+
   const handleGenerateAllKeyframesSequentially = async () => {
     if (!activeProject || isGeneratingAllKeyframesSequentially) return;
     setIsGeneratingAllKeyframesSequentially(true);
@@ -4627,37 +4665,53 @@ Anime aesthetic, high resolution, no text, no watermark.
         await new Promise(r => setTimeout(r, 300));
       }
 
+// =========================================================================
+      // STEP 3: 生成所有鏡頭的首幀（跳過失敗→循環重試，最多 5 輪，絕不使用保底圖）
       // =========================================================================
-      // STEP 3: 生成所有鏡頭的首幀（只生成首幀）
-      // =========================================================================
-      setFullAutoLogs(prev => [...prev, "🎬 [步驟 3] 正在生成所有分鏡的首幀（每個鏡頭只生成首幀）..."]);
-      for (let i = 0; i < currentScenes.length; i++) {
-        const scene = currentScenes[i];
+      setFullAutoLogs(prev => [...prev, "🎬 [步驟 3] 正在生成所有分鏡的首幀（失敗會先跳過，成功後回頭重試，最多 5 輪循環）..."]);
 
-        const curProjListCheck = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-        const curProjCheck = curProjListCheck.find(p => p.id === activeProjectId);
-        const freshSCheck = curProjCheck?.scenes.find(s => s.id === scene.id) || scene;
-        const currentImgUrl = freshSCheck[imageField] || freshSCheck.imageUrl || freshSCheck.imageUrlKeyframes;
+      const isRealImageUrl = (url: string | undefined | null) => {
+        if (!url || typeof url !== "string") return false;
+        if (url.includes("unsplash.com")) return false;
+        if (url.includes("gradient") || url.includes("placeholder")) return false;
+        if (url.includes("pollinations-fallback")) return false;
+        if (url.trim() === "" || url === "null" || url === "undefined") return false;
+        return url.startsWith("http") || url.startsWith("/assets/") || url.startsWith("data:image");
+      };
 
-        if (currentImgUrl) {
-          setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ➡️ 偵測到已有首幀影像，自動跳過影像生成。`]);
-          continue;
-        }
+      const maxImageRounds = 5;
+      let imageRound = 0;
+      let allImagesReady = false;
 
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
-        }));
+      while (!allImagesReady && imageRound < maxImageRounds) {
+        imageRound++;
+        setFullAutoLogs(prev => [...prev, `🔄 [步驟 3] 第 ${imageRound}/${maxImageRounds} 輪：掃描並生成尚未成功的首幀...`]);
 
-        let imageSuccess = false;
-        let imgRetryCount = 0;
-        const maxImgAttempts = strictWorkflowLock ? 10 : 3;
+        let anyAttemptedThisRound = false;
+        let successThisRound = 0;
 
-        while (!imageSuccess && imgRetryCount < maxImgAttempts) {
-          imgRetryCount++;
-          setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 正在繪製首幀極致畫面 (嘗試 ${imgRetryCount}/${maxImgAttempts})...`]);
-          await handleGenerateImage(scene.id, 'agnes');
+        for (let i = 0; i < currentScenes.length; i++) {
+          const scene = currentScenes[i];
 
+          const curProjListCheck = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+          const curProjCheck = curProjListCheck.find(p => p.id === activeProjectId);
+          const freshSCheck = curProjCheck?.scenes.find(s => s.id === scene.id) || scene;
+          // Only trust the active mode field — never fall back to other tabs' old images
+          const currentImgUrl = freshSCheck[imageField];
+
+          if (isRealImageUrl(currentImgUrl)) {
+            continue;
+          }
+
+          anyAttemptedThisRound = true;
+          updateActiveProject((prev) => ({
+            scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
+          }));
+
+          setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 第 ${imageRound} 輪：正在繪製首幀...`]);
           try {
+            await handleGenerateImage(scene.id, "agnes");
+
             await new Promise<void>((resolve, reject) => {
               let checkCount = 0;
               const checkImgInterval = setInterval(() => {
@@ -4669,10 +4723,10 @@ Anime aesthetic, high resolution, no text, no watermark.
                 if (freshS) {
                   if (!freshS[isGenImgField]) {
                     clearInterval(checkImgInterval);
-                    if (freshS[imageField]) {
+                    if (isRealImageUrl(freshS[imageField])) {
                       resolve();
                     } else {
-                      reject(new Error("影像生成完畢，但未回傳有效首幀網址。"));
+                      reject(new Error("影像生成完畢，但未回傳有效真實首幀網址（已禁用保底圖）。"));
                     }
                   }
                 }
@@ -4683,55 +4737,60 @@ Anime aesthetic, high resolution, no text, no watermark.
               }, 1500);
             });
 
-            const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-            const curProj = curProjList.find(p => p.id === activeProjectId);
-            const freshS = curProj?.scenes.find(s => s.id === scene.id);
-
-            if (freshS && freshS[imageField]) {
-              setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 成功繪製首幀極致畫面！`]);
-              imageSuccess = true;
-            } else {
-              throw new Error("網址映射失敗");
-            }
+            successThisRound++;
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 成功繪製真實首幀！`]);
           } catch (imgErr: any) {
-            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 首幀生成失敗 (嘗試 ${imgRetryCount}/${maxImgAttempts}): ${imgErr.message || imgErr}`]);
-            if (imgRetryCount >= maxImgAttempts) {
-              if (strictWorkflowLock) {
-                setFullAutoLogs(prev => [...prev, `🛑 [嚴格安全鎖防護] 鏡頭 ${i + 1} 首幀重試達 10 次上限，全自動製片中斷，請手動介入調整！`]);
-                showToast(`[嚴格鎖防護] 鏡頭 ${i + 1} 連續失敗，已暫停，無繞過。`, "error");
-                throw new Error("STRICT_LOCK_PAUSE");
-              } else {
-                setFullAutoLogs(prev => [...prev, `⚠️ [容錯降級] 鏡頭 ${i + 1} 首幀失敗，自動套用極速安全備用畫面...`]);
-                const fallbackImg = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80";
-                updateActiveProject((prev) => ({
-                  scenes: prev.scenes.map(s => s.id === scene.id ? { 
-                    ...s, 
-                    imageUrl: fallbackImg, 
-                    imageUrlExt: fallbackImg, 
-                    imageUrlKeyframes: fallbackImg,
-                    isGeneratingImage: false,
-                    isGeneratingImageExt: false,
-                    isGeneratingImageKeyframes: false
-                  } : s)
-                }));
-                try {
-                  const curList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                  const updatedList = curList.map(p => p.id === activeProjectId ? {
-                    ...p,
-                    scenes: p.scenes.map(s => s.id === scene.id ? { ...s, imageUrl: fallbackImg, imageUrlExt: fallbackImg, imageUrlKeyframes: fallbackImg } : s)
-                  } : p);
-                  localStorage.setItem("toonflow_projects", JSON.stringify(updatedList)); localStorage.setItem("toonflow_last_sync_timestamp", Date.now().toString());
-                } catch(e) {}
-                imageSuccess = true;
-              }
-            } else {
-              await new Promise(r => setTimeout(r, 2000));
-            }
+            setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ⚠️ 首幀失敗，先跳過，稍後再試：${imgErr.message || imgErr}`]);
+            updateActiveProject((prev) => ({
+              scenes: prev.scenes.map(s => s.id === scene.id ? {
+                ...s,
+                isGeneratingImage: false,
+                isGeneratingImageExt: false,
+                isGeneratingImageKeyframes: false
+              } : s)
+            }));
+            await new Promise(r => setTimeout(r, 800));
           }
+        }
+
+        const finalCheckList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const finalProj = finalCheckList.find(p => p.id === activeProjectId);
+        const scenesNow = finalProj?.scenes || currentScenes;
+        const missing = scenesNow.filter(s => {
+          const u = s[imageField];
+          return !isRealImageUrl(u);
+        });
+
+        if (missing.length === 0) {
+          allImagesReady = true;
+          setFullAutoLogs(prev => [...prev, "✅ [步驟 3] 所有鏡頭真實首幀已全部生成成功！"]);
+        } else if (!anyAttemptedThisRound) {
+          break;
+        } else {
+          setFullAutoLogs(prev => [...prev, `📋 [步驟 3] 第 ${imageRound} 輪結束：本輪成功 ${successThisRound} 個，尚餘 ${missing.length} 個未成功，將進入下一輪...`]);
+          await new Promise(r => setTimeout(r, 1500));
         }
       }
 
-      // =========================================================================
+      if (!allImagesReady) {
+        const finalCheckList2 = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const finalProj2 = finalCheckList2.find(p => p.id === activeProjectId);
+        const scenesNow2 = finalProj2?.scenes || currentScenes;
+        const stillMissing = scenesNow2
+          .map((s, idx) => ({ s, idx }))
+          .filter(({ s }) => !isRealImageUrl(s[imageField]));
+
+        setFullAutoLogs(prev => [
+          ...prev,
+          `🛑 [步驟 3] 已完成 ${maxImageRounds} 輪循環，仍有 ${stillMissing.length} 個鏡頭未能生成真實相片。`,
+          "💡 已停止自動推進，請手動為失敗鏡頭重新生成或上傳圖片，完成後再繼續下一步。",
+          ...stillMissing.map(({ idx }) => `   - 鏡頭 ${idx + 1} 仍缺真實首幀`)
+        ]);
+        showToast(`[步驟 3] ${stillMissing.length} 個鏡頭首幀失敗，已停低交人手處理`, "error");
+        throw new Error("IMAGE_GEN_MANUAL_INTERVENTION");
+      }
+
+            // =========================================================================
       // STEP 4: AI 檢查所有首幀是否合理 + 故事連貫性
       // =========================================================================
       setFullAutoLogs(prev => [...prev, "🎬 [步驟 4] AI 正在檢查所有首幀合理性與故事連貫性..."]);
@@ -5517,7 +5576,12 @@ Anime aesthetic, high resolution, no text, no watermark.
       }
 
     } catch (err: any) {
-      if (err.message === "STRICT_LOCK_PAUSE") {
+      if (err.message === "IMAGE_GEN_MANUAL_INTERVENTION") {
+        setFullAutoLogs(prev => [
+          ...prev,
+          "🛑 首幀生成已達 5 輪上限，部分鏡頭仍未成功。已停低，請手動補齊真實相片後再繼續。"
+        ]);
+      } else if (err.message === "STRICT_LOCK_PAUSE") {
         setFullAutoLogs(prev => [
           ...prev,
           "🛑 [嚴格安全鎖防護觸發] 由於分鏡重試達 10 次上限且未全項目通過，已安全關閉自動製片線路，拒絕自動推進！",
@@ -6590,15 +6654,13 @@ Anime aesthetic, high resolution, no text, no watermark.
         return;
       }
       showToast(`角色設計圖生成失敗：${e.message || "與繪圖伺服器連接時發生錯誤"}`, "error");
-      const fallbackUrl = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=600&q=80";
+      // NO avatar fallback image
       updateActiveProject(prev => {
         const list = prev.characters.map(c => {
           if (c.id === charId) {
-            return { 
-              ...c, 
-              avatarUrl: fallbackUrl,
-              avatarUrls: [fallbackUrl],
-              isGeneratingAvatar: false 
+            return {
+              ...c,
+              isGeneratingAvatar: false
             };
           }
           return c;
@@ -8879,6 +8941,17 @@ Anime aesthetic, high resolution, no text, no watermark.
                           <Trash2 className={ `w-3.5 h-3.5 ${isConfirmingClear ? "text-white" : "text-red-400"}`} />
                           <span>{isConfirmingClear ? "⚠️ 再次點擊以確認清除！" : "一鍵清除已生成 (重頭再來)"}</span>
                         </button>
+                        {/* TOONFLOW_CLEAR_CATBOX_BUTTON_START */}
+                        <button
+                          type="button"
+                          onClick={handleClearCatbox}
+                          className="py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20 border bg-slate-900 border-orange-500/40 hover:bg-orange-950/20 text-orange-400"
+                          title="清除本 App 已上傳到 Catbox 的永久檔案（需要設定 CATBOX_USERHASH）"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-orange-400" />
+                          <span>清除 Catbox 檔案</span>
+                        </button>
+                        {/* TOONFLOW_CLEAR_CATBOX_BUTTON_END */}
 
                         <button
                           onClick={handleGenerateAllKeyframesSequentially}

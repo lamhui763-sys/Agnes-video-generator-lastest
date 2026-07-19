@@ -17,6 +17,10 @@ export interface LogEntry {
 }
 
 export async function logToExperienceLibrary(log: LogEntry) {
+  // [GUARD] Firestore write disabled - fully detached from AI Studio
+  console.log('[Experience Library disabled - local mode]', log.errorName);
+  return;
+
   // Filter out benign environment errors that shouldn't clutter the Experience Library
   const benignErrors = [
     "WebSocket closed without opened",
