@@ -1,7 +1,6 @@
 /**
  * fix_auto_apply.cjs
- * Runs automatically during Railway build (prebuild).
- * Uses small unique anchors so patches actually apply.
+ * Runs on Railway prebuild.
  */
 const fs = require('fs');
 const path = require('path');
@@ -27,7 +26,10 @@ function patchFile(filePath, patches) {
         console.log('[fix_auto_apply] NOT FOUND:', name);
       }
     } else if (find instanceof RegExp) {
+      // reset lastIndex
+      find.lastIndex = 0;
       if (find.test(content)) {
+        find.lastIndex = 0;
         content = content.replace(find, replace);
         changed = true;
         console.log('[fix_auto_apply] Applied (regex):', name);
@@ -44,11 +46,11 @@ function patchFile(filePath, patches) {
   return changed;
 }
 
-// ========== server.ts ==========
+// ========== server.ts : CORS + health ==========
 const serverPath = path.join(__dirname, 'server.ts');
 patchFile(serverPath, [
   {
-    name: 'CORS + Health (anchor)',
+    name: 'CORS + Health',
     find: 'const app = express();',
     replace: `const app = express();
 
@@ -70,8 +72,8 @@ app.get('/api/health', (req, res) => {
 // ========== src/App.tsx ==========
 const appPath = path.join(__dirname, 'src', 'App.tsx');
 
-// 1) Make clear wipe EVERYTHING (use small unique anchor inside the function)
 patchFile(appPath, [
+  // --- Clear: wipe all media + scores + set force-restart flag ---
   {
     name: 'Expand clear to wipe all media + scores',
     find: `const resetScenes = activeProject.scenes.map(s => {
@@ -105,11 +107,9 @@ patchFile(appPath, [
   };`,
     replace: `const resetScenes = activeProject.scenes.map(s => {
       const updated = { ...s };
-      // WIPE ALL images
       delete updated.imageUrl;
       delete updated.imageUrlExt;
       delete updated.imageUrlKeyframes;
-      // WIPE ALL videos
       delete updated.videoUrl;
       delete updated.videoUrlExt;
       delete updated.videoUrlKeyframes;
@@ -117,14 +117,12 @@ patchFile(appPath, [
       delete updated.videoUrlExtLocal;
       delete updated.videoUrlKeyframesLocal;
       delete updated.videoTailFrame;
-      // generation flags
       updated.isGeneratingImage = false;
       updated.isGeneratingImageExt = false;
       updated.isGeneratingImageKeyframes = false;
       updated.isGeneratingVideo = false;
       updated.isGeneratingVideoExt = false;
       updated.isGeneratingVideoKeyframes = false;
-      // progress / logs / errors
       delete updated.videoProgress;
       delete updated.videoProgressExt;
       delete updated.videoProgressKeyframes;
@@ -137,7 +135,6 @@ patchFile(appPath, [
       delete updated.videoErrorCode;
       delete updated.videoErrorCodeExt;
       delete updated.videoErrorCodeKeyframes;
-      // policy / review
       updated.isRetryingPolicy = false;
       updated.policyRetryCount = 0;
       updated.useFreezeAndMove = false;
@@ -149,7 +146,6 @@ patchFile(appPath, [
       delete updated.aiReviewCritique;
       updated.isReviewing = false;
       updated.hasAutoRegeneratedReview = false;
-      // 7-step scores so skip will NOT fire
       delete updated.step2OptimizedPrompt;
       delete updated.step2OptimizedNegative;
       delete updated.step4ImageReviewScore;
@@ -169,14 +165,12 @@ patchFile(appPath, [
       finalVideoUrl: undefined
     });
 
-    // Mark force-restart so next full-auto will NOT restore backup
     try {
       if (activeProjectId) {
         localStorage.setItem('toonflow_force_restart_' + activeProjectId, String(Date.now()));
       }
     } catch (e) {}
 
-    // Wipe server backup
     if (activeProjectId) {
       fetch('/api/backup-assets', {
         method: 'POST',
@@ -189,7 +183,7 @@ patchFile(appPath, [
   };`
   },
 
-  // 2) Block auto-restore at startup if user just cleared
+  // --- Block startup restore after clear ---
   {
     name: 'Block startup restore after clear',
     find: `// Startup / interruption recovery auto-restoration hook
@@ -204,7 +198,6 @@ patchFile(appPath, [
     replace: `// Startup / interruption recovery auto-restoration hook
   useEffect(() => {
     if (isSyncCompleted && activeProjectId) {
-      // If user pressed clear, do NOT restore old media
       try {
         const forceFlag = localStorage.getItem('toonflow_force_restart_' + activeProjectId);
         if (forceFlag) {
@@ -220,7 +213,7 @@ patchFile(appPath, [
   }, [isSyncCompleted, activeProjectId]);`
   },
 
-  // 3) Block restore at beginning of full-auto if user cleared
+  // --- Block full-auto restore after clear ---
   {
     name: 'Block full-auto restore after clear',
     find: `// Retrieve approved scenes from server file backup first
@@ -230,12 +223,10 @@ patchFile(appPath, [
       console.warn("Failed to auto restore backup:", e);
     }`,
     replace: `// Retrieve approved scenes from server file backup first
-    // BUT skip if user just pressed clear (force restart)
     try {
       const forceFlag = localStorage.getItem('toonflow_force_restart_' + activeProjectId);
       if (forceFlag) {
         setFullAutoLogs(prev => [...prev, '🔄 偵測到「重頭再來」標記：已跳過備份還原，強制從頭生成。']);
-        // Keep the flag until this full-auto finishes, then clear it at the end if you want
       } else {
         await handleRestoreFromBackup(true);
       }
@@ -244,19 +235,50 @@ patchFile(appPath, [
     }`
   },
 
-  // 4) Stricter skip so empty/invalid urls are not treated as done
+  // --- CRITICAL: Never skip unless BOTH real image + real video exist ---
+  // Match the common skip patterns in full-auto for step 3 (image), step 4 (review), step 6 (video)
   {
-    name: 'Stricter video skip',
-    find: /if\s*\(\s*freshSCheck\[videoField\]\s*&&\s*freshSCheck\.step6Passed\s*&&\s*freshSCheck\.step6VideoReviewScore\s*>=\s*60\s*\)/g,
-    replace: `if (
-          freshSCheck[videoField] &&
-          typeof freshSCheck[videoField] === 'string' &&
-          freshSCheck[videoField].length > 20 &&
-          !String(freshSCheck[videoField]).includes('placeholder') &&
-          !String(freshSCheck[videoField]).includes('tmpfiles.org') &&
-          freshSCheck.step6Passed &&
-          (freshSCheck.step6VideoReviewScore || 0) >= 60
-        )`
+    name: 'Strict image skip (step 3)',
+    find: /if \(currentImgUrl\) \{\s*setFullAutoLogs\(prev => \[\.\.\.prev, `\[鏡頭 \$\{i \+ 1\}\] ➡️ 偵測到已有首幀影像，自動跳過影像生成。`\]\);\s*continue;\s*\}/g,
+    replace: `if (currentImgUrl && typeof currentImgUrl === 'string' && currentImgUrl.length > 20 && !currentImgUrl.includes('placeholder') && !currentImgUrl.includes('unsplash.com/photo-1618005182384')) {
+          setFullAutoLogs(prev => [...prev, \`[鏡頭 \${i + 1}] ➡️ 偵測到已有首幀影像，自動跳過影像生成。\`]);
+          continue;
+        }`
+  },
+  {
+    name: 'Strict step4 skip',
+    find: /if \(freshSCheck\.step4Passed && freshSCheck\.step4ImageReviewScore >= 60\) \{\s*setFullAutoLogs\(prev => \[\.\.\.prev, `\[鏡頭 \$\{i \+ 1\}\] ➡️ 偵測到首幀審核已通過（分數：\$\{freshSCheck\.step4ImageReviewScore\}\/100），自動跳過審核。`\]\);\s*continue;\s*\}/g,
+    replace: `const _imgForStep4 = freshSCheck[imageField] || freshSCheck.imageUrl || freshSCheck.imageUrlKeyframes;
+        if (freshSCheck.step4Passed && (freshSCheck.step4ImageReviewScore || 0) >= 60 && _imgForStep4 && typeof _imgForStep4 === 'string' && _imgForStep4.length > 20) {
+          setFullAutoLogs(prev => [...prev, \`[鏡頭 \${i + 1}] ➡️ 偵測到首幀審核已通過（分數：\${freshSCheck.step4ImageReviewScore}/100），自動跳過審核。\`]);
+          continue;
+        }`
+  },
+  {
+    name: 'Strict video skip (step 6) - require real video AND real image',
+    find: /if \(freshSCheck\[videoField\] && freshSCheck\.step6Passed && freshSCheck\.step6VideoReviewScore >= 60\) \{\s*setFullAutoLogs\(prev => \[\.\.\.prev, `\[鏡頭 \$\{i \+ 1\}\] ➡️ 偵測到影片已生成且審核通過（分數：\$\{freshSCheck\.step6VideoReviewScore\}\/100），自動跳過。`\]\);\s*continue;\s*\}/g,
+    replace: `const _vid = freshSCheck[videoField];
+        const _img = freshSCheck[imageField] || freshSCheck.imageUrl || freshSCheck.imageUrlKeyframes;
+        const _vidOk = _vid && typeof _vid === 'string' && _vid.length > 20 && !_vid.includes('placeholder') && !_vid.includes('tmpfiles.org');
+        const _imgOk = _img && typeof _img === 'string' && _img.length > 20 && !_img.includes('placeholder');
+        if (_vidOk && _imgOk && freshSCheck.step6Passed && (freshSCheck.step6VideoReviewScore || 0) >= 60) {
+          setFullAutoLogs(prev => [...prev, \`[鏡頭 \${i + 1}] ➡️ 偵測到影片已生成且審核通過（分數：\${freshSCheck.step6VideoReviewScore}/100），自動跳過。\`]);
+          continue;
+        }
+        // If scores say passed but media is missing, clear the stale flags and regenerate
+        if ((freshSCheck.step6Passed || freshSCheck.step6VideoReviewScore) && (!_vidOk || !_imgOk)) {
+          setFullAutoLogs(prev => [...prev, \`[鏡頭 \${i + 1}] ⚠️ 偵測到分數存在但相片/影片實際為空，清除舊狀態並重新生成。\`]);
+          updateActiveProject((prev) => ({
+            scenes: prev.scenes.map(s => s.id === scene.id ? {
+              ...s,
+              step6Passed: false,
+              step6VideoReviewScore: undefined,
+              step6VideoReviewText: undefined,
+              step4Passed: _imgOk ? s.step4Passed : false,
+              [videoField]: _vidOk ? s[videoField] : undefined
+            } : s)
+          }));
+        }`
   }
 ]);
 
