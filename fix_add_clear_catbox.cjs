@@ -2,6 +2,7 @@
  * fix_add_clear_catbox.cjs
  * 1. Add /api/clear-catbox endpoint to server.ts
  * 2. Add "清除 Catbox 檔案" button + handler in App.tsx
+ * Hardened markers so button survives other prebuild fixes.
  */
 
 const fs = require('fs');
@@ -15,7 +16,6 @@ if (fs.existsSync(serverPath)) {
   let server = fs.readFileSync(serverPath, 'utf8');
 
   if (!server.includes('/api/clear-catbox')) {
-    // Insert before the final startServer() call
     const marker = '// Serve assets folder statically';
     const idx = server.lastIndexOf(marker);
     if (idx !== -1) {
@@ -32,7 +32,6 @@ app.post("/api/clear-catbox", async (req, res) => {
     const errors: string[] = [];
 
     if (userhash && catboxUrls.length > 0) {
-      // Catbox deletefiles expects only the filenames (e.g. "abc123.png")
       const filenames = catboxUrls.map(u => {
         try {
           const parts = u.split("/");
@@ -42,7 +41,6 @@ app.post("/api/clear-catbox", async (req, res) => {
         }
       }).filter(Boolean) as string[];
 
-      // Catbox allows max ~50 files per call; batch if needed
       const batchSize = 40;
       for (let i = 0; i < filenames.length; i += batchSize) {
         const batch = filenames.slice(i, i + batchSize);
@@ -73,7 +71,6 @@ app.post("/api/clear-catbox", async (req, res) => {
       }
     }
 
-    // Always clear local cloud-mapping for Catbox entries
     const newMapping: Record<string, string> = {};
     for (const [url, local] of Object.entries(mapping)) {
       if (!url.includes("catbox.moe") && !url.includes("files.catbox.moe")) {
@@ -82,7 +79,6 @@ app.post("/api/clear-catbox", async (req, res) => {
     }
     saveCloudMapping(newMapping);
 
-    // Also prune approved-assets that point to Catbox
     try {
       const assets = loadApprovedAssets();
       const kept = assets.filter(a => !(a.url && (a.url.includes("catbox.moe") || a.url.includes("files.catbox.moe"))));
@@ -128,14 +124,17 @@ if (fs.existsSync(appPath)) {
   let app = fs.readFileSync(appPath, 'utf8');
   let changed = false;
 
-  // Add handler if missing
+  // --- Handler ---
   if (!app.includes('handleClearCatbox')) {
-    const insertAfter = 'const handleClearAllKeyframes = () => {';
-    const pos = app.indexOf(insertAfter);
+    // Prefer insert right after handleClearAllKeyframes function ends
+    const clearFnMarker = 'const handleClearAllKeyframes = () => {';
+    const pos = app.indexOf(clearFnMarker);
     if (pos !== -1) {
-      // Find the end of handleClearAllKeyframes function (roughly next "const handle")
-      const afterFn = app.indexOf('\n  // One-click generate all keyframe', pos);
-      if (afterFn !== -1) {
+      // Find next top-level const handle... after this function
+      const after = app.indexOf('\n  const handleGenerateAllKeyframesSequentially', pos);
+      const after2 = app.indexOf('\n  // One-click generate all keyframe', pos);
+      const insertAt = after !== -1 ? after : after2;
+      if (insertAt !== -1) {
         const handler = `
   // Clear Catbox permanent files that this app uploaded
   const handleClearCatbox = async () => {
@@ -155,28 +154,36 @@ if (fs.existsSync(appPath)) {
   };
 
 `;
-        app = app.slice(0, afterFn) + handler + app.slice(afterFn);
+        app = app.slice(0, insertAt) + handler + app.slice(insertAt);
         changed = true;
         console.log('✅ Added handleClearCatbox handler');
+      } else {
+        console.log('[fix] Could not find insert point after handleClearAllKeyframes');
       }
+    } else {
+      console.log('[fix] handleClearAllKeyframes not found');
     }
+  } else {
+    console.log('[fix] handleClearCatbox already present');
   }
 
-  // Add button next to the clear keyframes button
-  if (!app.includes('清除 Catbox 檔案') && !app.includes('handleClearCatbox()')) {
-    // Look for the clear keyframes button text
-    const btnMarker = '一鍵清除已生成 (重頭再來)';
-    const btnPos = app.indexOf(btnMarker);
+  // --- Button UI ---
+  if (!app.includes('清除 Catbox 檔案')) {
+    // Multiple possible button texts
+    const markers = [
+      '一鍵清除已生成 (重頭再來)',
+      '一鍵清除已生成(重頭再來)',
+      '再次點擊以確認清除',
+    ];
+    let btnPos = -1;
+    for (const m of markers) {
+      btnPos = app.indexOf(m);
+      if (btnPos !== -1) break;
+    }
+
     if (btnPos !== -1) {
-      // Find the closing of that button's parent div (the flex container)
-      // We will inject a new button right after the clear button
-      // Find the end of the button element that contains this text
-      let searchStart = btnPos;
-      // Go backwards to find the opening <button
-      const btnStart = app.lastIndexOf('<button', searchStart);
-      // Find the matching closing </button> after btnPos
       const btnEnd = app.indexOf('</button>', btnPos);
-      if (btnStart !== -1 && btnEnd !== -1) {
+      if (btnEnd !== -1) {
         const insertPos = btnEnd + '</button>'.length;
         const newBtn = `
                         <button
@@ -191,7 +198,11 @@ if (fs.existsSync(appPath)) {
         changed = true;
         console.log('✅ Added Clear Catbox button in UI');
       }
+    } else {
+      console.log('[fix] Clear keyframes button text not found for UI inject');
     }
+  } else {
+    console.log('[fix] Clear Catbox button already in UI');
   }
 
   if (changed) {
