@@ -1,63 +1,45 @@
 /**
- * fix_add_clear_catbox.cjs
- * 1. POST /api/clear-catbox on server.ts
- * 2. handleClearCatbox + orange UI button next to clear-keyframes
- * Detection uses onClick={handleClearCatbox} (never toast substring).
- * Idempotent + multiple markers for Railway prebuild reliability.
+ * fix_add_clear_catbox.cjs — LAST prebuild step
+ * Bulletproof inject of /api/clear-catbox + handleClearCatbox + UI button
  */
-const fs = require("fs");
-const path = require("path");
+const fs = require('fs');
+const path = require('path');
 
-const serverPath = path.join(__dirname, "server.ts");
+function read(p) { return fs.readFileSync(p, 'utf8'); }
+function write(p, c, label) { fs.writeFileSync(p, c, 'utf8'); console.log('✅', label); }
+
+// ========== server.ts ==========
+const serverPath = path.join(__dirname, 'server.ts');
 if (fs.existsSync(serverPath)) {
-  let server = fs.readFileSync(serverPath, "utf8");
-
-  if (
-    !server.includes('app.post("/api/clear-catbox"') &&
-    !server.includes("app.post('/api/clear-catbox'")
-  ) {
+  let server = read(serverPath);
+  if (!server.includes('/api/clear-catbox')) {
     const markers = [
-      "// Serve assets folder statically",
-      "app.use('/assets'",
+      '// Serve assets folder statically',
       'app.use("/assets"',
-      "app.listen(",
+      'app.use(\'/assets\'',
+      'startServer()',
     ];
-    let idx = -1;
-    let marker = "";
-    for (const m of markers) {
-      idx = server.lastIndexOf(m);
-      if (idx !== -1) {
-        marker = m;
-        break;
-      }
-    }
-
-    if (idx !== -1) {
+    let inserted = false;
+    for (const marker of markers) {
+      const idx = server.lastIndexOf(marker);
+      if (idx === -1) continue;
       const endpoint = `
 // Clear all Catbox files that this app has uploaded (requires CATBOX_USERHASH)
 app.post("/api/clear-catbox", async (req, res) => {
   try {
     const userhash = process.env.CATBOX_USERHASH || "";
-    const mapping = typeof loadCloudMapping === "function" ? loadCloudMapping() : {};
-    const catboxUrls = Object.keys(mapping || {}).filter(
-      (u) => u.includes("catbox.moe") || u.includes("files.catbox.moe")
-    );
+    let mapping: Record<string, string> = {};
+    try { mapping = typeof loadCloudMapping === "function" ? loadCloudMapping() : {}; } catch {}
+    const catboxUrls = Object.keys(mapping || {}).filter(u => String(u).includes("catbox.moe"));
 
     let deleted = 0;
     let failed = 0;
     const errors: string[] = [];
 
     if (userhash && catboxUrls.length > 0) {
-      const filenames = catboxUrls
-        .map((u) => {
-          try {
-            const parts = u.split("/");
-            return parts[parts.length - 1].split("?")[0];
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean) as string[];
+      const filenames = catboxUrls.map(u => {
+        try { return u.split("/").pop()?.split("?")[0] || null; } catch { return null; }
+      }).filter(Boolean) as string[];
 
       const batchSize = 40;
       for (let i = 0; i < filenames.length; i += batchSize) {
@@ -67,22 +49,13 @@ app.post("/api/clear-catbox", async (req, res) => {
           form.append("reqtype", "deletefiles");
           form.append("userhash", userhash);
           form.append("files", batch.join(" "));
-
           const resp = await fetch("https://catbox.moe/user/api.php", {
             method: "POST",
             body: form,
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            },
+            headers: { "User-Agent": "Mozilla/5.0" }
           });
           const text = await resp.text();
-          if (
-            resp.ok &&
-            (text.includes("success") ||
-              text.includes("Files successfully deleted") ||
-              text.trim() === "")
-          ) {
+          if (resp.ok && (text.includes("success") || text.includes("Files successfully deleted") || text.trim() === "")) {
             deleted += batch.length;
           } else {
             failed += batch.length;
@@ -95,40 +68,22 @@ app.post("/api/clear-catbox", async (req, res) => {
       }
     }
 
-    if (typeof saveCloudMapping === "function") {
-      const newMapping: Record<string, string> = {};
-      for (const [url, local] of Object.entries(mapping || {})) {
-        if (!url.includes("catbox.moe") && !url.includes("files.catbox.moe")) {
-          newMapping[url] = local as string;
-        }
-      }
-      saveCloudMapping(newMapping);
-    }
-
     try {
-      if (typeof loadApprovedAssets === "function" && typeof saveApprovedAssets === "function") {
-        const assets = loadApprovedAssets();
-        const kept = (assets || []).filter(
-          (a: any) =>
-            !(a.url && (a.url.includes("catbox.moe") || a.url.includes("files.catbox.moe")))
-        );
-        if (kept.length !== (assets || []).length) saveApprovedAssets(kept);
+      if (typeof saveCloudMapping === "function") {
+        const newMapping: Record<string, string> = {};
+        for (const [url, local] of Object.entries(mapping || {})) {
+          if (!String(url).includes("catbox.moe")) newMapping[url] = local as string;
+        }
+        saveCloudMapping(newMapping);
       }
-    } catch (e) {}
+    } catch {}
 
     const msg = userhash
       ? \`已嘗試清除 \${catboxUrls.length} 個 Catbox 檔案（成功 \${deleted}，失敗 \${failed}）。本地對照表已清空。\`
-      : \`未設定 CATBOX_USERHASH，無法遠端刪除。已清空本地 \${catboxUrls.length} 筆 Catbox 對照記錄。\`;
+      : \`未設定 CATBOX_USERHASH，無法遠端刪除。已清空本地 \${catboxUrls.length} 筆記錄。\`;
 
-    console.log("[Clear Catbox]", msg, errors.length ? errors : "");
-    res.json({
-      success: true,
-      total: catboxUrls.length,
-      deleted,
-      failed,
-      message: msg,
-      hasUserhash: !!userhash,
-    });
+    console.log("[Clear Catbox]", msg);
+    res.json({ success: true, total: catboxUrls.length, deleted, failed, message: msg, hasUserhash: !!userhash });
   } catch (err: any) {
     console.error("[Clear Catbox] Error:", err);
     res.status(500).json({ error: err?.message || "Clear Catbox failed" });
@@ -137,104 +92,85 @@ app.post("/api/clear-catbox", async (req, res) => {
 
 `;
       server = server.slice(0, idx) + endpoint + server.slice(idx);
-      fs.writeFileSync(serverPath, server, "utf8");
-      console.log("✅ Added /api/clear-catbox endpoint to server.ts (before " + marker + ")");
-    } else {
-      console.log("[fix] Could not find insertion point in server.ts");
+      write(serverPath, server, 'server.ts: /api/clear-catbox');
+      inserted = true;
+      break;
     }
+    if (!inserted) console.log('[fix] server: could not find insert marker');
   } else {
-    console.log("[fix] /api/clear-catbox already present");
+    console.log('[fix] server: /api/clear-catbox already present');
   }
 }
 
-const appPath = path.join(__dirname, "src", "App.tsx");
-if (fs.existsSync(appPath)) {
-  let app = fs.readFileSync(appPath, "utf8");
-  let changed = false;
+// ========== App.tsx ==========
+const appPath = path.join(__dirname, 'src', 'App.tsx');
+if (!fs.existsSync(appPath)) {
+  console.error('App.tsx missing');
+  process.exit(0);
+}
 
-  // Handler — detect by function name only
-  if (!app.includes("const handleClearCatbox")) {
-    const clearFn = "const handleClearAllKeyframes = () => {";
-    const clearPos = app.indexOf(clearFn);
-    let insertAt = -1;
-    if (clearPos !== -1) {
-      // Find end of handleClearAllKeyframes: next top-level "  const handle" after its body
-      const afterClear = app.indexOf("\n  const handle", clearPos + clearFn.length);
-      if (afterClear !== -1) insertAt = afterClear;
-    }
-    if (insertAt === -1) {
-      const anchors = [
-        "\n  const handleGenerateAllKeyframesSequentially",
-        "\n  const handleFullAutoVideoProduction",
-      ];
-      for (const a of anchors) {
-        insertAt = app.indexOf(a);
-        if (insertAt !== -1) break;
-      }
-    }
+let app = read(appPath);
+let changed = false;
 
-    if (insertAt !== -1) {
-      const handler = `
+// Handler
+if (!app.includes('handleClearCatbox')) {
+  const insertCandidates = [
+    '\n  // One-click generate all keyframe-based transition videos sequentially',
+    '\n  const handleGenerateAllKeyframesSequentially',
+    '\n  const handleRestoreFromBackup',
+  ];
+  let insertAt = -1;
+  for (const c of insertCandidates) {
+    insertAt = app.indexOf(c);
+    if (insertAt !== -1) break;
+  }
+  // Fallback: after handleClearAllKeyframes body ends (look for next "  const handle")
+  if (insertAt === -1) {
+    const fn = app.indexOf('const handleClearAllKeyframes');
+    if (fn !== -1) {
+      const next = app.indexOf('\n  const handle', fn + 10);
+      if (next !== -1) insertAt = next;
+    }
+  }
+
+  if (insertAt !== -1) {
+    const handler = `
   // Clear Catbox permanent files that this app uploaded
   const handleClearCatbox = async () => {
     if (!window.confirm('確定要清除所有已上傳到 Catbox 的永久檔案嗎？此操作無法復原。')) return;
     try {
       showToast('正在清除 Catbox 檔案...', 'info');
       const res = await fetch('/api/clear-catbox', { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({} as any));
       if (res.ok) {
-        showToast(data.message || 'Catbox 清除完成', 'success');
+        showToast((data as any).message || 'Catbox 清除完成', 'success');
       } else {
-        showToast(data.error || '清除失敗', 'error');
+        showToast((data as any).error || '清除失敗', 'error');
       }
     } catch (e: any) {
-      showToast('清除 Catbox 失敗: ' + (e.message || e), 'error');
+      showToast('清除 Catbox 失敗: ' + (e?.message || e), 'error');
     }
   };
 
 `;
-      app = app.slice(0, insertAt) + handler + app.slice(insertAt);
-      changed = true;
-      console.log("✅ Added handleClearCatbox handler");
-    } else {
-      console.log("[fix] Could not find insert point for handleClearCatbox");
-    }
+    app = app.slice(0, insertAt) + handler + app.slice(insertAt);
+    changed = true;
+    console.log('✅ App: handleClearCatbox handler');
   } else {
-    console.log("[fix] handleClearCatbox already present");
+    console.log('[fix] App: could not find handler insert point');
   }
+} else {
+  console.log('[fix] App: handleClearCatbox already present');
+}
 
-  // Button — MUST use onClick={handleClearCatbox}, never toast text alone
-  if (!app.includes("onClick={handleClearCatbox}")) {
-    // Prefer placing after the clear-all button
-    const labelMarkers = [
-      "一鍵清除已生成 (重頭再來)",
-      "一鍵清除已生成(重頭再來)",
-      "再次點擊以確認清除",
-    ];
-    let btnPos = -1;
-    let used = "";
-    for (const m of labelMarkers) {
-      const p = app.indexOf(m);
-      if (p !== -1) {
-        btnPos = p;
-        used = m;
-        break;
-      }
-    }
-    if (btnPos === -1) {
-      const p = app.indexOf("onClick={handleClearAllKeyframes}");
-      if (p !== -1) {
-        btnPos = p;
-        used = "onClick={handleClearAllKeyframes}";
-      }
-    }
-
-    if (btnPos !== -1) {
-      const btnEnd = app.indexOf("</button>", btnPos);
-      if (btnEnd !== -1) {
-        const insertPos = btnEnd + "</button>".length;
-        const newBtn = `
-                        {/* TOONFLOW_CLEAR_CATBOX_BUTTON_START */}
+// Button UI — inject right after the clear-all keyframes button
+if (!app.includes('清除 Catbox 檔案')) {
+  // Match the closing of the clear button that contains handleClearAllKeyframes
+  const btnRe = /onClick=\{handleClearAllKeyframes\}[\s\S]{0,800}?<\/button>/;
+  const m = app.match(btnRe);
+  if (m && m.index !== undefined) {
+    const insertPos = m.index + m[0].length;
+    const newBtn = `
                         <button
                           type="button"
                           onClick={handleClearCatbox}
@@ -243,36 +179,41 @@ if (fs.existsSync(appPath)) {
                         >
                           <Trash2 className="w-3.5 h-3.5 text-orange-400" />
                           <span>清除 Catbox 檔案</span>
-                        </button>
-                        {/* TOONFLOW_CLEAR_CATBOX_BUTTON_END */}`;
-        app = app.slice(0, insertPos) + newBtn + app.slice(insertPos);
-        changed = true;
-        console.log("✅ Added Clear Catbox button after:", used);
-      } else {
-        console.log("[fix] Found marker but no </button> after it");
-      }
-    } else {
-      console.log("[fix] Clear keyframes button not found for UI inject");
-    }
+                        </button>`;
+    app = app.slice(0, insertPos) + newBtn + app.slice(insertPos);
+    changed = true;
+    console.log('✅ App: Clear Catbox button UI');
   } else {
-    console.log("[fix] onClick={handleClearCatbox} already in UI");
-    // Ensure marker comments exist for future runs
-    if (!app.includes("TOONFLOW_CLEAR_CATBOX_BUTTON_START") && app.includes("onClick={handleClearCatbox}")) {
-      app = app.replace(
-        "onClick={handleClearCatbox}",
-        "/* TOONFLOW_CLEAR_CATBOX_BUTTON_START */ onClick={handleClearCatbox}"
-      );
+    // Text-based fallback
+    const texts = ['一鍵清除已生成 (重頭再來)', '一鍵清除已生成(重頭再來)', '再次點擊以確認清除'];
+    for (const t of texts) {
+      const p = app.indexOf(t);
+      if (p === -1) continue;
+      const btnEnd = app.indexOf('</button>', p);
+      if (btnEnd === -1) continue;
+      const insertPos = btnEnd + '</button>'.length;
+      const newBtn = `
+                        <button
+                          type="button"
+                          onClick={handleClearCatbox}
+                          className="py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] relative z-20 border bg-slate-900 border-orange-500/40 hover:bg-orange-950/20 text-orange-400"
+                          title="清除本 App 已上傳到 Catbox 的永久檔案（需要設定 CATBOX_USERHASH）"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-orange-400" />
+                          <span>清除 Catbox 檔案</span>
+                        </button>`;
+      app = app.slice(0, insertPos) + newBtn + app.slice(insertPos);
       changed = true;
-      console.log("✅ Added stability marker near Catbox button");
+      console.log('✅ App: Clear Catbox button UI (text marker)');
+      break;
     }
+    if (!changed) console.log('[fix] App: clear button text not found');
   }
-
-  if (changed) {
-    fs.writeFileSync(appPath, app, "utf8");
-    console.log("✅ App.tsx updated");
-  } else {
-    console.log("[fix] App.tsx: no changes needed");
-  }
+} else {
+  console.log('[fix] App: Clear Catbox button already in UI');
 }
 
-console.log("fix_add_clear_catbox done.");
+if (changed) write(appPath, app, 'App.tsx catbox updates');
+else console.log('[fix] App.tsx: no changes');
+
+console.log('fix_add_clear_catbox done.');
