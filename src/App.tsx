@@ -1984,36 +1984,50 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
   };
 
   // Storyboard Image Generation (calls Gemini-3.1-flash-image)
-  const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes') => {
+  const handleGenerateImage = async (sceneId: string, engine: 'agnes' | 'gemini' | 'nanobanana' | 'mistral' = 'agnes'): Promise<string | null> => {
     let freshActiveProject = activeProject;
     try {
       const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
       const curProj = curProjects.find(p => p.id === activeProjectId);
       if (curProj) freshActiveProject = curProj;
     } catch(e) {}
-    if (!freshActiveProject) return;
+    if (!freshActiveProject) return null;
     
     const isGenField = activeTab === "scenes_ext" ? "isGeneratingImageExt" : (activeTab === "scenes_keyframes" ? "isGeneratingImageKeyframes" : "isGeneratingImage");
     const imageField = activeTab === "scenes_ext" ? "imageUrlExt" : (activeTab === "scenes_keyframes" ? "imageUrlKeyframes" : "imageUrl");
 
+    // Sync patch scene to localStorage immediately (full-auto STEP 3 polls localStorage)
+    const patchSceneImageState = (patch: Record<string, any>) => {
+      try {
+        const list = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+        const next = list.map(p => {
+          if (p.id !== activeProjectId) return p;
+          return {
+            ...p,
+            scenes: p.scenes.map(s => s.id === sceneId ? { ...s, ...patch } : s)
+          };
+        });
+        localStorage.setItem("toonflow_projects", JSON.stringify(next));
+        localStorage.setItem("toonflow_last_sync_timestamp", Date.now().toString());
+      } catch (_) {}
+      updateActiveProject((prev) => ({
+        scenes: prev.scenes.map(s => s.id === sceneId ? { ...s, ...patch } : s)
+      }));
+    };
+
     let targetSceneForGen: Scene | undefined;
-    setProjects(prev => {
-      const p = prev.find(p => p.id === activeProjectId);
-      if (p) targetSceneForGen = p.scenes.find(s => s.id === sceneId);
-      return prev;
-    });
+    try {
+      const curProjects = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+      const curProj = curProjects.find(p => p.id === activeProjectId);
+      targetSceneForGen = curProj?.scenes.find(s => s.id === sceneId);
+    } catch (_) {}
     
     // Fallback to activeProject if not found (though it should be)
-    const sceneToGen = targetSceneForGen || activeProject.scenes.find(s => s.id === sceneId);
-    if (!sceneToGen) return;
+    const sceneToGen = targetSceneForGen || freshActiveProject.scenes.find(s => s.id === sceneId) || activeProject?.scenes.find(s => s.id === sceneId);
+    if (!sceneToGen) return null;
 
-    // Update loading state
-    updateActiveProject((prev) => ({
-      scenes: prev.scenes.map(s => {
-        if (s.id === sceneId) return { ...s, [isGenField]: true };
-        return s;
-      })
-    }));
+    // Update loading state (sync localStorage so STEP 3 does not race)
+    patchSceneImageState({ [isGenField]: true });
 
     // Check if it's an automatic transition scene and intercept it to prevent real drawing
     if (sceneId.startsWith("scene_transition_")) {
@@ -2127,11 +2141,12 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
 
     const controller = new AbortController();
     abortControllersRef.current[sceneId] = controller;
-    const timeoutId = setTimeout(() => controller.abort(new Error("請求處理超時，請重試")), 180000); // 180s timeout
+    // Agnes storyboard often needs 60–100s; allow headroom for retries
+    const timeoutId = setTimeout(() => controller.abort(new Error("請求處理超時（約 4 分鐘）。Agnes 可能忙碌，請稍後重試")), 240000);
 
     try {
       const cleanSceneChar = (sceneToGen.character || "").trim().toLowerCase();
-      const characterObj = activeProject.characters.find(c => (c.name || "").trim().toLowerCase() === cleanSceneChar);
+      const characterObj = (freshActiveProject.characters || activeProject?.characters || []).find(c => (c.name || "").trim().toLowerCase() === cleanSceneChar);
       let charDesc = characterObj?.description || "";
       if (characterObj?.clothing) {
         charDesc += `. Ensure wearing: ${characterObj.clothing}.`;
@@ -2144,8 +2159,9 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       const charSeed = characterObj?.seed;
 
       // === Experience Library Auto-Injection & Prompt Optimization ===
-      let finalPrompt = sceneToGen.visualPrompt;
-      let finalNegativePrompt = sceneToGen.negativePrompt || "";
+      // Prefer step2 optimized prompt when full-auto already ran STEP 1–2
+      let finalPrompt = (sceneToGen as any).step2OptimizedPrompt || sceneToGen.visualPrompt;
+      let finalNegativePrompt = (sceneToGen as any).step2OptimizedNegative || sceneToGen.negativePrompt || "";
       let isAutoEnhanced = false;
       let feedbackNote = "";
 
@@ -2223,18 +2239,21 @@ const handleTranslatePrompt = async (sceneId: string, engine: 'gemini' | 'agnes'
       }
 
       try {
-        const q = query(
-          collection(db, "experience_library"),
-          where("sceneId", "==", sceneId)
-        );
-        const snapshot = await getDocs(q);
+        // Skip Firestore experience query when detached / may hang; use local API summary only
         const sceneEntries: any[] = [];
-        snapshot.forEach(doc => {
-          sceneEntries.push({ id: doc.id, ...doc.data() });
-        });
+        try {
+          const expRes = await fetch(`/api/experience-summary?sceneId=${encodeURIComponent(sceneId)}`);
+          if (expRes.ok) {
+            const expData = await expRes.json();
+            const failuresList = expData.failures || [];
+            for (const f of failuresList) {
+              sceneEntries.push({ errorMessage: f, passed: false, critique: f, rootCause: f });
+            }
+          }
+        } catch (_) {}
         
         // Sort in-memory by timestamp desc to avoid compound index requirements
-        sceneEntries.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        sceneEntries.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
         
         const failures = sceneEntries.filter(e => e.passed === false || e.errorMessage || e.type?.includes("error") || e.technical_failure);
         
@@ -2412,7 +2431,7 @@ Anime aesthetic, high resolution, no text, no watermark.
         const errText = await res.text().catch(() => "");
         let errData: any = {};
         try { errData = JSON.parse(errText); } catch(e) {}
-        throw new Error(errData.error || "繪圖 API 連接錯誤");
+        throw new Error(errData.error || errText?.substring?.(0, 180) || `繪圖 API 錯誤 HTTP ${res.status}`);
       }
 
       const textRes = await res.text();
@@ -2423,6 +2442,13 @@ Anime aesthetic, high resolution, no text, no watermark.
         console.warn("[Toonflow] Failed to parse storyboard image response JSON. Raw text:", textRes.substring(0, 50));
         throw new Error("伺服器回傳格式錯誤 (可能正在重啟或發生異常)，請稍後再試。");
       }
+      if (!data.imageUrl || typeof data.imageUrl !== "string" || data.imageUrl.trim().length < 4) {
+        throw new Error("繪圖 API 成功但未回傳 imageUrl（可能 Agnes 503 忙碌）");
+      }
+      // Reject known stock/fallback URLs
+      if (data.imageUrl.includes("unsplash.com") || data.imageUrl.includes("pollinations-fallback")) {
+        throw new Error("伺服器回傳了禁用的保底圖，已拒絕");
+      }
       if (data.message) {
         showToast(data.message, data.isAgnesImage ? "success" : "info");
       }
@@ -2432,18 +2458,11 @@ Anime aesthetic, high resolution, no text, no watermark.
         }, 1200);
       }
       
-      updateActiveProject((prev) => ({
-        scenes: prev.scenes.map(s => {
-          if (s.id === sceneId) {
-            return { 
-              ...s, 
-              [imageField]: data.imageUrl, 
-              [isGenField]: false 
-            };
-          }
-          return s;
-        })
-      }));
+      // Sync write URL BEFORE clearing isGenerating — avoids STEP 3 false "無網址"
+      patchSceneImageState({
+        [imageField]: data.imageUrl,
+        [isGenField]: false,
+      });
 
       // Archive newly generated image
       archiveAsset({
@@ -2462,6 +2481,8 @@ Anime aesthetic, high resolution, no text, no watermark.
         handleReviewScene(sceneId, 'image', engine);
       }, 500);
 
+      return data.imageUrl as string;
+
     } catch (e: any) {
       const isAbort = e.name === 'AbortError' || 
                       e.message === 'USER_ABORTED' || 
@@ -2469,18 +2490,8 @@ Anime aesthetic, high resolution, no text, no watermark.
                       controller.signal.aborted;
       if (isAbort) {
         console.log(`[Toonflow] Scene image generation ${sceneId} aborted by user.`);
-        updateActiveProject((prev) => ({
-          scenes: prev.scenes.map(s => {
-            if (s.id === sceneId) {
-              return { 
-                ...s, 
-                [isGenField]: false 
-              };
-            }
-            return s;
-          })
-        }));
-        return;
+        patchSceneImageState({ [isGenField]: false });
+        return null;
       }
       
       // Manual error logging for experience library
@@ -2503,26 +2514,21 @@ Anime aesthetic, high resolution, no text, no watermark.
         critiqueFromSystem: errorMsg,
         aiImprovementSuggestion: isPromptIssue 
           ? "偵測到可能違反安全或敏感詞策略的提示詞描述。建議移除具體人物姓名、限制級動作或可能敏感的物件，並保持英文提示詞簡短流暢。"
-          : "繪圖伺服器算力資源超載或網絡抖動。建議稍後重試，或將繪圖引擎切換為 Stable Diffusion / 備用 Flux 快顯管道。",
+          : "Agnes 繪圖忙碌(503)或逾時。建議稍後重試；每張圖常需 60–100 秒。",
         resolution: "⚠️ 繪圖失敗，已拒絕保底圖片。請手動重試或上傳。"
       });
 
       // fallback if error
       showToast(`分鏡繪圖生成失敗：${e.message || "與繪圖伺服器連接時發生錯誤"}`, "error");
-      updateActiveProject((prev) => ({
-        scenes: prev.scenes.map(s => {
-          if (s.id === sceneId) {
-            return { 
-              ...s, 
-              // NO FALLBACK IMAGE — leave empty so skip/retry can work
-              [imageField]: "", 
-              [isGenField]: false 
-            };
-          }
-          return s;
-        })
-      }));
+      patchSceneImageState({
+        // NO FALLBACK IMAGE — leave empty so skip/retry can work
+        [imageField]: "",
+        [isGenField]: false,
+      });
+      // Re-throw so full-auto STEP 3 logs the real reason
+      throw e;
     } finally {
+      clearTimeout(timeoutId);
       if (abortControllersRef.current[sceneId] === controller) {
         delete abortControllersRef.current[sceneId];
       }
@@ -4768,34 +4774,51 @@ Anime aesthetic, high resolution, no text, no watermark.
             scenes: prev.scenes.map(s => s.id === scene.id ? { ...s, workflowStep: 3 } : s)
           }));
 
-          setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 第 ${imageRound} 輪：正在繪製首幀...`]);
+          setFullAutoLogs(prev => [...prev, `🎨 [鏡頭 ${i + 1}] 第 ${imageRound} 輪：正在繪製首幀（Agnes 常需 60–100 秒，請耐心等候）...`]);
           try {
-            await handleGenerateImage(scene.id, "agnes");
+            // Prefer direct return value (avoids localStorage race)
+            let gotUrl: string | null = null;
+            try {
+              gotUrl = await handleGenerateImage(scene.id, "agnes");
+            } catch (genErr: any) {
+              throw new Error(genErr?.message || String(genErr) || "繪圖 API 失敗");
+            }
 
-            await new Promise<void>((resolve, reject) => {
-              let checkCount = 0;
-              const checkImgInterval = setInterval(() => {
-                checkCount++;
-                const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
-                const curProj = curProjList.find(p => p.id === activeProjectId);
-                const freshS = curProj?.scenes.find(s => s.id === scene.id);
+            if (!isRealImageUrl(gotUrl)) {
+              // Fallback: wait briefly for localStorage sync if return was null but write is in flight
+              await new Promise<void>((resolve, reject) => {
+                let checkCount = 0;
+                const checkImgInterval = setInterval(() => {
+                  checkCount++;
+                  const curProjList = JSON.parse(localStorage.getItem("toonflow_projects") || "[]") as Project[];
+                  const curProj = curProjList.find(p => p.id === activeProjectId);
+                  const freshS = curProj?.scenes.find(s => s.id === scene.id);
 
-                if (freshS) {
-                  if (!freshS[isGenImgField]) {
-                    clearInterval(checkImgInterval);
+                  if (freshS) {
                     if (isRealImageUrl(freshS[imageField])) {
+                      clearInterval(checkImgInterval);
+                      gotUrl = freshS[imageField];
                       resolve();
-                    } else {
-                      reject(new Error("影像生成完畢，但未回傳有效真實首幀網址（已禁用保底圖）。"));
+                      return;
+                    }
+                    if (!freshS[isGenImgField] && checkCount >= 2) {
+                      clearInterval(checkImgInterval);
+                      reject(new Error(
+                        "影像生成完畢，但未回傳有效真實首幀網址（已禁用保底圖）。多半是 Agnes 忙碌 503 或逾時，稍後會重試。"
+                      ));
                     }
                   }
-                }
-                if (checkCount > 180) {
-                  clearInterval(checkImgInterval);
-                  reject(new Error("影像生成超時。"));
-                }
-              }, 1500);
-            });
+                  if (checkCount > 20) {
+                    clearInterval(checkImgInterval);
+                    reject(new Error("等待首幀寫入逾時。"));
+                  }
+                }, 500);
+              });
+            }
+
+            if (!isRealImageUrl(gotUrl)) {
+              throw new Error("未取得有效真實首幀網址（已禁用保底圖）");
+            }
 
             successThisRound++;
             setFullAutoLogs(prev => [...prev, `[鏡頭 ${i + 1}] ✅ 成功繪製真實首幀！`]);
@@ -4809,7 +4832,10 @@ Anime aesthetic, high resolution, no text, no watermark.
                 isGeneratingImageKeyframes: false
               } : s)
             }));
-            await new Promise(r => setTimeout(r, 800));
+            // Brief pause before next scene; longer if rate-limit/busy
+            const msg = String(imgErr?.message || "");
+            const busy = /503|忙碌|busy|rate|timeout|逾時/i.test(msg);
+            await new Promise(r => setTimeout(r, busy ? 3000 : 1000));
           }
         }
 
