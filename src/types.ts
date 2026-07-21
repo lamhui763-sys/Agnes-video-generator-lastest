@@ -149,6 +149,8 @@ export interface Character {
   uploadedAvatarUrls?: string[];
   isGeneratingAvatar?: boolean;
   artStyle?: string;
+  /** male | female | other — used to lock face/body gender in image prompts */
+  gender?: string;
   age?: string;
   clothing?: string;
   personality?: string;
