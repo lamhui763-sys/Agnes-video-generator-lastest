@@ -4,6 +4,7 @@
  * - Skip STEP 4 (image review) entirely
  * - Skip video review inside STEP 6
  * Effectively reduces 7-step master workflow to 5 steps.
+ * V2: more robust matching + force re-apply friendly
  */
 const fs = require("fs");
 const path = require("path");
@@ -17,9 +18,9 @@ if (!fs.existsSync(APP)) {
 let src = fs.readFileSync(APP, "utf8");
 const original = src;
 
-const MARKER = "TOONFLOW_LENIENT_SKIP_REVIEWS_V1";
+const MARKER = "TOONFLOW_LENIENT_SKIP_REVIEWS_V2";
 if (src.includes(MARKER)) {
-  console.log("[fix_lenient_skip_reviews] already applied");
+  console.log("[fix_lenient_skip_reviews] already applied (V2)");
   process.exit(0);
 }
 
@@ -87,6 +88,7 @@ const vIdx = src.indexOf(VID_READY);
 if (vIdx === -1) {
   console.warn("[fix_lenient_skip_reviews] video-ready log not found; STEP 4 skip still applied");
 } else {
+  // Find the setFullAutoLogs line that contains it and inject after the whole statement
   const afterSemi = src.indexOf(");", vIdx);
   if (afterSemi !== -1) {
     const injectAt = afterSemi + 2;
@@ -135,6 +137,12 @@ src = src.replace(
   'showToast(newVal ? "🔒 七步嚴格工作流鎖已開啟：圖片/影片審查必過，未通過會重試或暫停。" : "🔓 嚴格鎖已關閉 (5步極速)：跳過全部圖片與影片審查，直接生成。", "info");'
 );
 
+// Also handle any already-updated toast
+src = src.replace(
+  /showToast\(newVal \? "🔒 七步嚴格工作流鎖已開啟：[^"\n]+" : "🔓 七步嚴格工作流鎖已關閉：[^"\n]+", "info"\);/,
+  'showToast(newVal ? "🔒 七步嚴格工作流鎖已開啟：圖片/影片審查必過，未通過會重試或暫停。" : "🔓 嚴格鎖已關閉 (5步極速)：跳過全部圖片與影片審查，直接生成。", "info");'
+);
+
 src = src.replace(
   "🔒 開啟 (Strict Lock)",
   "🔒 開啟 (Strict · 7步含審查)"
@@ -143,6 +151,8 @@ src = src.replace(
   "🔓 關閉 (Lenient Mode)",
   "🔓 關閉 (Lenient · 5步跳過審查)"
 );
+
+// Startup log
 src = src.replace(
   '"🎥 正在啟動最新分鏡劇本首尾幀 7 步 Check List 大師工作流..."',
   'strictWorkflowLock ? "🎥 正在啟動最新分鏡劇本首尾幀 7 步 Check List 大師工作流..." : "⚡ 正在啟動 5 步極速工作流（已跳過圖片/影片審查）..."'
@@ -164,4 +174,4 @@ if (src === original) {
 }
 
 fs.writeFileSync(APP, src, "utf8");
-console.log("[fix_lenient_skip_reviews] applied successfully");
+console.log("[fix_lenient_skip_reviews] applied successfully (V2)");
