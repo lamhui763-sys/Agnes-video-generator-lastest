@@ -2,7 +2,12 @@ export const STYLE_PRESETS = [
   {
     name: "🎬 電影感 (Cinematic)",
     value: "cinematic",
-    prompt: "A high-quality 8k resolution cinematic movie shot, dramatic moody lighting, deep shadows, rich color grading, shallow depth of field, anamorphic lens flare, photorealistic."
+    prompt: "A high-quality 8k resolution cinematic movie shot, dramatic moody lighting, deep shadows, rich color grading, shallow depth of field, anamorphic lens flare, photorealistic, film grain texture, Kodak Portra color palette, shot on 35mm lens."
+  },
+  {
+    name: "🌧️ 雨夜愛情電影感 (Romance Cinematic - 墨香書屋 style)",
+    value: "romance-cinematic",
+    prompt: "Cinematic romance short film aesthetic inspired by rainy night bookstore. Warm amber interior light contrasted with cool blue rain and neon exterior. Soft rim-light on characters, shallow depth of field, film grain, Kodak Portra palette, 35mm lens, intimate emotional atmosphere, completely clean video no subtitles no text no watermark."
   },
   {
     name: "🌸 動漫風 (Anime)",
@@ -77,4 +82,3 @@ export const NEGATIVE_PRESETS = [
     prompt: "text, watermark, signature, username, logo, title, subtitles, border, frame, timestamp"
   }
 ];
-
