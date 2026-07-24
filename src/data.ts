@@ -10,6 +10,11 @@ export const STYLE_PRESETS = [
     prompt: "Cinematic romance short film aesthetic inspired by rainy night bookstore. Warm amber interior light contrasted with cool blue rain and neon exterior. Soft rim-light on characters, shallow depth of field, film grain, Kodak Portra palette, 35mm lens, intimate emotional atmosphere, completely clean video no subtitles no text no watermark."
   },
   {
+    name: "🌿 童話故事書風 (Fairy Tale Storybook)",
+    value: "fairy-tale",
+    prompt: "Storybook style, Watercolor and ink textures, Whimsical, Soft pastel color palette, Golden hour lighting, ethereal mood, highly detailed environment, cinematic depth of field, soft volumetric lighting, masterpiece quality, dreamy atmosphere"
+  },
+  {
     name: "🌸 動漫風 (Anime)",
     value: "anime",
     prompt: "Stunning high-quality anime key visual style, vibrant colors, beautifully detailed cel-shading, Kyoto Animation style, soft fantasy lighting, emotional atmosphere, 4k."
@@ -57,7 +62,7 @@ export const NEGATIVE_PRESETS = [
     prompt: "blurry, low resolution, low quality, worst quality, jpeg artifacts, noise, grain, compression artifacts, cropped, out of frame"
   },
   {
-    name: "🎬 寫實防畸變 (寫實/電影)",
+    name: "🎬 寫實防異變 (寫實/電影)",
     value: "realistic",
     prompt: "blurry, low quality, worst quality, deformed hands, extra fingers, fused fingers, missing fingers, mutated hands, bad anatomy, bad proportions, extra limbs, missing limbs, distorted face, asymmetrical eyes, cartoon, illustration, drawing, painting, 3d render, cg"
   },
