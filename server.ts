@@ -1771,13 +1771,17 @@ async function ensurePublicCdnUrl(urlOrPath: string, activeTaskLogs?: string[], 
     return urlOrPath;
   }
 
+  // Railway / local hosts are NOT reachable by Agnes CDN fetch — must re-upload
   let isLocalOrProxied = !urlOrPath.startsWith("http") || 
                          urlOrPath.includes("localhost") || 
                          urlOrPath.includes("127.0.0.1") || 
                          urlOrPath.includes("ais-dev-") || 
                          urlOrPath.includes("ais-pre-") ||
                          urlOrPath.includes(".run.app") ||
-                         urlOrPath.includes(".google.app");
+                         urlOrPath.includes(".google.app") ||
+                         urlOrPath.includes(".up.railway.app") ||
+                         urlOrPath.includes("railway.app") ||
+                         urlOrPath.includes("railway.internal");
 
   if (publicBaseUrl) {
     try {
@@ -3787,19 +3791,41 @@ app.post("/api/extract-last-frame", async (req, res) => {
 
     if (fs.existsSync(localExtFramePath)) {
       const publicBaseUrl = getPublicBaseUrl(req);
-      let imageUrl = `${publicBaseUrl}/assets/${extFrameFilename}`;
-
+      // Prefer permanent public CDN — Agnes cannot download Railway private/local /assets URLs
+      let imageUrl = "";
       try {
         const cloudUrl = await uploadFileToCatbox(localExtFramePath);
-        if (cloudUrl) {
+        if (cloudUrl && cloudUrl.startsWith("http") && !cloudUrl.includes("railway.app")) {
           imageUrl = cloudUrl;
+          console.log(`[Toonflow] Extracted frame uploaded to public CDN: ${imageUrl}`);
         }
-      } catch (e) {
-        console.log("[Toonflow] Cloud upload bypassed for extracted frame, using local asset path");
+      } catch (e: any) {
+        console.log("[Toonflow] Catbox upload for extracted frame failed:", e?.message || e);
+      }
+
+      if (!imageUrl) {
+        try {
+          const freeUrl = await uploadToFreeImageHost(localExtFramePath);
+          if (freeUrl && freeUrl.startsWith("http")) {
+            imageUrl = freeUrl;
+            console.log(`[Toonflow] Extracted frame uploaded to FreeImageHost: ${imageUrl}`);
+          }
+        } catch (e2: any) {
+          console.log("[Toonflow] FreeImageHost upload for extracted frame failed:", e2?.message || e2);
+        }
+      }
+
+      if (!imageUrl) {
+        // Last resort local URL (Agnes may fail to fetch — client should re-draw if video gen fails)
+        imageUrl = `${publicBaseUrl}/assets/${extFrameFilename}`;
+        console.warn(`[Toonflow] Extracted frame has NO public CDN — Agnes may reject: ${imageUrl}`);
       }
 
       console.log(`[Toonflow] Extracted last frame successfully: ${imageUrl}`);
-      return res.json({ imageUrl });
+      return res.json({
+        imageUrl,
+        isPublicCdn: !!(imageUrl.includes("catbox") || imageUrl.includes("iili") || imageUrl.includes("freeimage") || imageUrl.includes("tmpfiles") || imageUrl.includes("qu.ax")),
+      });
     } else {
       throw new Error("ffmpeg execution succeeded but output file was not created");
     }
@@ -5812,6 +5838,196 @@ Please review the cinematic motion plan. If it looks like a style deviation or h
       critique: "（本地自動校驗）鏡頭運動與動作邏輯合理。畫面動作流暢度高，人物特徵於動態中保持基本一致。對白口型配合流暢，連續畫面中未見明顯突變或AI物理穿模，建議直接通過。",
       passed: true
     });
+  }
+});
+
+// On-the-fly next scene for SequentialChainMode / 即時自動導演
+app.post("/api/workflow/generate-next-scene", async (req, res) => {
+  const {
+    novelText = "",
+    shotIndex = 0,
+    prevScene = null,
+    continuityAdvice = "",
+    characters = [],
+    artStyle = "Anime key visual",
+    cameraMotion = "",
+  } = req.body || {};
+
+  try {
+    const charLines = (Array.isArray(characters) ? characters : [])
+      .map((c: any) => `- ${c.name}: ${c.description || ""} ${c.clothing ? `(穿著: ${c.clothing})` : ""}`)
+      .join("\n");
+
+    const prevBlock = prevScene
+      ? `上一鏡頭：
+標題: ${prevScene.title || ""}
+角色: ${prevScene.character || ""}
+畫面: ${prevScene.visualPrompt || ""}
+動作: ${prevScene.actionPrompt || ""}
+對白: ${prevScene.dialogue || ""}
+旁白: ${prevScene.narration || ""}`
+      : "這是第一個鏡頭（開場）。";
+
+    const systemPrompt = `You are an elite film storyboard director for anime/cinematic shorts.
+Story (Traditional Chinese novel excerpt):
+"""
+${String(novelText).slice(0, 7000)}
+"""
+
+Progress: completed ${shotIndex} shot(s). Produce ONLY shot #${shotIndex + 1}.
+Art style: ${artStyle}
+Camera motion preference: ${cameraMotion || "cinematic"}
+Characters:
+${charLines || "(infer from story)"}
+
+${prevBlock}
+
+Continuity advice from previous shot: ${continuityAdvice || "Establish atmosphere and introduce characters."}
+
+Rules:
+1. Advance the story (do not repeat previous shot).
+2. Prefer DIALOGUE over narration (TTS only reads dialogue).
+3. visualPrompt and actionPrompt MUST be detailed English for image/video AI.
+4. Keep character appearance consistent with descriptions.
+5. Respond STRICTLY with JSON only (no markdown):
+{
+  "title": "short Traditional Chinese title",
+  "character": "speaking/main character name or empty",
+  "visualPrompt": "English visual description of a SINGLE frame",
+  "actionPrompt": "English motion/camera action for video",
+  "dialogue": "spoken lines in Traditional Chinese or empty",
+  "narration": "narration in Traditional Chinese or empty (prefer empty)",
+  "transitionPrompt": "English transition to next beat or empty",
+  "negativePrompt": "english negatives",
+  "directorNotes": "brief Traditional Chinese notes",
+  "durationSeconds": 8
+}`;
+
+    let raw = "";
+    try {
+      raw = await generateText(systemPrompt, "agnes", "gemini-3.5-flash", req.body?.customApiKey);
+    } catch (e1) {
+      console.warn("[generate-next-scene] Agnes text failed, trying Gemini…", (e1 as any)?.message || e1);
+      try {
+        const gem = await generateContentWithFallback({
+          model: "gemini-3.5-flash",
+          contents: systemPrompt,
+          customApiKey: req.body?.customApiKey,
+        });
+        raw = gem?.text || "";
+      } catch (e2) {
+        console.warn("[generate-next-scene] Gemini also failed", (e2 as any)?.message || e2);
+      }
+    }
+
+    let scene: any = null;
+    try {
+      scene = JSON.parse(cleanJsonString(raw || "{}"));
+    } catch {
+      scene = null;
+    }
+
+    if (!scene || (!scene.visualPrompt && !scene.title)) {
+      const snippet = String(novelText).slice(shotIndex * 280, shotIndex * 280 + 420) || String(novelText).slice(0, 420);
+      scene = {
+        title: `鏡頭 ${shotIndex + 1}`,
+        character: characters?.[0]?.name || "",
+        visualPrompt: `Cinematic anime key visual, ${artStyle}. ${snippet}. Consistent character design, high quality, no text.`,
+        actionPrompt: "subtle cinematic camera movement, natural character motion",
+        dialogue: "",
+        narration: "",
+        durationSeconds: 8,
+      };
+    }
+
+    console.log("[generate-next-scene] shot", shotIndex + 1, "→", scene.title);
+    return res.json({ scene, ...scene });
+  } catch (err: any) {
+    console.error("[generate-next-scene] error:", err);
+    return res.status(500).json({ error: err?.message || "generate-next-scene failed" });
+  }
+});
+
+// Prompt optimization for chain mode fallback
+app.post("/api/workflow/generate-step2-prompt", async (req, res) => {
+  const {
+    scene = {},
+    novelText = "",
+    continuityAdvice = "",
+    instruction = "",
+    artStyle = "Anime key visual",
+    customApiKey,
+  } = req.body || {};
+
+  try {
+    const systemPrompt = instruction || `You are a cinematic prompt engineer.
+Optimize the following storyboard into a strong English visual + motion prompt for AI image/video.
+Respond STRICTLY with JSON only:
+{
+  "title": "string",
+  "character": "string",
+  "visualPrompt": "English detailed still frame",
+  "actionPrompt": "English motion",
+  "dialogue": "Traditional Chinese or empty",
+  "narration": "Traditional Chinese or empty",
+  "optimizedPrompt": "same as visualPrompt",
+  "optimizedNegative": "english negatives",
+  "negativePrompt": "english negatives",
+  "durationSeconds": 8
+}
+
+Novel context:
+${String(novelText).slice(0, 4000)}
+
+Continuity: ${continuityAdvice || "none"}
+Scene draft: ${JSON.stringify(scene).slice(0, 1500)}
+Art style: ${artStyle}`;
+
+    let raw = "";
+    try {
+      raw = await generateText(systemPrompt, "agnes", "gemini-3.5-flash", customApiKey);
+    } catch {
+      try {
+        const gem = await generateContentWithFallback({
+          model: "gemini-3.5-flash",
+          contents: systemPrompt,
+          customApiKey,
+        });
+        raw = gem?.text || "";
+      } catch (e) {
+        console.warn("[generate-step2-prompt] text engines failed", (e as any)?.message || e);
+      }
+    }
+
+    let result: any = {};
+    try {
+      result = JSON.parse(cleanJsonString(raw || "{}"));
+    } catch {
+      result = {};
+    }
+
+    const visual =
+      result.optimizedPrompt ||
+      result.visualPrompt ||
+      result.prompt ||
+      scene.visualPrompt ||
+      `Cinematic ${artStyle} storyboard frame. ${String(novelText).slice(0, 200)}`;
+
+    return res.json({
+      title: result.title || scene.title || "分鏡",
+      character: result.character || scene.character || "",
+      visualPrompt: visual,
+      optimizedPrompt: visual,
+      actionPrompt: result.actionPrompt || result.motion || "subtle cinematic camera movement",
+      dialogue: result.dialogue || "",
+      narration: result.narration || "",
+      optimizedNegative: result.optimizedNegative || result.negativePrompt || "blurry, low quality, text, watermark, subtitles",
+      negativePrompt: result.negativePrompt || result.optimizedNegative || "blurry, low quality, text, watermark, subtitles",
+      durationSeconds: result.durationSeconds || 8,
+    });
+  } catch (err: any) {
+    console.error("[generate-step2-prompt] error:", err);
+    return res.status(500).json({ error: err?.message || "generate-step2-prompt failed" });
   }
 });
 

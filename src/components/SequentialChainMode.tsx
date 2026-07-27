@@ -476,19 +476,39 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
       setScenes(list);
       setCurrentIndex(nextIndex);
 
-      // C) Image (skip if we already have extracted frame as start)
-      if (!startFrame) {
-        const img = await generateImageForScene(newScene, nextIndex, list);
+      // C) Image — only skip re-draw if tail frame is a PUBLIC CDN URL Agnes can download
+      const isPublicCdn = (u?: string) =>
+        !!u &&
+        u.startsWith('http') &&
+        !u.includes('localhost') &&
+        !u.includes('127.0.0.1') &&
+        !u.includes('.up.railway.app') &&
+        !u.includes('railway.app') &&
+        !u.includes('/assets/');
+
+      if (!startFrame || !isPublicCdn(startFrame)) {
+        if (startFrame && !isPublicCdn(startFrame)) {
+          addLog(
+            `鏡頭 ${nextIndex + 1}：尾幀非公開 CDN（Agnes 無法下載），改為重新繪製首幀…`,
+            'warn'
+          );
+        }
+        const img = await generateImageForScene(
+          { ...list[nextIndex], imageUrl: startFrame || list[nextIndex].imageUrl },
+          nextIndex,
+          list
+        );
         list = img.list;
         startFrame = img.url;
       } else {
-        addLog(`鏡頭 ${nextIndex + 1}：使用上一鏡尾幀作為首幀，跳過重新繪圖`, 'info');
+        addLog(`鏡頭 ${nextIndex + 1}：使用上一鏡公開尾幀作為首幀，跳過重新繪圖`, 'info');
+        list = updateSceneAt(nextIndex, { imageUrl: startFrame }, list);
       }
 
-      // D) Video
+      // D) Video — always pass a public image URL when possible
       const vid = await generateVideoForScene(list[nextIndex], nextIndex, list, {
         imageUrl: startFrame,
-        extendFromVideoUrl: startFrame ? undefined : prev.videoUrl,
+        extendFromVideoUrl: !startFrame || !isPublicCdn(startFrame) ? prev.videoUrl : undefined,
         advice,
       });
       list = vid.list;
