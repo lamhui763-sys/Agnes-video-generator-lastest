@@ -3,6 +3,7 @@
 // - Character description forced to the front 30% (Visual Anchors)
 // - Separate templates for Image vs Video generation
 // - Style-aware enhancement (fairy-tale / romance / cyberpunk)
+// - Hard-cut / transition mode when consecutive scenes have different characters
 
 export interface CharacterBible {
   name: string;
@@ -42,6 +43,48 @@ export function prependCharacterDescription(
   const characterBlock = descriptions.join('. ');
   return `${characterBlock}. ${basePrompt}`;
 }
+
+/**
+ * Decide whether two consecutive scenes should use a HARD CUT (transition)
+ * instead of smooth morph (continuous).
+ *
+ * Returns true when characters are different people → must avoid morphing.
+ */
+export function shouldUseHardCut(
+  currentCharacter?: string,
+  nextCharacter?: string,
+  currentGender?: string,
+  nextGender?: string
+): boolean {
+  const cur = (currentCharacter || '').trim().toLowerCase();
+  const next = (nextCharacter || '').trim().toLowerCase();
+
+  // No next scene → no need for cut
+  if (!next) return false;
+
+  // Different character names → hard cut
+  if (cur && next && cur !== next) return true;
+
+  // Same name but different gender → still hard cut (prevents woman→man morph)
+  if (
+    currentGender &&
+    nextGender &&
+    currentGender !== nextGender &&
+    (currentGender === 'male' || currentGender === 'female') &&
+    (nextGender === 'male' || nextGender === 'female')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Strong anti-morph instruction used when start-frame and end-frame are different people.
+ * Prevents the classic "woman slowly turns into man" artifact.
+ */
+export const HARD_CUT_INSTRUCTION =
+  'Hard cut transition. Abrupt camera change. Keep the exact same character identity, face, hair, gender and clothing from the START FRAME throughout the entire clip. Do NOT morph, do NOT transform, do NOT change gender, do NOT blend faces. No face morphing, no body morphing, no gender change. Sudden cut only.';
 
 /**
  * Build high-quality Image Prompt
@@ -92,6 +135,9 @@ export function buildImagePrompt(options: {
 /**
  * Build high-quality Video Prompt
  * Focus: camera movement, micro-actions, motion smoothness
+ *
+ * When isHardCut = true (different characters between start/end frames),
+ * injects strong anti-morph instructions so Agnes does not blend people.
  */
 export function buildVideoPrompt(options: {
   sceneDescription: string;
@@ -99,6 +145,7 @@ export function buildVideoPrompt(options: {
   cameraMotion?: string;
   style?: PromptStyle;
   extra?: string;
+  isHardCut?: boolean;
 }): string {
   let prompt = (options.sceneDescription || '').trim();
 
@@ -130,7 +177,12 @@ export function buildVideoPrompt(options: {
       prompt += ', smooth cinematic motion';
   }
 
-  // 4. Video-specific ending
+  // 4. Hard-cut protection (prevents woman→man morph when start/end frames differ)
+  if (options.isHardCut) {
+    prompt += `. ${HARD_CUT_INSTRUCTION}`;
+  }
+
+  // 5. Video-specific ending
   prompt +=
     ', smooth rendering, high-fidelity character details, no sudden jumps, no morphing, clean video, no text, no subtitles, no watermark';
 
