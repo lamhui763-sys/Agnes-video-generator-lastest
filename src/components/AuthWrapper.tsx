@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 
 interface AuthWrapperProps {
   children: React.ReactNode;
@@ -8,12 +8,7 @@ interface AuthWrapperProps {
   onCustomSignIn?: (user: any) => void;
 }
 
-/**
- * LOGIN COMPLETELY REMOVED
- * Always render the main app as guest. No login / register screen.
- */
-export default function AuthWrapper({
-  children,
-}: AuthWrapperProps) {
+/** LOGIN REMOVED — always guest */
+export default function AuthWrapper({ children }: AuthWrapperProps) {
   return <>{children}</>;
 }
