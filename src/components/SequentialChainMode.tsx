@@ -1,18 +1,19 @@
 /**
  * SequentialChainMode.tsx
  *
- * 「一鏡接一鏡」連續生成模式
+ * 「一鏡接一鏡 · 即時自動導演」
  *
- * 流程：
- * 1. 按「開始」→ 生成鏡頭 1 首幀 → 生成鏡頭 1 影片 → AI 給下一鏡頭建議
- * 2. 按「接下去」→ 從上一支影片抽最後一幀作為本鏡頭首幀 → 結合建議+故事生成影片 → 再給建議
- * 3. 如此類推
+ * 核心改變：
+ * - 唔需要事先去「AI 分鏡劇本」拆好鏡頭
+ * - 按「開始」→ 即時對照 novelText 生成鏡頭1 分鏡 + 首幀 + 影片 + 下一鏡建議
+ * - 按「接下去」→ 抽上一支尾幀 + 對照故事進度即時生成下一鏡頭分鏡 + 圖 + 片
+ * - 每個鏡頭都係即時產生，進度跟住實際結果走
  */
 
 import React, { useState, useCallback, useRef } from 'react';
 import { Play, ChevronRight, Loader2, Film, Image as ImageIcon, Sparkles, AlertCircle, CheckCircle2, RotateCcw } from 'lucide-react';
-import { Project, Scene, Character } from '../types';
-import { apiJson, apiFetch } from '../lib/apiClient';
+import { Project, Scene, Character, DEFAULT_SCENE } from '../types';
+import { apiJson } from '../lib/apiClient';
 import { extractLastFrameFromVideo } from '../lib/frameExtractor';
 import { ScrubbableVideoPlayer } from './ScrubbableVideoPlayer';
 
@@ -25,6 +26,7 @@ interface SequentialChainModeProps {
 
 type ChainPhase =
   | 'idle'
+  | 'gen_scene'
   | 'gen_image'
   | 'gen_video'
   | 'gen_advice'
@@ -39,6 +41,10 @@ interface ChainLog {
   type?: 'info' | 'ok' | 'warn' | 'err';
 }
 
+function uid() {
+  return 'sc_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
 export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
   project,
   onUpdateScenes,
@@ -47,8 +53,9 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
 }) => {
   const scenes = project.scenes || [];
   const characters = project.characters || [];
+  const novelText = (project.novelText || '').trim();
 
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(Math.max(0, scenes.length - 1));
   const [phase, setPhase] = useState<ChainPhase>('idle');
   const [logs, setLogs] = useState<ChainLog[]>([]);
   const [lastAdvice, setLastAdvice] = useState('');
@@ -58,7 +65,7 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
 
   const addLog = useCallback((msg: string, type: ChainLog['type'] = 'info') => {
     const time = new Date().toLocaleTimeString('zh-HK', { hour12: false });
-    setLogs((prev) => [...prev.slice(-40), { time, msg, type }]);
+    setLogs((prev) => [...prev.slice(-50), { time, msg, type }]);
   }, []);
 
   const getCharDesc = (charName: string): string => {
@@ -77,9 +84,16 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
       .join(', ');
   };
 
-  const updateSceneAt = (index: number, patch: Partial<Scene>) => {
-    const next = scenes.map((s, i) => (i === index ? { ...s, ...patch } : s));
+  /** Replace entire scenes array (used when appending new on-the-fly scenes) */
+  const setScenes = (next: Scene[]) => {
     onUpdateScenes(next);
+  };
+
+  const updateSceneAt = (index: number, patch: Partial<Scene>, base?: Scene[]) => {
+    const list = base || scenes;
+    const next = list.map((s, i) => (i === index ? { ...s, ...patch } : s));
+    onUpdateScenes(next);
+    return next;
   };
 
   /** Poll /api/status until video task completes */
@@ -102,10 +116,154 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
     throw new Error('影片生成逾時（超過 8 分鐘）');
   };
 
+  /**
+   * 即時生成下一個分鏡描述（對照故事 + 已完成鏡頭進度）
+   * 不依賴預先拆好的 scenes
+   */
+  const generateNextSceneOnTheFly = async (
+    shotIndex: number,
+    prevScene: Scene | null,
+    advice: string
+  ): Promise<Scene> => {
+    setPhase('gen_scene');
+    addLog(`鏡頭 ${shotIndex + 1}：AI 即時對照故事撰寫分鏡…`, 'info');
+
+    const charSummary = characters
+      .map((c) => `${c.name}(${c.gender || '?'}: ${(c.description || '').slice(0, 80)})`)
+      .join(' | ');
+
+    const body = {
+      novelText: novelText.slice(0, 12000),
+      shotIndex,
+      previousScene: prevScene
+        ? {
+            title: prevScene.title,
+            character: prevScene.character,
+            visualPrompt: prevScene.visualPrompt,
+            actionPrompt: prevScene.actionPrompt,
+            dialogue: prevScene.dialogue,
+            narration: prevScene.narration,
+          }
+        : null,
+      continuityAdvice: advice || '',
+      characters: characters.map((c) => ({
+        name: c.name,
+        gender: c.gender,
+        description: c.description,
+        clothing: c.clothing,
+      })),
+      artStyle: artStyle || project.artStyle,
+      cameraMotion: cameraMotion || project.cameraMotion,
+      mode: 'on_the_fly_chain',
+    };
+
+    try {
+      // Prefer dedicated endpoint if server supports it
+      const data = await apiJson<any>(
+        '/api/workflow/generate-next-scene',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        { timeoutMs: 90000, retries: 1, label: 'GenNextScene' }
+      );
+
+      if (data?.scene || data?.title || data?.visualPrompt) {
+        const s = data.scene || data;
+        const scene: Scene = {
+          ...DEFAULT_SCENE,
+          id: uid(),
+          title: s.title || `鏡頭 ${shotIndex + 1}`,
+          dialogue: s.dialogue || '',
+          narration: s.narration || '',
+          character: s.character || (characters[0]?.name || ''),
+          visualPrompt: s.visualPrompt || s.prompt || '',
+          actionPrompt: s.actionPrompt || s.motion || '',
+          transitionPrompt: s.transitionPrompt || '',
+          negativePrompt: s.negativePrompt || '',
+          directorNotes: s.directorNotes || advice || '',
+          durationSeconds: s.durationSeconds || 8,
+          step1PrevShotAdvice: advice || '',
+        };
+        addLog(`鏡頭 ${shotIndex + 1} 分鏡完成：${scene.title}`, 'ok');
+        return scene;
+      }
+    } catch (e: any) {
+      addLog(`專用分鏡 API 不可用，改用通用拆解：${e?.message || e}`, 'warn');
+    }
+
+    // Fallback: use a lightweight prompt to the existing chat / split style endpoint
+    try {
+      const fallbackBody = {
+        novelText: novelText.slice(0, 8000),
+        instruction: `你是電影分鏡導演。故事進度：已完成 ${shotIndex} 個鏡頭。\n請只產出「下一個鏡頭」（第 ${shotIndex + 1} 鏡）的 JSON，格式：\n{"title":"...","character":"角色名","visualPrompt":"英文畫面描述","actionPrompt":"英文動作/運鏡","dialogue":"對白或空","narration":"旁白或空","durationSeconds":8}\n要求：對照原文推進劇情，保持角色一致，畫面可拍。連續性建議：${advice || '開場建立氛圍'}\n角色資料：${charSummary}`,
+        mode: 'single_shot',
+      };
+
+      const data2 = await apiJson<any>(
+        '/api/workflow/generate-step2-prompt',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...fallbackBody,
+            scene: {
+              title: `鏡頭 ${shotIndex + 1}`,
+              visualPrompt: '',
+              character: characters[0]?.name || '',
+            },
+            novelText: novelText.slice(0, 6000),
+            continuityAdvice: advice,
+          }),
+        },
+        { timeoutMs: 90000, retries: 1, label: 'GenSceneFallback' }
+      );
+
+      const visual =
+        data2?.optimizedPrompt ||
+        data2?.visualPrompt ||
+        data2?.prompt ||
+        `Cinematic shot from the story. ${novelText.slice(0, 200)}`;
+
+      const scene: Scene = {
+        ...DEFAULT_SCENE,
+        id: uid(),
+        title: data2?.title || `鏡頭 ${shotIndex + 1}`,
+        dialogue: data2?.dialogue || '',
+        narration: data2?.narration || '',
+        character: data2?.character || characters[0]?.name || '',
+        visualPrompt: visual,
+        actionPrompt: data2?.actionPrompt || data2?.motion || 'subtle cinematic camera movement',
+        negativePrompt: data2?.optimizedNegative || data2?.negativePrompt || '',
+        durationSeconds: 8,
+        step1PrevShotAdvice: advice || '',
+      };
+      addLog(`鏡頭 ${shotIndex + 1} 分鏡（fallback）完成`, 'ok');
+      return scene;
+    } catch (e2: any) {
+      // Last resort: minimal scene from novel snippet
+      addLog(`分鏡生成降級為最小模板：${e2?.message || e2}`, 'warn');
+      const snippet = novelText.slice(shotIndex * 300, shotIndex * 300 + 400) || novelText.slice(0, 400);
+      return {
+        ...DEFAULT_SCENE,
+        id: uid(),
+        title: `鏡頭 ${shotIndex + 1}`,
+        dialogue: '',
+        narration: '',
+        character: characters[0]?.name || '',
+        visualPrompt: `Anime key visual, cinematic. ${snippet}. High quality, consistent character design.`,
+        actionPrompt: 'slow cinematic camera move, atmospheric',
+        durationSeconds: 8,
+        step1PrevShotAdvice: advice || '',
+      };
+    }
+  };
+
   /** Generate start-frame image for a scene */
-  const generateImageForScene = async (scene: Scene, index: number): Promise<string> => {
+  const generateImageForScene = async (scene: Scene, index: number, list: Scene[]): Promise<{ url: string; list: Scene[] }> => {
     setPhase('gen_image');
-    updateSceneAt(index, { isGeneratingImage: true });
+    let nextList = updateSceneAt(index, { isGeneratingImage: true }, list);
     addLog(`鏡頭 ${index + 1}：正在生成首幀…`, 'info');
 
     const charDesc = getCharDesc(scene.character);
@@ -130,19 +288,20 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
     );
 
     if (!data?.imageUrl) throw new Error(data?.error || '首幀生成失敗');
-    updateSceneAt(index, { imageUrl: data.imageUrl, isGeneratingImage: false });
+    nextList = updateSceneAt(index, { imageUrl: data.imageUrl, isGeneratingImage: false }, nextList);
     addLog(`鏡頭 ${index + 1}：首幀完成 ✓`, 'ok');
-    return data.imageUrl;
+    return { url: data.imageUrl, list: nextList };
   };
 
-  /** Generate video for a scene (optionally with start frame / extend from prev video) */
+  /** Generate video for a scene */
   const generateVideoForScene = async (
     scene: Scene,
     index: number,
+    list: Scene[],
     opts: { imageUrl?: string; extendFromVideoUrl?: string; advice?: string }
-  ): Promise<string> => {
+  ): Promise<{ url: string; list: Scene[] }> => {
     setPhase('gen_video');
-    updateSceneAt(index, { isGeneratingVideo: true, videoProgress: '1%' });
+    let nextList = updateSceneAt(index, { isGeneratingVideo: true, videoProgress: '1%' }, list);
     addLog(`鏡頭 ${index + 1}：正在生成影片…`, 'info');
 
     const charDesc = getCharDesc(scene.character);
@@ -169,10 +328,9 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
       sceneType: 'chain',
     };
 
-    // Prefer extendFromVideoUrl so server extracts last frame itself
     if (opts.extendFromVideoUrl) {
       body.extendFromVideoUrl = opts.extendFromVideoUrl;
-      addLog(`鏡頭 ${index + 1}：使用上一支影片尾幀作為本鏡頭首幀（伺服器自動抽取）`, 'info');
+      addLog(`鏡頭 ${index + 1}：使用上一支影片尾幀作為本鏡頭首幀`, 'info');
     }
 
     await apiJson(
@@ -186,18 +344,22 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
     );
 
     const videoUrl = await waitForVideoTask();
-    updateSceneAt(index, {
-      videoUrl,
-      isGeneratingVideo: false,
-      videoProgress: '100%',
-      step6Passed: true,
-    });
+    nextList = updateSceneAt(
+      index,
+      {
+        videoUrl,
+        isGeneratingVideo: false,
+        videoProgress: '100%',
+        step6Passed: true,
+      },
+      nextList
+    );
     addLog(`鏡頭 ${index + 1}：影片完成 ✓`, 'ok');
-    return videoUrl;
+    return { url: videoUrl, list: nextList };
   };
 
   /** Ask AI for next-shot continuity advice */
-  const generateAdvice = async (current: Scene, next?: Scene): Promise<string> => {
+  const generateAdvice = async (current: Scene): Promise<string> => {
     setPhase('gen_advice');
     addLog('AI 正在撰寫下一鏡頭連續性建議…', 'info');
     try {
@@ -206,85 +368,81 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ currentScene: current, nextScene: next }),
+          body: JSON.stringify({
+            currentScene: current,
+            novelText: novelText.slice(0, 4000),
+            mode: 'on_the_fly',
+          }),
         },
         { timeoutMs: 60000, retries: 1, label: 'Advice' }
       );
       const advice =
         data?.advice ||
-        '保持角色服裝、光影方向與空間位置一致，鏡頭運動自然銜接。';
+        '保持角色服裝、光影方向與空間位置一致，鏡頭運動自然銜接，推進下一劇情節點。';
       setLastAdvice(advice);
-      if (current.id) {
-        const idx = scenes.findIndex((s) => s.id === current.id);
-        if (idx >= 0) updateSceneAt(idx, { step7AdviceForNext: advice });
-      }
       addLog('下一鏡頭建議已就緒', 'ok');
       return advice;
     } catch (e: any) {
-      const fallback = '保持角色服裝與光影一致，動作自然延續。';
+      const fallback = '保持角色服裝與光影一致，動作自然延續，推進故事。';
       setLastAdvice(fallback);
       addLog(`建議生成略過，使用預設連續性指引`, 'warn');
       return fallback;
     }
   };
 
-  /** START: first shot image + video + advice */
+  /** START: 即時生成鏡頭 1（分鏡 → 首幀 → 影片 → 建議） */
   const handleStart = async () => {
-    if (!scenes.length) {
-      setErrorMsg('請先在「AI 分鏡劇本」拆解出至少一個鏡頭');
+    if (!novelText) {
+      setErrorMsg('請先在「原著小說」頁貼上故事內容，再回來開始即時自動導演');
       return;
     }
     abortRef.current = false;
     setErrorMsg('');
     setLogs([]);
-    setCurrentIndex(0);
     setExtractedFrameUrl(null);
 
     try {
-      const scene0 = scenes[0];
-      addLog('🚀 開始連續生成 — 鏡頭 1', 'info');
+      addLog('🚀 即時自動導演啟動 — 鏡頭 1', 'info');
 
-      // 1) Image
-      let imageUrl = scene0.imageUrl;
-      if (!imageUrl) {
-        imageUrl = await generateImageForScene(scene0, 0);
-      } else {
-        addLog('鏡頭 1：已有首幀，跳過繪圖', 'info');
-      }
+      // 1) On-the-fly scene
+      const scene0 = await generateNextSceneOnTheFly(0, null, '');
+      let list = [scene0];
+      setScenes(list);
+      setCurrentIndex(0);
 
-      // 2) Video
-      let videoUrl = scene0.videoUrl;
-      if (!videoUrl) {
-        videoUrl = await generateVideoForScene(scenes[0], 0, { imageUrl });
-      } else {
-        addLog('鏡頭 1：已有影片，跳過生成', 'info');
-      }
+      // 2) Image
+      const img = await generateImageForScene(scene0, 0, list);
+      list = img.list;
 
-      // 3) Advice for shot 2
-      const advice = await generateAdvice(scenes[0], scenes[1]);
-      setLastAdvice(advice);
+      // 3) Video
+      const vid = await generateVideoForScene(list[0], 0, list, { imageUrl: img.url });
+      list = vid.list;
 
-      if (scenes.length <= 1) {
-        setPhase('done');
-        addLog('全部鏡頭完成（只有 1 個鏡頭）', 'ok');
-      } else {
-        setPhase('waiting_continue');
-        addLog('✅ 鏡頭 1 完成。請按「接下去」繼續鏡頭 2', 'ok');
-      }
+      // 4) Advice
+      const advice = await generateAdvice(list[0]);
+      list = updateSceneAt(0, { step7AdviceForNext: advice }, list);
+
+      setPhase('waiting_continue');
+      addLog('✅ 鏡頭 1 完成。按「接下去」即時生成鏡頭 2', 'ok');
     } catch (e: any) {
       setPhase('error');
       setErrorMsg(e?.message || String(e));
       addLog(`錯誤：${e?.message || e}`, 'err');
-      updateSceneAt(0, { isGeneratingImage: false, isGeneratingVideo: false });
     }
   };
 
-  /** CONTINUE: extract last frame → next video → advice */
+  /** CONTINUE: 抽尾幀 → 即時分鏡 → 圖/片 → 建議 */
   const handleContinue = async () => {
-    const nextIndex = currentIndex + 1;
-    if (nextIndex >= scenes.length) {
-      setPhase('done');
-      addLog('所有鏡頭已完成！', 'ok');
+    const prevIndex = currentIndex;
+    const nextIndex = prevIndex + 1;
+    const prev = scenes[prevIndex];
+
+    if (!prev?.videoUrl) {
+      setErrorMsg('上一鏡頭沒有影片，無法接續');
+      return;
+    }
+    if (!novelText) {
+      setErrorMsg('缺少原著小說內容');
       return;
     }
 
@@ -292,54 +450,61 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
     setErrorMsg('');
 
     try {
-      const prev = scenes[currentIndex];
-      const curr = scenes[nextIndex];
-      if (!prev?.videoUrl) throw new Error('上一鏡頭沒有影片，無法抽取尾幀');
+      addLog(`── 即時接續鏡頭 ${nextIndex + 1} ──`, 'info');
 
-      addLog(`── 接續鏡頭 ${nextIndex + 1} ──`, 'info');
-
-      // A) Extract last frame (client or server)
+      // A) Extract last frame
       setPhase('extract_frame');
-      addLog(`從鏡頭 ${currentIndex + 1} 影片抽取最後一幀…`, 'info');
-      let startFrame = extractedFrameUrl;
+      addLog(`從鏡頭 ${prevIndex + 1} 影片抽取最後一幀…`, 'info');
+      let startFrame: string | undefined;
       try {
         startFrame = await extractLastFrameFromVideo(prev.videoUrl);
         setExtractedFrameUrl(startFrame);
-        updateSceneAt(nextIndex, { imageUrl: startFrame });
-        addLog(`尾幀抽取成功，已設為鏡頭 ${nextIndex + 1} 首幀`, 'ok');
+        addLog('尾幀抽取成功', 'ok');
       } catch (ex: any) {
-        addLog(`尾幀抽取失敗，改由伺服器 extendFromVideoUrl 處理：${ex?.message}`, 'warn');
-        startFrame = undefined as any;
+        addLog(`尾幀抽取失敗，改由伺服器 extend 處理：${ex?.message}`, 'warn');
+        startFrame = undefined;
       }
 
-      // B) Generate video for next scene
+      // B) On-the-fly next scene
       const advice = lastAdvice || prev.step7AdviceForNext || '';
-      await generateVideoForScene(curr, nextIndex, {
-        imageUrl: startFrame || curr.imageUrl,
+      const newScene = await generateNextSceneOnTheFly(nextIndex, prev, advice);
+      if (startFrame) {
+        newScene.imageUrl = startFrame;
+      }
+
+      let list = [...scenes, newScene];
+      setScenes(list);
+      setCurrentIndex(nextIndex);
+
+      // C) Image (skip if we already have extracted frame as start)
+      if (!startFrame) {
+        const img = await generateImageForScene(newScene, nextIndex, list);
+        list = img.list;
+        startFrame = img.url;
+      } else {
+        addLog(`鏡頭 ${nextIndex + 1}：使用上一鏡尾幀作為首幀，跳過重新繪圖`, 'info');
+      }
+
+      // D) Video
+      const vid = await generateVideoForScene(list[nextIndex], nextIndex, list, {
+        imageUrl: startFrame,
         extendFromVideoUrl: startFrame ? undefined : prev.videoUrl,
         advice,
       });
+      list = vid.list;
 
-      // C) Advice for the following shot
-      const nextNext = scenes[nextIndex + 1];
-      const newAdvice = await generateAdvice(scenes[nextIndex], nextNext);
+      // E) Advice for following shot
+      const newAdvice = await generateAdvice(list[nextIndex]);
+      list = updateSceneAt(nextIndex, { step7AdviceForNext: newAdvice }, list);
       setLastAdvice(newAdvice);
-
-      setCurrentIndex(nextIndex);
       setExtractedFrameUrl(null);
 
-      if (nextIndex + 1 >= scenes.length) {
-        setPhase('done');
-        addLog('🎉 全部鏡頭連續生成完成！', 'ok');
-      } else {
-        setPhase('waiting_continue');
-        addLog(`✅ 鏡頭 ${nextIndex + 1} 完成。按「接下去」繼續鏡頭 ${nextIndex + 2}`, 'ok');
-      }
+      setPhase('waiting_continue');
+      addLog(`✅ 鏡頭 ${nextIndex + 1} 完成。可繼續按「接下去」生成鏡頭 ${nextIndex + 2}`, 'ok');
     } catch (e: any) {
       setPhase('error');
       setErrorMsg(e?.message || String(e));
       addLog(`錯誤：${e?.message || e}`, 'err');
-      updateSceneAt(currentIndex + 1, { isGeneratingVideo: false });
     }
   };
 
@@ -353,25 +518,33 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
     setLogs([]);
   };
 
-  const isBusy = ['gen_image', 'gen_video', 'gen_advice', 'extract_frame'].includes(phase);
-  const canStart = phase === 'idle' || phase === 'error' || phase === 'done';
-  const canContinue = phase === 'waiting_continue' && currentIndex + 1 < scenes.length;
+  const isBusy = ['gen_scene', 'gen_image', 'gen_video', 'gen_advice', 'extract_frame'].includes(phase);
+  const canStart = (phase === 'idle' || phase === 'error' || phase === 'done') && !!novelText;
+  const canContinue = phase === 'waiting_continue' && !!scenes[currentIndex]?.videoUrl;
 
   return (
     <div className="flex flex-col gap-4 p-4 max-w-4xl mx-auto">
       {/* Header */}
-      <div className="rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-950/80 to-slate-900/80 p-5">
-        <h2 className="text-lg font-bold text-indigo-200 flex items-center gap-2">
+      <div className="rounded-xl border border-violet-500/30 bg-gradient-to-br from-violet-950/80 to-slate-900/80 p-5">
+        <h2 className="text-lg font-bold text-violet-200 flex items-center gap-2">
           <Film className="w-5 h-5" />
-          一鏡接一鏡 · 連續生成模式
+          一鏡接一鏡 · 即時自動導演
         </h2>
         <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-          按「開始」後，AI 會自動生成<strong className="text-indigo-300">第一個鏡頭的首幀 + 影片</strong>，並給出下一鏡頭建議。
-          再按「接下去」時，系統會<strong className="text-emerald-300">從上一支影片抽出最後一幀</strong>作為本鏡頭首幀，結合建議與故事內容生成下一支影片，如此類推，確保畫面真正連續。
+          <strong className="text-violet-300">唔需要事先拆分鏡。</strong>
+          按「開始」後，AI 會即時對照原著故事生成第 1 個鏡頭（分鏡 + 首幀 + 影片）。
+          再按「接下去」時，系統從上一支影片抽出最後一幀，結合故事進度即時生成下一鏡頭，如此類推。
         </p>
       </div>
 
-      {/* Progress */}
+      {/* Novel status */}
+      {!novelText && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-950/40 p-3 text-sm text-amber-200">
+          請先到「原著小說」頁貼上故事內容，再回來使用即時自動導演。
+        </div>
+      )}
+
+      {/* Progress chips */}
       <div className="flex items-center gap-2 flex-wrap">
         {scenes.map((s, i) => {
           const done = !!(s.videoUrl);
@@ -383,7 +556,7 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
                 done
                   ? 'bg-emerald-900/40 border-emerald-500/50 text-emerald-300'
                   : active
-                    ? 'bg-indigo-900/50 border-indigo-400 text-indigo-200 animate-pulse'
+                    ? 'bg-violet-900/50 border-violet-400 text-violet-200 animate-pulse'
                     : 'bg-slate-800/50 border-slate-600 text-slate-500'
               }`}
             >
@@ -391,8 +564,8 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
             </div>
           );
         })}
-        {!scenes.length && (
-          <span className="text-xs text-amber-400">尚未有分鏡，請先到「AI 分鏡劇本」拆解故事</span>
+        {scenes.length === 0 && phase === 'idle' && novelText && (
+          <span className="text-xs text-slate-500">尚未開始 — 按「開始」即時生成鏡頭 1</span>
         )}
       </div>
 
@@ -400,8 +573,8 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
       <div className="flex flex-wrap gap-3">
         <button
           onClick={handleStart}
-          disabled={!canStart || !scenes.length || isBusy}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-lg shadow-indigo-900/40 transition"
+          disabled={!canStart || isBusy}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-sm bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white shadow-lg shadow-violet-900/40 transition"
         >
           {isBusy && phase !== 'waiting_continue' ? (
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -429,7 +602,7 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
         </button>
       </div>
 
-      {/* Advice card */}
+      {/* Advice */}
       {lastAdvice && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-950/30 p-4">
           <div className="flex items-center gap-2 text-amber-300 text-xs font-bold mb-1">
@@ -448,9 +621,9 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
         </div>
       )}
 
-      {/* Current / recent previews */}
+      {/* Previews */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {scenes.slice(0, currentIndex + 1).map((s, i) => (
+        {scenes.map((s, i) => (
           <div key={s.id || i} className="rounded-xl border border-slate-700 bg-slate-900/60 overflow-hidden">
             <div className="px-3 py-2 border-b border-slate-700 flex items-center justify-between">
               <span className="text-xs font-mono text-slate-300">
@@ -459,7 +632,7 @@ export const SequentialChainMode: React.FC<SequentialChainModeProps> = ({
               {s.videoUrl ? (
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
               ) : s.isGeneratingVideo || s.isGeneratingImage ? (
-                <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 text-violet-400 animate-spin" />
               ) : null}
             </div>
             {s.videoUrl ? (
