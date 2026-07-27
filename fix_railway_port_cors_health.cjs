@@ -1,10 +1,8 @@
 /**
  * fix_railway_port_cors_health.cjs
  *
- * Railway 部署必須：
- * 1. listen(process.env.PORT || 3000)
- * 2. CORS 允許所有來源（或至少前端 domain）
- * 3. /api/health 供健康檢查與前端探測
+ * 根因：Railway 將流量導去 process.env.PORT，
+ * 若 app 寫死 listen(3000) → Application failed to respond
  */
 const fs = require('fs');
 const path = require('path');
@@ -18,30 +16,55 @@ if (!fs.existsSync(serverPath)) {
 let src = fs.readFileSync(serverPath, 'utf8');
 let changes = 0;
 
-if (src.includes('RAILWAY_PORT_CORS_HEALTH_V1')) {
-  console.log('[railway-fix] already applied');
-  process.exit(0);
-}
-
-// 1) PORT
+// Always re-apply PORT (idempotent)
 if (src.includes('const PORT = 3000')) {
   src = src.replace(
-    'const PORT = 3000',
-    'const PORT = Number(process.env.PORT) || 3000 // RAILWAY_PORT_CORS_HEALTH_V1'
+    /const PORT = 3000;?/,
+    "const PORT = Number(process.env.PORT) || 3000; // RAILWAY_PORT_V2"
   );
   changes++;
-  console.log('[railway-fix] PORT uses process.env.PORT');
+  console.log('[railway-fix] PORT -> process.env.PORT');
+} else if (!src.includes('process.env.PORT')) {
+  // try other patterns
+  src = src.replace(
+    /const PORT\s*=\s*[^;\n]+/,
+    "const PORT = Number(process.env.PORT) || 3000 // RAILWAY_PORT_V2"
+  );
+  changes++;
 }
 
-// 2) CORS + health right after const app = express();
-if (!src.includes("Access-Control-Allow-Origin") || !src.includes('/api/health')) {
+// Force listen on 0.0.0.0 with clear log
+if (src.includes('app.listen(PORT')) {
+  const listenRe = /app\.listen\(\s*PORT\s*,\s*["']0\.0\.0\.0["']\s*,\s*\(\)\s*=>\s*\{[^}]*\}\s*\)/;
+  if (listenRe.test(src)) {
+    src = src.replace(
+      listenRe,
+      `app.listen(PORT, "0.0.0.0", () => {
+    console.log("[Toonflow] Listening on 0.0.0.0:" + PORT + " (Railway PORT=" + (process.env.PORT || "unset") + ")");
+  })`
+    );
+    changes++;
+    console.log('[railway-fix] listen log strengthened');
+  } else if (src.includes('app.listen(PORT)')) {
+    src = src.replace(
+      /app\.listen\(\s*PORT\s*\)/,
+      `app.listen(PORT, "0.0.0.0", () => {
+    console.log("[Toonflow] Listening on 0.0.0.0:" + PORT);
+  })`
+    );
+    changes++;
+  }
+}
+
+// CORS + health after const app = express();
+if (!src.includes("/api/health")) {
   const marker = 'const app = express();';
   const idx = src.indexOf(marker);
   if (idx !== -1) {
     const insert = `
 const app = express();
 
-// RAILWAY_PORT_CORS_HEALTH_V1 — CORS
+// RAILWAY_PORT_V2 — CORS
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
@@ -50,14 +73,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check (Railway / frontend probe)
+// Health check for Railway
 app.get('/api/health', (_req, res) => {
-  res.json({
+  res.status(200).json({
     status: 'ok',
     time: new Date().toISOString(),
     uptime: process.uptime(),
     port: Number(process.env.PORT) || 3000,
-    hasAgnesKey: !!(process.env.AGNES_API_KEY && !String(process.env.AGNES_API_KEY).includes('MY_AGNES')),
     message: 'Toonflow server is alive',
   });
 });
@@ -68,10 +90,5 @@ app.get('/api/health', (_req, res) => {
   }
 }
 
-if (!src.includes('RAILWAY_PORT_CORS_HEALTH_V1')) {
-  src = '// RAILWAY_PORT_CORS_HEALTH_V1\n' + src;
-  changes++;
-}
-
 fs.writeFileSync(serverPath, src, 'utf8');
-console.log('[railway-fix] server.ts written, changes:', changes);
+console.log('[railway-fix] done, changes:', changes);
