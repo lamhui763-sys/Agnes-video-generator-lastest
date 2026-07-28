@@ -18,8 +18,8 @@ RUN npm install
 # Copy rest of the application files
 COPY . .
 
-# CACHE BUST 2026-07-28T11:20 — nuclear local projects (no coalesced Firestore)
-ARG CACHE_BUST=nuclear-local-projects-20260728-1120
+# CACHE BUST 2026-07-28T11:25 — jsx-cleanup restore scenes_ext )} closer
+ARG CACHE_BUST=jsx-restore-closer-20260728-1125
 ENV CACHE_BUST=${CACHE_BUST}
 
 # Build the application (prebuild patches)
