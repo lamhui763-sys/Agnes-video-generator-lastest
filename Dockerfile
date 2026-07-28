@@ -18,8 +18,8 @@ RUN npm install
 # Copy rest of the application files
 COPY . .
 
-# CACHE BUST 2026-07-28T10:40 — jsx cleanup + safe restore/continue scripts
-ARG CACHE_BUST=jsx-cleanup-safe-chain-20260728-1040
+# CACHE BUST 2026-07-28T10:41 — no clean-v3, jsx cleanup last
+ARG CACHE_BUST=no-cleanv3-jsx-20260728-1041
 ENV CACHE_BUST=${CACHE_BUST}
 
 # Build the application (prebuild patches)
