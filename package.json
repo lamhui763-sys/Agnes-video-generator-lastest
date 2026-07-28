@@ -5,13 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "prebuild": "node fix_railway_port_cors_health.cjs || true; node fix_no_firebase_crash.cjs || true; node fix_remove_login.cjs || true; node fix_clean_chain_tab_v3.cjs || true; node fix_hard_cut_transition.cjs || true",
+    "prebuild": "node fix_railway_port_cors_health.cjs || true; node fix_no_firebase_crash.cjs || true; node fix_remove_login.cjs || true; node fix_chain_restore_point1.cjs || true; node fix_clean_chain_tab_v3.cjs || true; node fix_hard_cut_transition.cjs || true",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "wire": "node fix_wire_chain_and_hardcut.cjs",
-    "fix-all": "node fix_railway_port_cors_health.cjs || true; node fix_no_firebase_crash.cjs || true; node fix_remove_login.cjs || true; node fix_hard_cut_transition.cjs || true; node fix_clean_chain_tab_v3.cjs || true"
+    "fix-all": "node fix_railway_port_cors_health.cjs || true; node fix_no_firebase_crash.cjs || true; node fix_remove_login.cjs || true; node fix_chain_restore_point1.cjs || true; node fix_hard_cut_transition.cjs || true; node fix_clean_chain_tab_v3.cjs || true"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
