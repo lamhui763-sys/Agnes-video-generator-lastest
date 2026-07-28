@@ -18,11 +18,11 @@ RUN npm install
 # Copy rest of the application files
 COPY . .
 
-# CACHE BUST 2026-07-28T00:13 — no-login + no Firestore doc() crash
-ARG CACHE_BUST=no-login-no-firebase-c84f23be
+# CACHE BUST 2026-07-28T08:55 — EXT_ONTHEFLY_START_V1 0-scene Start button
+ARG CACHE_BUST=ext-onthefly-start-8d3f3469
 ENV CACHE_BUST=${CACHE_BUST}
 
-# Build the application (prebuild patches server + AuthWrapper)
+# Build the application (prebuild patches server + AuthWrapper + chain)
 RUN npm run build
 
 # Safety: fail if login UI text still in frontend bundle
