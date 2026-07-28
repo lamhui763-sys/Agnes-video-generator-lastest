@@ -18,11 +18,11 @@ RUN npm install
 # Copy rest of the application files
 COPY . .
 
-# CACHE BUST 2026-07-28T08:55 — EXT_ONTHEFLY_START_V1 0-scene Start button
-ARG CACHE_BUST=ext-onthefly-start-8d3f3469
+# CACHE BUST 2026-07-28T09:20 — EXT_V2 always-mounted + continue recover
+ARG CACHE_BUST=ext-v2-continue-967d34a0
 ENV CACHE_BUST=${CACHE_BUST}
 
-# Build the application (prebuild patches server + AuthWrapper + chain)
+# Build the application (prebuild patches)
 RUN npm run build
 
 # Safety: fail if login UI text still in frontend bundle
