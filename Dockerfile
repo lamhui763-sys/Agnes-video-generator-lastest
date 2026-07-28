@@ -18,8 +18,8 @@ RUN npm install
 # Copy rest of the application files
 COPY . .
 
-# CACHE BUST 2026-07-28T09:20 — EXT_V2 always-mounted + continue recover
-ARG CACHE_BUST=ext-v2-continue-967d34a0
+# CACHE BUST 2026-07-28T10:28 — kill Firestore coalesced save + always show 接下去
+ARG CACHE_BUST=kill-fs-continue-20260728-1028
 ENV CACHE_BUST=${CACHE_BUST}
 
 # Build the application (prebuild patches)
